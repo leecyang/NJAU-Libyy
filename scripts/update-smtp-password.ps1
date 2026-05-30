@@ -15,7 +15,12 @@ function Read-PlainSecret {
   }
 }
 
-$smtpPassword = Read-PlainSecret "SMTP_PASSWORD (Alibaba enterprise email third-party client security password)"
+function Normalize-Secret {
+  param([Parameter(Mandatory = $true)][string]$Value)
+  return $Value.Trim().TrimStart([char]0xFEFF)
+}
+
+$smtpPassword = Normalize-Secret (Read-PlainSecret "SMTP_PASSWORD (Alibaba enterprise email third-party client security password)")
 
 try {
   foreach ($environment in @("staging", "production")) {

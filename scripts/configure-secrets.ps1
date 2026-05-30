@@ -15,6 +15,11 @@ function Read-PlainSecret {
   }
 }
 
+function Normalize-Secret {
+  param([Parameter(Mandatory = $true)][string]$Value)
+  return $Value.Trim().TrimStart([char]0xFEFF)
+}
+
 function Set-EnvironmentSecret {
   param(
     [Parameter(Mandatory = $true)][string]$Name,
@@ -26,9 +31,9 @@ function Set-EnvironmentSecret {
   }
 }
 
-$libyyAppSecret = Read-PlainSecret "LIBYY_APP_SECRET"
-$smtpPassword = Read-PlainSecret "SMTP_PASSWORD"
-$cloudflareApiToken = Read-PlainSecret "CLOUDFLARE_API_TOKEN"
+$libyyAppSecret = Normalize-Secret (Read-PlainSecret "LIBYY_APP_SECRET")
+$smtpPassword = Normalize-Secret (Read-PlainSecret "SMTP_PASSWORD")
+$cloudflareApiToken = Normalize-Secret (Read-PlainSecret "CLOUDFLARE_API_TOKEN")
 
 try {
   Set-EnvironmentSecret -Name "LIBYY_APP_SECRET" -Value $libyyAppSecret
@@ -38,4 +43,3 @@ try {
 } finally {
   Remove-Variable libyyAppSecret, smtpPassword, cloudflareApiToken -ErrorAction SilentlyContinue
 }
-
