@@ -4,21 +4,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Read-PlainSecret {
-  param([Parameter(Mandatory = $true)][string]$Prompt)
-  $secure = Read-Host -Prompt $Prompt -AsSecureString
-  $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-  try {
-    return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
-  } finally {
-    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
-  }
-}
-
-function Normalize-Secret {
-  param([Parameter(Mandatory = $true)][string]$Value)
-  return $Value.Trim().TrimStart([char]0xFEFF)
-}
+. (Join-Path $PSScriptRoot "_secret-upload-utils.ps1")
 
 function Set-EnvironmentSecret {
   param(
@@ -26,8 +12,8 @@ function Set-EnvironmentSecret {
     [Parameter(Mandatory = $true)][string]$Value
   )
   foreach ($environment in @("staging", "production")) {
-    $Value | gh secret set $Name --env $environment --repo $Repository
-    $Value | npx wrangler secret put $Name --env $environment
+    Set-GitHubSecret -Repository $Repository -Environment $environment -Name $Name -Value $Value
+    Set-WranglerSecret -Environment $environment -Name $Name -Value $Value
   }
 }
 
@@ -38,7 +24,7 @@ $cloudflareApiToken = Normalize-Secret (Read-PlainSecret "CLOUDFLARE_API_TOKEN")
 try {
   Set-EnvironmentSecret -Name "LIBYY_APP_SECRET" -Value $libyyAppSecret
   Set-EnvironmentSecret -Name "SMTP_PASSWORD" -Value $smtpPassword
-  $cloudflareApiToken | gh secret set CLOUDFLARE_API_TOKEN --repo $Repository
+  Set-GitHubSecret -Repository $Repository -Name "CLOUDFLARE_API_TOKEN" -Value $cloudflareApiToken
   Write-Host "Secrets uploaded without echoing their values."
 } finally {
   Remove-Variable libyyAppSecret, smtpPassword, cloudflareApiToken -ErrorAction SilentlyContinue
