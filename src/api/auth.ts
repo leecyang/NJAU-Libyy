@@ -39,7 +39,7 @@ async function sendCode(env: AppEnv, purpose: "REGISTER" | "RESET_PASSWORD", ema
   return ok(flag(env, "DEV_EXPOSE_VERIFICATION_CODES") ? { queued: true, devCode: code } : { queued: true });
 }
 
-async function consumeCode(env: AppEnv, email: string, purpose: string, code: string): Promise<void> {
+async function findCode(env: AppEnv, email: string, purpose: string, code: string): Promise<{ id: string }> {
   const record = await env.DB.prepare(
     `SELECT id FROM email_verification_codes
       WHERE email = ? AND purpose = ? AND code_hash = ?
@@ -47,9 +47,12 @@ async function consumeCode(env: AppEnv, email: string, purpose: string, code: st
       ORDER BY created_at DESC LIMIT 1`,
   ).bind(email, purpose, await codeHash(env, email, purpose, code), Date.now()).first<{ id: string }>();
   if (!record) throw new HttpError(400, "INVALID_CODE", "验证码错误或已过期");
-  await env.DB.prepare("UPDATE email_verification_codes SET used_at = ? WHERE id = ? AND used_at IS NULL")
-    .bind(Date.now(), record.id)
-    .run();
+  return record;
+}
+
+function consumeCode(env: AppEnv, id: string, usedAt: number): D1PreparedStatement {
+  return env.DB.prepare("UPDATE email_verification_codes SET used_at = ? WHERE id = ? AND used_at IS NULL")
+    .bind(usedAt, id);
 }
 
 export async function sendRegisterCode(env: AppEnv, request: Request): Promise<Response> {
@@ -72,16 +75,22 @@ export async function register(env: AppEnv, request: Request): Promise<Response>
   const password = requireString(body.password, "password", 128);
   assertAllowedEmail(email, env.ALLOWED_EMAIL_DOMAINS);
   assertPassword(password);
-  await consumeCode(env, email, "REGISTER", code);
+  const verificationCode = await findCode(env, email, "REGISTER", code);
   const now = Date.now();
   const userId = crypto.randomUUID();
+  const passwordHash = await hashPassword(password, env.PASSWORD_HASH_SECRET);
   try {
-    await env.DB.prepare(
-      `INSERT INTO users (id, email, email_verified_at, password_hash, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?)`,
-    ).bind(userId, email, now, await hashPassword(password, env.PASSWORD_HASH_SECRET), now, now).run();
-  } catch {
-    throw new HttpError(409, "EMAIL_ALREADY_REGISTERED", "该邮箱已注册");
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO users (id, email, email_verified_at, password_hash, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).bind(userId, email, now, passwordHash, now, now),
+      consumeCode(env, verificationCode.id, now),
+    ]);
+  } catch (error) {
+    const existing = await env.DB.prepare("SELECT id FROM users WHERE email = ?").bind(email).first();
+    if (existing) throw new HttpError(409, "EMAIL_ALREADY_REGISTERED", "该邮箱已注册");
+    throw error;
   }
   await audit(env.DB, { actorUserId: userId, actorType: "USER", action: "ACCOUNT_REGISTERED", targetType: "USER", targetId: userId, result: "SUCCESS" });
   return ok({ registered: true });
@@ -126,13 +135,15 @@ export async function resetPassword(env: AppEnv, request: Request): Promise<Resp
   const code = requireString(body.code, "code", 12);
   const password = requireString(body.password, "password", 128);
   assertPassword(password);
-  await consumeCode(env, email, "RESET_PASSWORD", code);
+  const verificationCode = await findCode(env, email, "RESET_PASSWORD", code);
   const user = await env.DB.prepare("SELECT id FROM users WHERE email = ? AND status = 'ACTIVE'").bind(email).first<{ id: string }>();
   if (!user) throw new HttpError(404, "ACCOUNT_NOT_FOUND", "账号不存在");
+  const now = Date.now();
   await env.DB.batch([
     env.DB.prepare("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?")
-      .bind(await hashPassword(password, env.PASSWORD_HASH_SECRET), Date.now(), user.id),
-    env.DB.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").bind(Date.now(), user.id),
+      .bind(await hashPassword(password, env.PASSWORD_HASH_SECRET), now, user.id),
+    env.DB.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").bind(now, user.id),
+    consumeCode(env, verificationCode.id, now),
   ]);
   await audit(env.DB, { actorUserId: user.id, actorType: "USER", action: "PASSWORD_RESET", targetType: "USER", targetId: user.id, result: "SUCCESS" });
   return ok({ reset: true });
