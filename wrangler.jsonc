@@ -58,6 +58,7 @@
     "staging": {
       "name": "njau-libyy-staging",
       "workers_dev": true,
+      "preview_urls": false,
       "routes": [
         {
           "pattern": "staging-libyy.way2api.fun",
@@ -109,6 +110,7 @@
     "production": {
       "name": "njau-libyy-production",
       "workers_dev": true,
+      "preview_urls": false,
       "routes": [
         {
           "pattern": "libyy.way2api.fun",

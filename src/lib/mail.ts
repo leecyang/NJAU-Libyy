@@ -2,7 +2,11 @@ import type { AppEnv } from "../config";
 import { flag } from "../config";
 import { decryptSecret, encryptSecret } from "./crypto";
 import { renderTemplate, retryDelayMs } from "./mail-content";
-import { sendSmtpMail } from "./smtp";
+import { sendSmtpMail, SmtpDeliveryError } from "./smtp";
+
+function safeDeliveryError(error: unknown): string {
+  return error instanceof SmtpDeliveryError ? error.diagnosticCode : "MAIL_DELIVERY_FAILED";
+}
 
 export async function queueMail(
   env: AppEnv,
@@ -56,14 +60,16 @@ export async function deliverDueMail(env: AppEnv, now = Date.now()): Promise<voi
                 last_error_message = NULL
           WHERE id = ? AND delivery_lock_until = ?`,
       ).bind(Date.now(), row.id, lockUntil).run();
-    } catch {
+    } catch (error) {
+      const deliveryError = safeDeliveryError(error);
+      console.error(JSON.stringify({ level: "error", event: "mail_delivery_failed", code: deliveryError }));
       const delay = retryDelayMs(attemptCount);
       await env.DB.prepare(
         `UPDATE email_outbox
             SET status = ?, next_attempt_at = ?, delivery_lock_until = NULL,
-                last_error_message = '邮件发送失败'
+                last_error_message = ?
           WHERE id = ? AND delivery_lock_until = ?`,
-      ).bind(delay === null ? "FAILED" : "PENDING", delay === null ? null : Date.now() + delay, row.id, lockUntil).run();
+      ).bind(delay === null ? "FAILED" : "PENDING", delay === null ? null : Date.now() + delay, deliveryError, row.id, lockUntil).run();
     }
   }
 }
