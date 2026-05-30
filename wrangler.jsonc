@@ -1,0 +1,40 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "njau-libyy",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-05-30",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "njau-libyy",
+      "database_id": "replace-with-cloudflare-d1-database-id",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "vars": {
+    "LIBYY_APP_ID": "41043f17-3c17-4f2e-894c-5d615f992db9",
+    "LIBYY_API_BASE_URL": "https://libyy.njau.edu.cn",
+    "APP_BASE_URL": "http://localhost:8787",
+    "ALLOWED_EMAIL_DOMAINS": "qq.com,163.com,126.com,yeah.net,sina.com,outlook.com",
+    "VERIFICATION_CODE_TTL_SECONDS": "600",
+    "INVITATION_TTL_SECONDS": "86400",
+    "ENABLE_OFFICIAL_RESERVATION_SUBMISSION": "false",
+    "ENABLE_SIGNOUT_SUBMISSION": "false",
+    "ENABLE_SIGN_PARAMETER_INGEST": "false",
+    "DEV_EXPOSE_VERIFICATION_CODES": "false"
+  }
+}
+

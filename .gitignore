@@ -1,0 +1,13 @@
+node_modules/
+.wrangler/
+dist/
+coverage/
+.wrangler-dev.log
+.dev.vars
+.env
+.env.*
+!.dev.vars.example
+
+# Local investigation artifacts may contain live credentials.
+data/
+dirsearch/
