@@ -4,21 +4,12 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-function Read-PlainSecret {
-  param([Parameter(Mandatory = $true)][string]$Prompt)
-  $secure = Read-Host -Prompt $Prompt -AsSecureString
-  $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-  try {
-    return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
-  } finally {
-    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
-  }
-}
+. (Join-Path $PSScriptRoot "_secret-upload-utils.ps1")
 
-$cloudflareApiToken = (Read-PlainSecret "CLOUDFLARE_API_TOKEN").Trim().TrimStart([char]0xFEFF)
+$cloudflareApiToken = Normalize-Secret (Read-PlainSecret "CLOUDFLARE_API_TOKEN")
 
 try {
-  $cloudflareApiToken | gh secret set CLOUDFLARE_API_TOKEN --repo $Repository
+  Set-GitHubSecret -Repository $Repository -Name "CLOUDFLARE_API_TOKEN" -Value $cloudflareApiToken
   Write-Host "Cloudflare API token uploaded without echoing its value."
 } finally {
   Remove-Variable cloudflareApiToken -ErrorAction SilentlyContinue

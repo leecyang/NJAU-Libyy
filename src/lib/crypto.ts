@@ -1,5 +1,7 @@
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
+// Hosted Cloudflare Workers reject Web Crypto PBKDF2 iteration counts above this limit.
+const PBKDF2_ITERATIONS = 100_000;
 
 function toBase64Url(bytes: Uint8Array): string {
   let binary = "";
@@ -35,7 +37,7 @@ export function randomDigits(length = 6): string {
 
 export async function hashPassword(password: string, pepper = ""): Promise<string> {
   const salt = crypto.getRandomValues(new Uint8Array(16));
-  const iterations = 160_000;
+  const iterations = PBKDF2_ITERATIONS;
   const material = await crypto.subtle.importKey("raw", encoder.encode(password + pepper), "PBKDF2", false, ["deriveBits"]);
   const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt, iterations }, material, 256);
   return `pbkdf2-sha256$${iterations}$${toBase64Url(salt)}$${toBase64Url(new Uint8Array(bits))}`;
@@ -45,7 +47,7 @@ export async function verifyPassword(password: string, stored: string, pepper = 
   const [algorithm, iterationText, saltText, expected] = stored.split("$");
   if (algorithm !== "pbkdf2-sha256" || !iterationText || !saltText || !expected) return false;
   const iterations = Number(iterationText);
-  if (!Number.isInteger(iterations) || iterations < 100_000) return false;
+  if (!Number.isInteger(iterations) || iterations !== PBKDF2_ITERATIONS) return false;
 
   const material = await crypto.subtle.importKey("raw", encoder.encode(password + pepper), "PBKDF2", false, ["deriveBits"]);
   const bits = await crypto.subtle.deriveBits(
