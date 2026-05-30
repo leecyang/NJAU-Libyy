@@ -8,6 +8,7 @@ $ErrorActionPreference = "Stop"
 
 function Set-EnvironmentSecret {
   param(
+    [Parameter(Mandatory = $true)][string]$Repository,
     [Parameter(Mandatory = $true)][string]$Name,
     [Parameter(Mandatory = $true)][string]$Value
   )
@@ -22,8 +23,8 @@ $smtpPassword = Normalize-Secret (Read-PlainSecret "SMTP_PASSWORD")
 $cloudflareApiToken = Normalize-Secret (Read-PlainSecret "CLOUDFLARE_API_TOKEN")
 
 try {
-  Set-EnvironmentSecret -Name "LIBYY_APP_SECRET" -Value $libyyAppSecret
-  Set-EnvironmentSecret -Name "SMTP_PASSWORD" -Value $smtpPassword
+  Set-EnvironmentSecret -Repository $Repository -Name "LIBYY_APP_SECRET" -Value $libyyAppSecret
+  Set-EnvironmentSecret -Repository $Repository -Name "SMTP_PASSWORD" -Value $smtpPassword
   Set-GitHubSecret -Repository $Repository -Name "CLOUDFLARE_API_TOKEN" -Value $cloudflareApiToken
   Write-Host "Secrets uploaded without echoing their values."
 } finally {

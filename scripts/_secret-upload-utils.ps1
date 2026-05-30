@@ -28,7 +28,12 @@ function Invoke-SecretCommand {
 
   if ([IO.Path]::GetExtension($command.Source) -in @(".cmd", ".bat")) {
     $startInfo.FileName = (Get-Command "cmd.exe" -CommandType Application -ErrorAction Stop).Source
-    $escapedArguments = $ArgumentList | ForEach-Object { '"' + $_.Replace('"', '""') + '"' }
+    foreach ($argument in $ArgumentList) {
+      if ($argument -notmatch '^[a-zA-Z0-9_/.-]+$') {
+        throw "Argument '$argument' contains potentially unsafe characters for cmd.exe execution."
+      }
+    }
+    $escapedArguments = $ArgumentList | ForEach-Object { '"' + $_ + '"' }
     $startInfo.Arguments = '/d /s /c ""' + $command.Source + '" ' + ($escapedArguments -join " ") + '"'
   } else {
     $startInfo.FileName = $command.Source
