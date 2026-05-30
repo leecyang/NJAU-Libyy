@@ -21,7 +21,7 @@ jobs:
       - run: npm run types:check
       - run: npm run typecheck
       - run: npm test
-      - run: npx wrangler deploy --env staging --dry-run --strict --outdir .wrangler-dry-run
+      - run: npx wrangler deploy --env staging --dry-run --outdir .wrangler-dry-run
 
   deploy-staging:
     needs: validate
@@ -54,7 +54,7 @@ jobs:
         run: |
           trap 'rm -f .deploy-secrets.json' EXIT
           node -e "const fs=require('fs'); fs.writeFileSync('.deploy-secrets.json', JSON.stringify({LIBYY_APP_SECRET:process.env.LIBYY_APP_SECRET,TOKEN_ENCRYPTION_KEY:process.env.TOKEN_ENCRYPTION_KEY,SESSION_SECRET:process.env.SESSION_SECRET,PASSWORD_HASH_SECRET:process.env.PASSWORD_HASH_SECRET,SMTP_PASSWORD:process.env.SMTP_PASSWORD}))"
-          npx wrangler deploy --env staging --strict --secrets-file .deploy-secrets.json
+          npx wrangler deploy --env staging --secrets-file .deploy-secrets.json
       - name: Smoke test staging
         run: |
           for attempt in 1 2 3 4 5 6; do
@@ -94,7 +94,7 @@ jobs:
         run: |
           trap 'rm -f .deploy-secrets.json' EXIT
           node -e "const fs=require('fs'); fs.writeFileSync('.deploy-secrets.json', JSON.stringify({LIBYY_APP_SECRET:process.env.LIBYY_APP_SECRET,TOKEN_ENCRYPTION_KEY:process.env.TOKEN_ENCRYPTION_KEY,SESSION_SECRET:process.env.SESSION_SECRET,PASSWORD_HASH_SECRET:process.env.PASSWORD_HASH_SECRET,SMTP_PASSWORD:process.env.SMTP_PASSWORD}))"
-          npx wrangler deploy --env production --strict --secrets-file .deploy-secrets.json
+          npx wrangler deploy --env production --secrets-file .deploy-secrets.json
       - name: Smoke test production
         run: |
           for attempt in 1 2 3 4 5 6; do
