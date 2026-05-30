@@ -90,6 +90,24 @@ export async function me(env: AppEnv, request: Request): Promise<Response> {
   });
 }
 
+export async function health(env: AppEnv): Promise<Response> {
+  const database = await env.DB.prepare("SELECT 1 AS value").first<{ value: number }>();
+  return ok({
+    service: "njau-libyy",
+    environment: env.ENVIRONMENT,
+    version: env.APP_VERSION,
+    database: database?.value === 1 ? "ready" : "unavailable",
+    config: {
+      officialApiConfigured: Boolean(env.LIBYY_APP_SECRET),
+      smtpConfigured: Boolean(env.SMTP_PASSWORD),
+      emailDeliveryEnabled: flag(env, "EMAIL_DELIVERY_ENABLED"),
+      reservationSubmissionEnabled: flag(env, "ENABLE_OFFICIAL_RESERVATION_SUBMISSION"),
+      signParameterIngestEnabled: flag(env, "ENABLE_SIGN_PARAMETER_INGEST"),
+      signoutSubmissionEnabled: flag(env, "ENABLE_SIGNOUT_SUBMISSION"),
+    },
+  });
+}
+
 export async function deleteAccount(env: AppEnv, request: Request): Promise<Response> {
   const user = await requireUser(env, request);
   const now = Date.now();
@@ -434,6 +452,18 @@ export async function dashboard(env: AppEnv, request: Request): Promise<Response
   return ok(row);
 }
 
+export async function adminConfig(env: AppEnv, request: Request): Promise<Response> {
+  await requireAdmin(env, request);
+  return health(env);
+}
+
+export async function adminTestEmail(env: AppEnv, request: Request): Promise<Response> {
+  const admin = await requireAdmin(env, request);
+  await queueMail(env, admin.email, "TEST_EMAIL", {});
+  await audit(env.DB, { actorUserId: admin.id, actorType: "ADMIN", action: "TEST_EMAIL_QUEUED", targetType: "EMAIL", result: "PENDING" });
+  return ok({ queued: true });
+}
+
 export async function adminCollection(env: AppEnv, request: Request, collection: string): Promise<Response> {
   await requireAdmin(env, request);
   const queries: Record<string, string> = {
@@ -444,7 +474,7 @@ export async function adminCollection(env: AppEnv, request: Request, collection:
     invitations: "SELECT id, task_id, inviter_user_id, invitee_user_id, invitee_student_id, invitee_real_name, status, approval_source, expires_at, responded_at, created_at FROM reservation_invitations ORDER BY created_at DESC LIMIT 200",
     "sign-tasks": "SELECT id, reservation_id, scheduled_at, status, parameter_received_at, executed_at FROM sign_tasks ORDER BY scheduled_at DESC LIMIT 200",
     "signout-tasks": "SELECT id, reservation_id, official_reservation_id, scheduled_at, status, attempt_count, executed_at FROM signout_tasks ORDER BY scheduled_at DESC LIMIT 200",
-    emails: "SELECT id, recipient_email, template, status, created_at, sent_at FROM email_outbox ORDER BY created_at DESC LIMIT 200",
+    emails: "SELECT id, recipient_email, template, status, attempt_count, next_attempt_at, last_error_message, created_at, sent_at FROM email_outbox ORDER BY created_at DESC LIMIT 200",
     "audit-logs": "SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 300",
   };
   const sql = queries[collection];

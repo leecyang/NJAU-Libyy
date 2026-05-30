@@ -18,7 +18,7 @@
     }
   ],
   "triggers": {
-    "crons": ["*/5 * * * *"]
+    "crons": ["* * * * *"]
   },
   "observability": {
     "enabled": true,
@@ -28,13 +28,134 @@
     "LIBYY_APP_ID": "41043f17-3c17-4f2e-894c-5d615f992db9",
     "LIBYY_API_BASE_URL": "https://libyy.njau.edu.cn",
     "APP_BASE_URL": "http://localhost:8787",
+    "ENVIRONMENT": "local",
+    "APP_VERSION": "dev",
     "ALLOWED_EMAIL_DOMAINS": "qq.com,163.com,126.com,yeah.net,sina.com,outlook.com",
     "VERIFICATION_CODE_TTL_SECONDS": "600",
     "INVITATION_TTL_SECONDS": "86400",
+    "SMTP_HOST": "smtp.qiye.aliyun.com",
+    "SMTP_PORT": "465",
+    "SMTP_SECURE": "true",
+    "SMTP_USERNAME": "noreply@mail.letsapi.store",
+    "SMTP_FROM_ADDRESS": "noreply@mail.letsapi.store",
+    "SMTP_FROM_NAME": "NJAU Libyy",
+    "EMAIL_DELIVERY_ENABLED": "false",
     "ENABLE_OFFICIAL_RESERVATION_SUBMISSION": "false",
     "ENABLE_SIGNOUT_SUBMISSION": "false",
     "ENABLE_SIGN_PARAMETER_INGEST": "false",
     "DEV_EXPOSE_VERIFICATION_CODES": "false"
+  },
+  "secrets": {
+    "required": [
+      "LIBYY_APP_SECRET",
+      "TOKEN_ENCRYPTION_KEY",
+      "SESSION_SECRET",
+      "PASSWORD_HASH_SECRET",
+      "SMTP_PASSWORD"
+    ]
+  },
+  "env": {
+    "staging": {
+      "name": "njau-libyy-staging",
+      "workers_dev": true,
+      "routes": [
+        {
+          "pattern": "staging-libyy.way2api.fun",
+          "custom_domain": true
+        }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "njau-libyy-staging",
+          "database_id": "24269c79-335c-4f84-adfc-4534e22de6c5",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "triggers": {
+        "crons": ["* * * * *"]
+      },
+      "vars": {
+        "LIBYY_APP_ID": "41043f17-3c17-4f2e-894c-5d615f992db9",
+        "LIBYY_API_BASE_URL": "https://libyy.njau.edu.cn",
+        "APP_BASE_URL": "https://staging-libyy.way2api.fun",
+        "ENVIRONMENT": "staging",
+        "APP_VERSION": "dev",
+        "ALLOWED_EMAIL_DOMAINS": "qq.com,163.com,126.com,yeah.net,sina.com,outlook.com",
+        "VERIFICATION_CODE_TTL_SECONDS": "600",
+        "INVITATION_TTL_SECONDS": "86400",
+        "SMTP_HOST": "smtp.qiye.aliyun.com",
+        "SMTP_PORT": "465",
+        "SMTP_SECURE": "true",
+        "SMTP_USERNAME": "noreply@mail.letsapi.store",
+        "SMTP_FROM_ADDRESS": "noreply@mail.letsapi.store",
+        "SMTP_FROM_NAME": "NJAU Libyy",
+        "EMAIL_DELIVERY_ENABLED": "true",
+        "ENABLE_OFFICIAL_RESERVATION_SUBMISSION": "false",
+        "ENABLE_SIGNOUT_SUBMISSION": "false",
+        "ENABLE_SIGN_PARAMETER_INGEST": "false",
+        "DEV_EXPOSE_VERIFICATION_CODES": "false"
+      },
+      "secrets": {
+        "required": [
+          "LIBYY_APP_SECRET",
+          "TOKEN_ENCRYPTION_KEY",
+          "SESSION_SECRET",
+          "PASSWORD_HASH_SECRET",
+          "SMTP_PASSWORD"
+        ]
+      }
+    },
+    "production": {
+      "name": "njau-libyy-production",
+      "workers_dev": true,
+      "routes": [
+        {
+          "pattern": "libyy.way2api.fun",
+          "custom_domain": true
+        }
+      ],
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "njau-libyy-production",
+          "database_id": "9f922ea4-ce02-4860-88c7-d6b266ea9f60",
+          "migrations_dir": "migrations"
+        }
+      ],
+      "triggers": {
+        "crons": ["* * * * *"]
+      },
+      "vars": {
+        "LIBYY_APP_ID": "41043f17-3c17-4f2e-894c-5d615f992db9",
+        "LIBYY_API_BASE_URL": "https://libyy.njau.edu.cn",
+        "APP_BASE_URL": "https://libyy.way2api.fun",
+        "ENVIRONMENT": "production",
+        "APP_VERSION": "dev",
+        "ALLOWED_EMAIL_DOMAINS": "qq.com,163.com,126.com,yeah.net,sina.com,outlook.com",
+        "VERIFICATION_CODE_TTL_SECONDS": "600",
+        "INVITATION_TTL_SECONDS": "86400",
+        "SMTP_HOST": "smtp.qiye.aliyun.com",
+        "SMTP_PORT": "465",
+        "SMTP_SECURE": "true",
+        "SMTP_USERNAME": "noreply@mail.letsapi.store",
+        "SMTP_FROM_ADDRESS": "noreply@mail.letsapi.store",
+        "SMTP_FROM_NAME": "NJAU Libyy",
+        "EMAIL_DELIVERY_ENABLED": "true",
+        "ENABLE_OFFICIAL_RESERVATION_SUBMISSION": "false",
+        "ENABLE_SIGNOUT_SUBMISSION": "false",
+        "ENABLE_SIGN_PARAMETER_INGEST": "false",
+        "DEV_EXPOSE_VERIFICATION_CODES": "false"
+      },
+      "secrets": {
+        "required": [
+          "LIBYY_APP_SECRET",
+          "TOKEN_ENCRYPTION_KEY",
+          "SESSION_SECRET",
+          "PASSWORD_HASH_SECRET",
+          "SMTP_PASSWORD"
+        ]
+      }
+    }
   }
 }
-

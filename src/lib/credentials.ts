@@ -3,6 +3,7 @@ import type { User } from "./auth";
 import { audit } from "./audit";
 import { decryptSecret, encryptSecret } from "./crypto";
 import { HttpError } from "./http";
+import { queueMail } from "./mail";
 import { fetchOfficialIdentity, refreshOfficialToken } from "./official";
 
 type Credential = {
@@ -177,6 +178,10 @@ export async function refreshCredential(
       result: "FAILED",
       metadata: { source, reauthRequired: reauth },
     });
+    if (reauth) {
+      const user = await env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(userId).first<{ email: string }>();
+      if (user) await queueMail(env, user.email, "OFFICIAL_REAUTH_REQUIRED", {});
+    }
     return false;
   }
 }

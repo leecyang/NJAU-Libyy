@@ -1,8 +1,11 @@
 node_modules/
 .wrangler/
+.wrangler-dry-run*/
 dist/
 coverage/
 .wrangler-dev.log
+.wrangler-dev.pid
+.deploy-secrets.json
 .dev.vars
 .env
 .env.*

@@ -1,6 +1,8 @@
 import type { AppEnv } from "./config";
 import {
   adminCollection,
+  adminConfig,
+  adminTestEmail,
   adminUserStatus,
   autoJoin,
   bind,
@@ -10,6 +12,7 @@ import {
   dashboard,
   deleteAccount,
   getCredentialStatus,
+  health,
   listTasks,
   manualReservation,
   me,
@@ -33,6 +36,7 @@ import { runScheduler } from "./lib/scheduler";
 type Handler = (env: AppEnv, request: Request) => Promise<Response>;
 
 const routes = new Map<string, Handler>([
+  ["GET /api/v1/health", health],
   ["GET /api/v1/me", me],
   ["POST /api/v1/auth/send-register-code", sendRegisterCode],
   ["POST /api/v1/auth/register", register],
@@ -57,6 +61,8 @@ const routes = new Map<string, Handler>([
   ["GET /api/v1/sign-tasks", signTasks],
   ["GET /api/v1/signout-tasks", signoutTasks],
   ["GET /api/v1/admin/dashboard", dashboard],
+  ["GET /api/v1/admin/config", adminConfig],
+  ["POST /api/v1/admin/emails/test", adminTestEmail],
 ]);
 
 async function routeApi(env: AppEnv, request: Request): Promise<Response> {
