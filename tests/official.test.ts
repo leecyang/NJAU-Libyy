@@ -123,4 +123,17 @@ describe("official API adapter", () => {
     expect(log).toContain('"htmlMarker":"network-restricted"');
     expect(log).not.toContain("校园VPN");
   });
+
+  it("asks the user to rebind when the official refresh token has expired", async () => {
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(proxyResponse(400, JSON.stringify({
+      msg: "refreshToken已过期",
+      code: 2008,
+    }))));
+
+    await expect(refreshOfficialToken(env, "expired-reflush-token")).rejects.toMatchObject({
+      status: 401,
+      code: "OFFICIAL_REAUTH_REQUIRED",
+      message: "官方登录已失效，请重新绑定凭证",
+    });
+  });
 });

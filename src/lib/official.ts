@@ -285,7 +285,9 @@ async function officialJson(response: Response, operation: OfficialOperation): P
 
 function officialFailure(response: Response, body: unknown): HttpError {
   const detail = body && typeof body === "object" ? body as OfficialError : {};
-  if (detail.code === 2003) return new HttpError(401, "OFFICIAL_REAUTH_REQUIRED", "官方登录已失效，请重新绑定凭证");
+  if (detail.code === 2003 || detail.code === 2008) {
+    return new HttpError(401, "OFFICIAL_REAUTH_REQUIRED", "官方登录已失效，请重新绑定凭证");
+  }
   if (detail.code === 2004) return new HttpError(400, "OFFICIAL_TOKEN_INVALID", "凭证格式错误，请重新复制");
   return new HttpError(502, "OFFICIAL_REQUEST_FAILED", `官方接口请求失败 (${response.status})`);
 }
