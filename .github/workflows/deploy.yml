@@ -32,6 +32,7 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       LIBYY_APP_SECRET: ${{ secrets.LIBYY_APP_SECRET }}
+      NJAU_PROXY_TOKEN: ${{ secrets.NJAU_PROXY_TOKEN }}
       TOKEN_ENCRYPTION_KEY: ${{ secrets.TOKEN_ENCRYPTION_KEY }}
       SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
       PASSWORD_HASH_SECRET: ${{ secrets.PASSWORD_HASH_SECRET }}
@@ -45,7 +46,7 @@ jobs:
       - run: npm ci
       - name: Verify deployment secrets
         run: |
-          for key in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID LIBYY_APP_SECRET TOKEN_ENCRYPTION_KEY SESSION_SECRET PASSWORD_HASH_SECRET SMTP_PASSWORD; do
+          for key in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID LIBYY_APP_SECRET NJAU_PROXY_TOKEN TOKEN_ENCRYPTION_KEY SESSION_SECRET PASSWORD_HASH_SECRET SMTP_PASSWORD; do
             test -n "${!key}" || { echo "Missing required secret or variable: $key"; exit 1; }
           done
       - name: Apply staging migrations
@@ -53,7 +54,7 @@ jobs:
       - name: Deploy staging
         run: |
           trap 'rm -f .deploy-secrets.json' EXIT
-          node -e "const fs=require('fs'); fs.writeFileSync('.deploy-secrets.json', JSON.stringify({LIBYY_APP_SECRET:process.env.LIBYY_APP_SECRET,TOKEN_ENCRYPTION_KEY:process.env.TOKEN_ENCRYPTION_KEY,SESSION_SECRET:process.env.SESSION_SECRET,PASSWORD_HASH_SECRET:process.env.PASSWORD_HASH_SECRET,SMTP_PASSWORD:process.env.SMTP_PASSWORD}))"
+          node -e "const fs=require('fs'); fs.writeFileSync('.deploy-secrets.json', JSON.stringify({LIBYY_APP_SECRET:process.env.LIBYY_APP_SECRET,NJAU_PROXY_TOKEN:process.env.NJAU_PROXY_TOKEN,TOKEN_ENCRYPTION_KEY:process.env.TOKEN_ENCRYPTION_KEY,SESSION_SECRET:process.env.SESSION_SECRET,PASSWORD_HASH_SECRET:process.env.PASSWORD_HASH_SECRET,SMTP_PASSWORD:process.env.SMTP_PASSWORD}))"
           npx wrangler deploy --env staging --secrets-file .deploy-secrets.json
       - name: Smoke test staging
         run: |
@@ -72,6 +73,7 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
       LIBYY_APP_SECRET: ${{ secrets.LIBYY_APP_SECRET }}
+      NJAU_PROXY_TOKEN: ${{ secrets.NJAU_PROXY_TOKEN }}
       TOKEN_ENCRYPTION_KEY: ${{ secrets.TOKEN_ENCRYPTION_KEY }}
       SESSION_SECRET: ${{ secrets.SESSION_SECRET }}
       PASSWORD_HASH_SECRET: ${{ secrets.PASSWORD_HASH_SECRET }}
@@ -85,7 +87,7 @@ jobs:
       - run: npm ci
       - name: Verify deployment secrets
         run: |
-          for key in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID LIBYY_APP_SECRET TOKEN_ENCRYPTION_KEY SESSION_SECRET PASSWORD_HASH_SECRET SMTP_PASSWORD; do
+          for key in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID LIBYY_APP_SECRET NJAU_PROXY_TOKEN TOKEN_ENCRYPTION_KEY SESSION_SECRET PASSWORD_HASH_SECRET SMTP_PASSWORD; do
             test -n "${!key}" || { echo "Missing required secret or variable: $key"; exit 1; }
           done
       - name: Apply production migrations
@@ -93,7 +95,7 @@ jobs:
       - name: Deploy production
         run: |
           trap 'rm -f .deploy-secrets.json' EXIT
-          node -e "const fs=require('fs'); fs.writeFileSync('.deploy-secrets.json', JSON.stringify({LIBYY_APP_SECRET:process.env.LIBYY_APP_SECRET,TOKEN_ENCRYPTION_KEY:process.env.TOKEN_ENCRYPTION_KEY,SESSION_SECRET:process.env.SESSION_SECRET,PASSWORD_HASH_SECRET:process.env.PASSWORD_HASH_SECRET,SMTP_PASSWORD:process.env.SMTP_PASSWORD}))"
+          node -e "const fs=require('fs'); fs.writeFileSync('.deploy-secrets.json', JSON.stringify({LIBYY_APP_SECRET:process.env.LIBYY_APP_SECRET,NJAU_PROXY_TOKEN:process.env.NJAU_PROXY_TOKEN,TOKEN_ENCRYPTION_KEY:process.env.TOKEN_ENCRYPTION_KEY,SESSION_SECRET:process.env.SESSION_SECRET,PASSWORD_HASH_SECRET:process.env.PASSWORD_HASH_SECRET,SMTP_PASSWORD:process.env.SMTP_PASSWORD}))"
           npx wrangler deploy --env production --secrets-file .deploy-secrets.json
       - name: Smoke test production
         run: |
@@ -102,4 +104,3 @@ jobs:
             sleep 10
           done
           exit 1
-

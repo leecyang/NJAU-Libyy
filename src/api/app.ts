@@ -99,6 +99,7 @@ export async function health(env: AppEnv): Promise<Response> {
     database: database?.value === 1 ? "ready" : "unavailable",
     config: {
       officialApiConfigured: Boolean(env.LIBYY_APP_SECRET),
+      officialProxyConfigured: Boolean(env.NJAU_PROXY_ENDPOINT && env.NJAU_PROXY_TOKEN),
       smtpConfigured: Boolean(env.SMTP_PASSWORD),
       emailDeliveryEnabled: flag(env, "EMAIL_DELIVERY_ENABLED"),
       reservationSubmissionEnabled: flag(env, "ENABLE_OFFICIAL_RESERVATION_SUBMISSION"),

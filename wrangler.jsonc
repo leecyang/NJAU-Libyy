@@ -27,6 +27,7 @@
   "vars": {
     "LIBYY_APP_ID": "41043f17-3c17-4f2e-894c-5d615f992db9",
     "LIBYY_API_BASE_URL": "https://libyy.njau.edu.cn",
+    "NJAU_PROXY_ENDPOINT": "https://njauproxy.christmas1314.xyz/proxy/fetch",
     "APP_BASE_URL": "http://localhost:8787",
     "ENVIRONMENT": "local",
     "APP_VERSION": "dev",
@@ -48,6 +49,7 @@
   "secrets": {
     "required": [
       "LIBYY_APP_SECRET",
+      "NJAU_PROXY_TOKEN",
       "TOKEN_ENCRYPTION_KEY",
       "SESSION_SECRET",
       "PASSWORD_HASH_SECRET",
@@ -79,6 +81,7 @@
       "vars": {
         "LIBYY_APP_ID": "41043f17-3c17-4f2e-894c-5d615f992db9",
         "LIBYY_API_BASE_URL": "https://libyy.njau.edu.cn",
+        "NJAU_PROXY_ENDPOINT": "https://njauproxy.christmas1314.xyz/proxy/fetch",
         "APP_BASE_URL": "https://staging-libyy.way2api.fun",
         "ENVIRONMENT": "staging",
         "APP_VERSION": "dev",
@@ -100,6 +103,7 @@
       "secrets": {
         "required": [
           "LIBYY_APP_SECRET",
+          "NJAU_PROXY_TOKEN",
           "TOKEN_ENCRYPTION_KEY",
           "SESSION_SECRET",
           "PASSWORD_HASH_SECRET",
@@ -131,6 +135,7 @@
       "vars": {
         "LIBYY_APP_ID": "41043f17-3c17-4f2e-894c-5d615f992db9",
         "LIBYY_API_BASE_URL": "https://libyy.njau.edu.cn",
+        "NJAU_PROXY_ENDPOINT": "https://njauproxy.christmas1314.xyz/proxy/fetch",
         "APP_BASE_URL": "https://libyy.way2api.fun",
         "ENVIRONMENT": "production",
         "APP_VERSION": "dev",
@@ -152,6 +157,7 @@
       "secrets": {
         "required": [
           "LIBYY_APP_SECRET",
+          "NJAU_PROXY_TOKEN",
           "TOKEN_ENCRYPTION_KEY",
           "SESSION_SECRET",
           "PASSWORD_HASH_SECRET",
