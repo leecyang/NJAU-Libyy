@@ -24,7 +24,9 @@ function Invoke-SecretCommand {
   $startInfo = [Diagnostics.ProcessStartInfo]::new()
   $startInfo.UseShellExecute = $false
   $startInfo.RedirectStandardInput = $true
-  $startInfo.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
+  if ($startInfo.PSObject.Properties.Name -contains "StandardInputEncoding") {
+    $startInfo.StandardInputEncoding = [Text.UTF8Encoding]::new($false)
+  }
 
   if ([IO.Path]::GetExtension($command.Source) -in @(".cmd", ".bat")) {
     $startInfo.FileName = (Get-Command "cmd.exe" -CommandType Application -ErrorAction Stop).Source
@@ -37,8 +39,17 @@ function Invoke-SecretCommand {
     $startInfo.Arguments = '/d /s /c ""' + $command.Source + '" ' + ($escapedArguments -join " ") + '"'
   } else {
     $startInfo.FileName = $command.Source
-    foreach ($argument in $ArgumentList) {
-      $startInfo.ArgumentList.Add($argument)
+    if ($startInfo.PSObject.Properties.Name -contains "ArgumentList") {
+      foreach ($argument in $ArgumentList) {
+        $startInfo.ArgumentList.Add($argument)
+      }
+    } else {
+      foreach ($argument in $ArgumentList) {
+        if ($argument -notmatch '^[a-zA-Z0-9_/.-]+$') {
+          throw "Argument '$argument' contains potentially unsafe characters for command execution."
+        }
+      }
+      $startInfo.Arguments = ($ArgumentList | ForEach-Object { '"' + $_ + '"' }) -join " "
     }
   }
 

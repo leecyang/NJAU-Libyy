@@ -1,5 +1,6 @@
 export type AppEnv = Env & {
   LIBYY_APP_SECRET?: string;
+  NJAU_PROXY_TOKEN?: string;
   TOKEN_ENCRYPTION_KEY: string;
   SESSION_SECRET: string;
   PASSWORD_HASH_SECRET?: string;
