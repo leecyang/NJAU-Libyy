@@ -4,3 +4,6 @@ TOKEN_ENCRYPTION_KEY=replace-with-base64-encoded-32-byte-key
 SESSION_SECRET=replace-me
 PASSWORD_HASH_SECRET=replace-me
 SMTP_PASSWORD=replace-me
+SIGN_ROOM_SYSTEM_MAC_MAP={"2":"JWJA211231039"}
+AUTHORIZED_SIGN_SYSTEM_MAC=replace-with-authorized-sign-device-mac
+AUTHORIZED_SIGN_ROOM_ID=replace-with-authorized-sign-device-room-id

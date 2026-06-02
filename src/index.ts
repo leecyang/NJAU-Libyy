@@ -6,26 +6,40 @@ import {
   adminUserStatus,
   autoJoin,
   bind,
+  cancelReservation,
   changeTaskStatus,
+  createSignLink,
+  createTeam,
   createInvitation,
   createTask,
   dashboard,
+  deleteTeam,
   deleteAccount,
   getCredentialStatus,
   health,
+  inviteTeamMember,
+  leaveTeam,
+  listMyTeams,
   listTasks,
   manualReservation,
   me,
   officialUserSearch,
+  recentContacts,
   receivedInvitations,
+  removeTeamMember,
   reservationDetail,
   reservationHistory,
+  respondTeamInvitation,
   respondInvitation,
+  roomDetail,
   rooms,
   signTasks,
+  signoutReservation,
   signoutTasks,
   submitSignParameters,
+  syncReservationHistory,
   squareUsers,
+  teamInvitationPreview,
   taskDetail,
   updateTask,
 } from "./api/app";
@@ -51,11 +65,15 @@ const routes = new Map<string, Handler>([
   ["GET /api/v1/rooms", rooms],
   ["POST /api/v1/reservations/manual", manualReservation],
   ["GET /api/v1/reservations/history", reservationHistory],
+  ["POST /api/v1/reservations/sync", syncReservationHistory],
   ["POST /api/v1/reservation-tasks", createTask],
   ["GET /api/v1/reservation-tasks", listTasks],
   ["GET /api/v1/square/users", squareUsers],
   ["PATCH /api/v1/profile/auto-join", autoJoin],
   ["GET /api/v1/official-users/search", officialUserSearch],
+  ["GET /api/v1/recent-contacts", recentContacts],
+  ["POST /api/v1/teams", createTeam],
+  ["GET /api/v1/teams/mine", listMyTeams],
   ["POST /api/v1/invitations", createInvitation],
   ["GET /api/v1/invitations/received", receivedInvitations],
   ["GET /api/v1/sign-tasks", signTasks],
@@ -81,6 +99,29 @@ async function routeApi(env: AppEnv, request: Request): Promise<Response> {
 
   const reservationDetailMatch = /^\/api\/v1\/reservations\/([^/]+)$/.exec(url.pathname);
   if (request.method === "GET" && reservationDetailMatch?.[1]) return reservationDetail(env, request, reservationDetailMatch[1]);
+  const reservationCancelMatch = /^\/api\/v1\/reservations\/([^/]+)\/cancel$/.exec(url.pathname);
+  if (request.method === "POST" && reservationCancelMatch?.[1]) return cancelReservation(env, request, reservationCancelMatch[1]);
+  const reservationSignLinkMatch = /^\/api\/v1\/reservations\/([^/]+)\/sign-link$/.exec(url.pathname);
+  if (request.method === "POST" && reservationSignLinkMatch?.[1]) return createSignLink(env, request, reservationSignLinkMatch[1]);
+  const reservationSignoutMatch = /^\/api\/v1\/reservations\/([^/]+)\/signout$/.exec(url.pathname);
+  if (request.method === "POST" && reservationSignoutMatch?.[1]) return signoutReservation(env, request, reservationSignoutMatch[1]);
+
+  const roomDetailMatch = /^\/api\/v1\/rooms\/([^/]+)$/.exec(url.pathname);
+  if (request.method === "GET" && roomDetailMatch?.[1]) return roomDetail(env, request, roomDetailMatch[1]);
+
+  const teamInvitationMatch = /^\/api\/v1\/team-invitations\/([^/]+)$/.exec(url.pathname);
+  if (request.method === "GET" && teamInvitationMatch?.[1]) return teamInvitationPreview(env, request, teamInvitationMatch[1]);
+  const teamInvitationRespondMatch = /^\/api\/v1\/team-invitations\/([^/]+)\/respond$/.exec(url.pathname);
+  if (request.method === "POST" && teamInvitationRespondMatch?.[1]) return respondTeamInvitation(env, request, teamInvitationRespondMatch[1]);
+
+  const teamMatch = /^\/api\/v1\/teams\/([^/]+)$/.exec(url.pathname);
+  if (request.method === "DELETE" && teamMatch?.[1]) return deleteTeam(env, request, teamMatch[1]);
+  const teamInviteMatch = /^\/api\/v1\/teams\/([^/]+)\/invitations$/.exec(url.pathname);
+  if (request.method === "POST" && teamInviteMatch?.[1]) return inviteTeamMember(env, request, teamInviteMatch[1]);
+  const teamLeaveMatch = /^\/api\/v1\/teams\/([^/]+)\/members\/me$/.exec(url.pathname);
+  if (request.method === "DELETE" && teamLeaveMatch?.[1]) return leaveTeam(env, request, teamLeaveMatch[1]);
+  const teamMemberMatch = /^\/api\/v1\/teams\/([^/]+)\/members\/([^/]+)$/.exec(url.pathname);
+  if (request.method === "DELETE" && teamMemberMatch?.[1] && teamMemberMatch[2]) return removeTeamMember(env, request, teamMemberMatch[1], teamMemberMatch[2]);
 
   const invitationAction = /^\/api\/v1\/invitations\/([^/]+)\/(accept|reject)$/.exec(url.pathname);
   if (request.method === "POST" && invitationAction?.[1] && (invitationAction[2] === "accept" || invitationAction[2] === "reject")) {
@@ -90,7 +131,7 @@ async function routeApi(env: AppEnv, request: Request): Promise<Response> {
   const signParameterMatch = /^\/api\/v1\/sign-tasks\/([^/]+)\/parameters$/.exec(url.pathname);
   if (request.method === "POST" && signParameterMatch?.[1]) return submitSignParameters(env, request, signParameterMatch[1]);
 
-  const adminList = /^\/api\/v1\/admin\/(users|credentials|tasks|reservations|invitations|sign-tasks|signout-tasks|emails|audit-logs)$/.exec(url.pathname);
+  const adminList = /^\/api\/v1\/admin\/(users|credentials|tasks|reservations|invitations|teams|team-invitations|sign-tasks|signout-tasks|emails|audit-logs)$/.exec(url.pathname);
   if (request.method === "GET" && adminList?.[1]) return adminCollection(env, request, adminList[1]);
 
   const adminStatus = /^\/api\/v1\/admin\/users\/([^/]+)\/status$/.exec(url.pathname);

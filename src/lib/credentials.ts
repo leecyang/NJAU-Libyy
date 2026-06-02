@@ -84,8 +84,16 @@ export async function bindCredential(env: AppEnv, user: User, submittedReflushTo
   }
 
   await env.DB.batch([
-    env.DB.prepare("UPDATE users SET student_id = ?, real_name = ?, updated_at = ? WHERE id = ?")
-      .bind(identity.userId, identity.realName, now, user.id),
+    env.DB.prepare(
+      "UPDATE users SET student_id = ?, real_name = ?, official_user_internal_id = ?, official_mobile_ciphertext = ?, updated_at = ? WHERE id = ?",
+    ).bind(
+      identity.userId,
+      identity.realName,
+      identity.id ?? null,
+      identity.mobile ? await encryptSecret(identity.mobile, env.TOKEN_ENCRYPTION_KEY) : null,
+      now,
+      user.id,
+    ),
   ]);
   await persistTokens(env, user.id, refreshed.accessToken, refreshed.reflushToken, refreshed.expires, now);
   await audit(env.DB, {
@@ -96,6 +104,38 @@ export async function bindCredential(env: AppEnv, user: User, submittedReflushTo
     targetId: user.id,
     result: "SUCCESS",
   });
+}
+
+export async function getOfficialReservationProfile(
+  env: AppEnv,
+  userId: string,
+  accessToken: string,
+): Promise<{ studentId: string; realName: string; mobile: string }> {
+  const stored = await env.DB.prepare(
+    "SELECT student_id, real_name, official_mobile_ciphertext FROM users WHERE id = ?",
+  ).bind(userId).first<{ student_id: string | null; real_name: string | null; official_mobile_ciphertext: string | null }>();
+  if (!stored) throw new HttpError(404, "ACCOUNT_NOT_FOUND", "账号不存在");
+  if (stored.student_id && stored.real_name && stored.official_mobile_ciphertext) {
+    return {
+      studentId: stored.student_id,
+      realName: stored.real_name,
+      mobile: await decryptSecret(stored.official_mobile_ciphertext, env.TOKEN_ENCRYPTION_KEY),
+    };
+  }
+
+  const identity = await fetchOfficialIdentity(env, accessToken);
+  if (!identity.mobile) throw new HttpError(409, "OFFICIAL_PROFILE_INCOMPLETE", "官方身份缺少预约所需手机号，请重新绑定凭证");
+  await env.DB.prepare(
+    "UPDATE users SET student_id = ?, real_name = ?, official_user_internal_id = ?, official_mobile_ciphertext = ?, updated_at = ? WHERE id = ?",
+  ).bind(
+    identity.userId,
+    identity.realName,
+    identity.id ?? null,
+    await encryptSecret(identity.mobile, env.TOKEN_ENCRYPTION_KEY),
+    Date.now(),
+    userId,
+  ).run();
+  return { studentId: identity.userId, realName: identity.realName, mobile: identity.mobile };
 }
 
 export async function credentialStatus(env: AppEnv, userId: string): Promise<Record<string, unknown>> {

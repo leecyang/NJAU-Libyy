@@ -8,58 +8,31 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
-    <div class="shell">
-      <aside class="sidebar">
-        <a class="brand" href="/" aria-label="NJAU Libyy 首页">
-          <span class="brand-mark">L</span>
-          <span><strong>Libyy</strong><small>NJAU Study Room</small></span>
-        </a>
-        <nav id="nav" class="nav" aria-label="主导航">
-          <button class="nav-item active" data-page="overview">概览</button>
-          <button class="nav-item" data-page="rooms">查找研讨室</button>
-          <button class="nav-item" data-page="tasks">自动预约</button>
-          <button class="nav-item" data-page="square">用户广场</button>
-          <button class="nav-item" data-page="invitations">我的邀请</button>
-          <button class="nav-item" data-page="account">账号与凭证</button>
-          <button class="nav-item admin-only hidden" data-page="admin">管理后台</button>
-        </nav>
-        <div class="sidebar-foot">
-          <span class="status-dot"></span>
-          <span>Workers + D1</span>
+    <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
+
+    <section id="setup-view" class="setup-shell">
+      <header class="setup-header">
+        <a class="brand setup-brand" href="/" aria-label="NJAU Libyy 首页"><span class="brand-mark">L</span><span><strong>Libyy</strong><small>NJAU Study Room</small></span></a>
+        <button id="setup-logout" class="button ghost hidden" type="button">退出登录</button>
+      </header>
+      <main class="setup-main">
+        <div class="setup-intro">
+          <p class="eyebrow">WELCOME TO NJAU LIBYY</p>
+          <h1>三步完成预约助手配置</h1>
+          <p>本站不会保存或回显你粘贴的官方 Token。完成配置后，研讨室查询、预约和小队功能才会开放。</p>
         </div>
-      </aside>
-
-      <main class="main">
-        <header class="topbar">
-          <button id="menu-toggle" class="icon-button mobile-only" aria-label="打开导航">☰</button>
-          <div>
-            <p class="eyebrow">研讨室预约助手</p>
-            <h1 id="page-title">今天，从一间合适的研讨室开始</h1>
-          </div>
-          <div class="user-actions">
-            <span id="user-label">尚未登录</span>
-            <button id="logout-button" class="button ghost hidden">退出</button>
-          </div>
-        </header>
-
-        <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
-
-        <section id="auth-view" class="auth-grid">
-          <div class="hero-card">
-            <p class="eyebrow">NJAU LIBRARY</p>
-            <h2>把预约流程放进清晰的日程里。</h2>
-            <p>查看三日内空闲研讨室，管理自动预约任务，并在每一步保留明确的授权边界。</p>
-            <div class="hero-stats">
-              <div><strong>3 天</strong><span>可查询窗口</span></div>
-              <div><strong>120 分钟</strong><span>单次最长时长</span></div>
-              <div><strong>90 分钟</strong><span>凭证刷新周期</span></div>
-            </div>
-          </div>
-          <div class="card auth-card">
+        <ol class="stepper" aria-label="配置步骤">
+          <li data-step-indicator="1"><strong>01</strong><span>邮箱账号</span></li>
+          <li data-step-indicator="2"><strong>02</strong><span>获取 Token</span></li>
+          <li data-step-indicator="3"><strong>03</strong><span>绑定凭证</span></li>
+        </ol>
+        <div class="setup-grid">
+          <article class="card setup-card" data-step-card="1">
+            <p class="eyebrow">STEP 01</p><h2>注册或登录本站</h2>
             <div class="segmented" role="tablist" aria-label="账户操作">
-              <button class="segment active" data-auth-tab="login">登录</button>
-              <button class="segment" data-auth-tab="register">注册</button>
-              <button class="segment" data-auth-tab="reset">找回密码</button>
+              <button class="segment active" data-auth-tab="login" type="button">登录</button>
+              <button class="segment" data-auth-tab="register" type="button">注册</button>
+              <button class="segment" data-auth-tab="reset" type="button">找回密码</button>
             </div>
             <form id="login-form" class="form auth-form">
               <label>邮箱<input name="email" type="email" autocomplete="email" required /></label>
@@ -78,110 +51,73 @@
               <label>新密码<input name="password" type="password" autocomplete="new-password" required /></label>
               <button class="button primary" type="submit">重置密码</button>
             </form>
+            <p class="step-complete hidden" data-step-complete="1">已登录本站账号</p>
+          </article>
+          <article class="card setup-card" data-step-card="2">
+            <p class="eyebrow">STEP 02</p><h2>从官方站点取得 Token</h2>
+            <p class="muted">登录官方研讨室系统后，按下方路径找到 <code>reflushToken</code>。请勿向其他人发送该值。</p>
+            <a class="button soft button-link" href="https://libyy.njau.edu.cn/" target="_blank" rel="noreferrer">打开官方站点</a>
+            <div class="devtools-demo" aria-label="开发者工具本地存储路径示意">
+              <div class="demo-tabs"><span>元素</span><span class="active">应用</span><span>网络</span></div>
+              <div class="demo-body"><div><strong>存储</strong><span>本地存储空间</span><span>https://libyy.njau.edu.cn</span></div><div><strong>键</strong><code>reflushToken</code><small>双击右侧值并复制</small></div></div>
+            </div>
+          </article>
+          <article class="card setup-card" data-step-card="3">
+            <p class="eyebrow">STEP 03</p><h2>安全绑定官方凭证</h2>
+            <p class="muted">粘贴后立即完成官方身份校验。页面不会保存或再次显示 Token。</p>
+            <form id="setup-bind-form" class="form">
+              <label>reflushToken<textarea name="reflushToken" rows="7" autocomplete="off" required></textarea></label>
+              <button class="button primary" type="submit">完成配置并进入主页</button>
+            </form>
+          </article>
+        </div>
+      </main>
+    </section>
+
+    <div id="app-shell" class="shell hidden">
+      <aside class="sidebar">
+        <a class="brand" href="/" aria-label="NJAU Libyy 首页"><span class="brand-mark">L</span><span><strong>Libyy</strong><small>NJAU Study Room</small></span></a>
+        <nav class="nav" aria-label="主导航">
+          <button class="nav-item active" data-page="overview">概览</button>
+          <button class="nav-item" data-page="rooms">查找研讨室</button>
+          <button class="nav-item" data-page="tasks">自动预约</button>
+          <button class="nav-item" data-page="square">用户广场</button>
+          <button class="nav-item" data-page="teams">我的小队</button>
+          <button class="nav-item" data-page="reservations">预约历史</button>
+          <button class="nav-item" data-page="sign">签到状态</button>
+          <button class="nav-item" data-page="signout">签退状态</button>
+          <button class="nav-item" data-page="account">账号与凭证</button>
+          <button class="nav-item admin-only hidden" data-page="admin">管理后台</button>
+        </nav>
+        <div class="sidebar-foot"><span class="status-dot"></span><span>Workers + D1</span></div>
+      </aside>
+      <main class="main">
+        <header class="topbar">
+          <button id="menu-toggle" class="icon-button mobile-only" aria-label="打开导航">☰</button>
+          <div><p class="eyebrow">研讨室预约助手</p><h1 id="page-title">今天，从一间合适的研讨室开始</h1></div>
+          <div class="user-actions"><span id="user-label"></span><button id="logout-button" class="button ghost" type="button">退出</button></div>
+        </header>
+        <section class="page" data-page-view="overview">
+          <div class="intro-grid">
+            <article class="card welcome-card"><p class="eyebrow">WELCOME BACK</p><h2 id="welcome-title">欢迎回来</h2><p id="credential-hint"></p><button class="button primary" data-go="rooms" type="button">查看研讨室</button></article>
+            <article class="card rule-card"><p class="eyebrow">预约规则</p><ul class="rule-list"><li><span>01</span> 每日最多预约 2 次</li><li><span>02</span> 单次最长 120 分钟</li><li><span>03</span> 卡片内直接选择空闲时间</li></ul></article>
           </div>
+          <div class="quick-grid section-block"><button class="quick-card" data-go="rooms"><strong>查找房间</strong><span>查看连续空闲时段并预约</span></button><button class="quick-card" data-go="teams"><strong>我的小队</strong><span>邀请成员并管理固定队伍</span></button><button class="quick-card" data-go="reservations"><strong>预约历史</strong><span>同步订单、取消或签到签退</span></button></div>
         </section>
-
-        <section id="app-view" class="hidden">
-          <section class="page" data-page-view="overview">
-            <div class="intro-grid">
-              <article class="card welcome-card">
-                <p class="eyebrow">WELCOME BACK</p>
-                <h2 id="welcome-title">晚上好</h2>
-                <p id="credential-hint">正在读取官方凭证状态...</p>
-                <button class="button primary" data-go="rooms">查看研讨室</button>
-              </article>
-              <article class="card rule-card">
-                <p class="eyebrow">预约规则</p>
-                <h3>一次确认，少走弯路</h3>
-                <ul class="rule-list">
-                  <li><span>01</span> 每日最多预约 2 次</li>
-                  <li><span>02</span> 单次不超过 120 分钟</li>
-                  <li><span>03</span> 8 人与 12 人间暂不开放</li>
-                </ul>
-              </article>
-            </div>
-            <div class="section-heading"><div><p class="eyebrow">QUICK ACCESS</p><h2>常用入口</h2></div></div>
-            <div class="quick-grid">
-              <button class="quick-card" data-go="rooms"><strong>查找房间</strong><span>浏览今天到后天的房间信息</span></button>
-              <button class="quick-card" data-go="tasks"><strong>自动预约</strong><span>提前安排候选房间和时间</span></button>
-              <button class="quick-card" data-go="invitations"><strong>联约邀请</strong><span>确认共同参与的研讨室预约</span></button>
-            </div>
-          </section>
-
-          <section class="page hidden" data-page-view="rooms">
-            <div class="section-heading"><div><p class="eyebrow">ROOM FINDER</p><h2>查找研讨室</h2></div><label>预约日期<input id="room-date" type="date" /></label></div>
-            <div class="two-column room-layout">
-              <div id="room-list" class="room-grid empty"><p>选择日期后查询研讨室。</p></div>
-              <form id="manual-form" class="card form sticky-card">
-                <h3>手动预约</h3>
-                <p class="muted">提交前会再次读取官方房间规则并检查每日限额。</p>
-                <label>房间 ID<input name="roomId" inputmode="numeric" required /></label>
-                <div class="inline-field">
-                  <label>开始时间<input name="startTime" type="time" required /></label>
-                  <label>结束时间<input name="endTime" type="time" required /></label>
-                </div>
-                <label>自动联约用户 ID<textarea name="memberUserIds" rows="3" placeholder="可选，每行一个本站用户 ID"></textarea></label>
-                <button class="button primary" type="submit">提交预约</button>
-              </form>
-            </div>
-          </section>
-
-          <section class="page hidden" data-page-view="tasks">
-            <div class="section-heading"><div><p class="eyebrow">AUTOMATION</p><h2>自动预约任务</h2></div></div>
-            <div class="two-column">
-              <form id="task-form" class="card form">
-                <h3>创建任务</h3>
-                <label>目标日期<input name="targetDate" type="date" required /></label>
-                <div class="inline-field">
-                  <label>开始时间<input name="startTime" type="time" step="1800" required /></label>
-                  <label>结束时间<input name="endTime" type="time" step="1800" required /></label>
-                </div>
-                <label>候选房间 ID<input name="roomId" inputmode="numeric" required /></label>
-                <label>房间名称<input name="roomName" required /></label>
-                <button class="button primary" type="submit">创建草稿</button>
-              </form>
-              <div id="task-list" class="stack empty"><p>暂无自动预约任务。</p></div>
-            </div>
-          </section>
-
-          <section class="page hidden" data-page-view="square">
-            <div class="section-heading"><div><p class="eyebrow">STUDY PARTNERS</p><h2>用户广场</h2></div></div>
-            <div id="square-list" class="room-grid empty"><p>正在加载用户...</p></div>
-          </section>
-
-          <section class="page hidden" data-page-view="invitations">
-            <div class="section-heading"><div><p class="eyebrow">INVITATIONS</p><h2>我的邀请</h2></div></div>
-            <div id="invitation-list" class="stack empty"><p>暂无邀请。</p></div>
-          </section>
-
-          <section class="page hidden" data-page-view="account">
-            <div class="section-heading"><div><p class="eyebrow">ACCOUNT</p><h2>账号与官方凭证</h2></div></div>
-            <div class="two-column">
-              <form id="bind-form" class="card form">
-                <h3>绑定官方凭证</h3>
-                <p class="muted">仅粘贴官方系统中的 <code>reflushToken</code>。页面不会保存或回显 token。</p>
-                <label>reflushToken<textarea name="reflushToken" rows="5" autocomplete="off" required></textarea></label>
-                <button class="button primary" type="submit">安全绑定</button>
-              </form>
-              <article class="card">
-                <h3>授权设置</h3>
-                <label class="switch-row"><span><strong>允许自动联约</strong><small>开启后，其他用户可在新预约中直接邀请你。</small></span><input id="auto-join" type="checkbox" /></label>
-                <div class="danger-zone">
-                  <h3>注销账号</h3>
-                  <p class="muted">将销毁官方凭证并停止未来任务。</p>
-                  <button id="delete-account" class="button danger">注销账号</button>
-                </div>
-              </article>
-            </div>
-          </section>
-
-          <section class="page hidden" data-page-view="admin">
-            <div class="section-heading"><div><p class="eyebrow">ADMIN</p><h2>管理后台</h2></div></div>
-            <div id="admin-stats" class="quick-grid"></div>
-          </section>
-        </section>
+        <section class="page hidden" data-page-view="rooms"><div class="page-tools"><label>预约日期<input id="room-date" type="date" /></label><button id="refresh-rooms" class="button soft">刷新房间</button></div><div id="room-list" class="room-grid empty"><p>正在加载研讨室...</p></div></section>
+        <section class="page hidden" data-page-view="tasks"><div class="two-column"><form id="task-form" class="card form"><h3>创建自动预约草稿</h3><label>目标日期<input name="targetDate" type="date" required /></label><div class="inline-field"><label>开始时间<input name="startTime" type="time" step="1800" required /></label><label>结束时间<input name="endTime" type="time" step="1800" required /></label></div><label>候选房间 ID<input name="roomId" inputmode="numeric" required /></label><label>房间名称<input name="roomName" required /></label><div class="contact-search"><label>查询非站内联约用户<input id="task-contact-query" placeholder="输入学号" /></label><button id="task-contact-search" class="button ghost" type="button">查询并保存联系人</button></div><div id="task-members" class="choice-stack"></div><button class="button primary" type="submit">创建草稿</button></form><div id="task-list" class="stack empty"><p>暂无自动预约任务。</p></div></div></section>
+        <section class="page hidden" data-page-view="square"><div id="square-list" class="room-grid empty"><p>正在加载用户...</p></div></section>
+        <section class="page hidden" data-page-view="teams"><div class="two-column"><form id="team-form" class="card form"><h3>创建我的小队</h3><label>小队名称<input name="name" maxlength="40" required /></label><label>简介<textarea name="description" rows="4" maxlength="240"></textarea></label><button class="button primary">创建小队</button></form><div><div id="team-invitations" class="stack"></div><div id="team-list" class="stack"></div></div></div></section>
+        <section class="page hidden" data-page-view="reservations"><div class="page-tools"><p class="muted">同步官方订单后可取消预约、生成签到入口或手动签退。</p><button id="sync-reservations" class="button soft">同步官方订单</button></div><div id="reservation-list" class="stack empty"><p>暂无预约记录。</p></div></section>
+        <section class="page hidden" data-page-view="sign"><div id="sign-list" class="stack empty"><p>暂无签到任务。</p></div></section>
+        <section class="page hidden" data-page-view="signout"><div id="signout-list" class="stack empty"><p>暂无签退任务。</p></div></section>
+        <section class="page hidden" data-page-view="account"><div class="two-column"><form id="bind-form" class="card form"><h3>重新绑定官方凭证</h3><label>reflushToken<textarea name="reflushToken" rows="6" autocomplete="off" required></textarea></label><button class="button primary">安全绑定</button></form><article class="card"><h3>账号信息</h3><div id="account-detail"></div><label class="check-row"><input id="auto-join-toggle" type="checkbox" />允许其他站内用户在预约时自动联约我</label><p class="muted">开启后，对方无需逐次邀请即可把你加入多人预约；关闭后只接受小队授权或手动确认。</p><div class="danger-zone"><button id="delete-account" class="button danger">注销账号</button></div></article></div></section>
+        <section class="page hidden" data-page-view="admin"><div id="admin-stats" class="quick-grid"></div><div class="page-tools section-block"><label>管理数据<select id="admin-collection"><option value="users">用户</option><option value="credentials">凭证</option><option value="tasks">自动任务</option><option value="reservations">预约</option><option value="teams">小队</option><option value="team-invitations">小队邀请</option><option value="sign-tasks">签到任务</option><option value="signout-tasks">签退任务</option><option value="emails">邮件</option><option value="audit-logs">审计日志</option></select></label><button id="admin-config" class="button ghost" type="button">查看配置</button><button id="admin-test-email" class="button soft" type="button">发送测试邮件</button></div><div id="admin-table" class="table-wrap"></div></section>
       </main>
     </div>
+
+    <dialog id="room-dialog" class="dialog"><form method="dialog"><button class="dialog-close icon-button" aria-label="关闭预约弹窗">×</button></form><div id="room-dialog-content"></div></dialog>
+    <dialog id="invitation-dialog" class="dialog"><div id="invitation-dialog-content"></div></dialog>
     <script type="module" src="/app.js"></script>
   </body>
 </html>

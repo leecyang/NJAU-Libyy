@@ -91,6 +91,11 @@ export function renderTemplate(template: string, payload: Record<string, unknown
         subject: "NJAU Libyy 联约邀请",
         html: layout("新的联约邀请", `<p><strong>${escapeHtml(payload.inviterName)}</strong> 邀请你参与研讨室预约。</p><p>请登录 NJAU Libyy，在“我的邀请”中接受或拒绝。</p>`),
       };
+    case "TEAM_INVITATION":
+      return {
+        subject: "NJAU Libyy 小队邀请",
+        html: layout("新的小队邀请", `<p><strong>${escapeHtml(payload.inviterName)}</strong> 邀请你加入小队 <strong>${escapeHtml(payload.teamName)}</strong>。</p><p>请打开以下链接查看邀请，再明确选择接受或拒绝：</p><p><a href="${escapeHtml(payload.confirmationUrl)}" style="color:#216b51;font-weight:bold">查看小队邀请</a></p>`),
+      };
     case "OFFICIAL_REAUTH_REQUIRED":
       return {
         subject: "NJAU Libyy 官方凭证需要重新绑定",
@@ -120,4 +125,3 @@ export function retryDelayMs(attemptCount: number): number | null {
   const minutes = [1, 5, 15, 60][attemptCount - 1];
   return minutes === undefined ? null : minutes * 60_000;
 }
-
