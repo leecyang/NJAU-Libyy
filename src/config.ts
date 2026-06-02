@@ -5,6 +5,9 @@ export type AppEnv = Env & {
   SESSION_SECRET: string;
   PASSWORD_HASH_SECRET?: string;
   SMTP_PASSWORD?: string;
+  SIGN_ROOM_SYSTEM_MAC_MAP?: string;
+  AUTHORIZED_SIGN_SYSTEM_MAC?: string;
+  AUTHORIZED_SIGN_ROOM_ID?: string;
 };
 
 export function flag(env: AppEnv, name: keyof Env): boolean {

@@ -1,10 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../src/config";
 import {
+  cancelOfficialReservation,
+  createOfficialQrSignCheckCode,
   fetchOfficialIdentity,
+  fetchOfficialReservationHistory,
   fetchOfficialRooms,
   refreshOfficialToken,
   searchOfficialUsers,
+  signOutOfficialReservation,
+  submitOfficialSign,
   submitOfficialReservation,
 } from "../src/lib/official";
 
@@ -76,12 +81,14 @@ describe("official API adapter", () => {
       .mockResolvedValueOnce(proxyResponse(200, JSON.stringify({ userId: "student-id", realName: "Student" })))
       .mockResolvedValueOnce(proxyResponse(200, "[]"))
       .mockResolvedValueOnce(proxyResponse(200, JSON.stringify({ accepted: true })))
-      .mockResolvedValueOnce(proxyResponse(200, JSON.stringify({ records: [] })));
+      .mockResolvedValueOnce(proxyResponse(200, JSON.stringify({ userId: "student-id", realName: "Student" })));
     vi.stubGlobal("fetch", fetchMock);
 
     await fetchOfficialIdentity(env, "access-token");
     await fetchOfficialRooms(env, "access-token", "2026-06-02");
     await submitOfficialReservation(env, "access-token", {
+      ownerStudentId: "student-id",
+      mobile: "13000000000",
       roomId: 1,
       date: "2026-06-02",
       startTime: "10:00",
@@ -101,9 +108,110 @@ describe("official API adapter", () => {
     expect(fetchMock.mock.calls.map(([, init]) => new URL(JSON.parse(String(init?.body)).url).pathname)).toEqual([
       "/api/oauth/v1/user",
       "/api/studyroom/v1/room/mRooms",
-      "/api/studyroom/v1/reservation/accept",
-      "/api/studyroom/v1/user/pageUser",
+      "/api/studyroom/v1.1/reservation/reservation",
+      "/api/studyroom/v1/user/student-id",
     ]);
+  });
+
+  it("uses the browser-confirmed reservation query shape", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(proxyResponse(200, JSON.stringify("预约成功")));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await submitOfficialReservation(env, "access-token", {
+      ownerStudentId: "student-id",
+      mobile: "13000000000",
+      roomId: 21,
+      date: "2026-06-02",
+      startTime: "13:00",
+      endTime: "14:00",
+      useDescription: "小组学习",
+      members: [],
+    });
+
+    const proxyPayload = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    const url = new URL(proxyPayload.url);
+    expect(url.pathname).toBe("/api/studyroom/v1.1/reservation/reservation");
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      userId: "student-id",
+      memberIds: "",
+      roomId: "21",
+      startTime: "2026-06-02 13:00:00",
+      endTime: "2026-06-02 14:00:00",
+      dictId: "2",
+      behaviorMode: "4",
+      mobile: "13000000000",
+      remark: "",
+      filePath: "",
+    });
+  });
+
+  it("uses the browser-confirmed multi-member reservation query shape", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(proxyResponse(200, JSON.stringify("预约已经提交，请等待被约人同意")));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await submitOfficialReservation(env, "access-token", {
+      ownerStudentId: "student-id",
+      mobile: "13000000000",
+      roomId: 20,
+      date: "2026-06-02",
+      startTime: "14:00",
+      endTime: "15:00",
+      useDescription: "小组学习",
+      members: [{ userId: "member-id", userName: "Member" }],
+    });
+
+    const proxyPayload = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    const url = new URL(proxyPayload.url);
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      userId: "student-id",
+      memberIds: "member-id",
+      roomId: "20",
+      startTime: "2026-06-02 14:00:00",
+      endTime: "2026-06-02 15:00:00",
+      dictId: "7",
+      behaviorMode: "1",
+      mobile: "13000000000",
+      remark: "",
+      filePath: "",
+    });
+  });
+
+  it("supports history, cancellation, signout and short-lived sign keys", async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(proxyResponse(200, JSON.stringify({ records: [] })))
+      .mockResolvedValueOnce(proxyResponse(200, "", "text/plain"))
+      .mockResolvedValueOnce(proxyResponse(200, "", "text/plain"))
+      .mockResolvedValueOnce(proxyResponse(200, JSON.stringify("short-lived-key")));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(fetchOfficialReservationHistory(env, "access-token", "student-id")).resolves.toEqual([]);
+    await cancelOfficialReservation(env, "access-token", "18651");
+    await signOutOfficialReservation(env, "access-token", "student-id", "23");
+    await expect(createOfficialQrSignCheckCode(env, "access-token", "23", "authorized-mac")).resolves.toBe("short-lived-key");
+
+    expect(fetchMock.mock.calls.map(([, init]) => new URL(JSON.parse(String(init?.body)).url).pathname)).toEqual([
+      "/api/studyroom/v1/reservation/pageByUserId",
+      "/api/studyroom/v1/reservation/cancelReservation",
+      "/api/studyroom/v1/reservation/signOut",
+      "/api/studyroom/v1/reservation/createQrSignCheckCode",
+    ]);
+    const signoutUrl = new URL(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body)).url);
+    expect(Object.fromEntries(signoutUrl.searchParams)).toMatchObject({ userId: "student-id", roomId: "23" });
+  });
+
+  it("uses the same room id and system mac for sign keys and sign submission", async () => {
+    const fetchMock = vi.fn<typeof fetch>()
+      .mockResolvedValueOnce(proxyResponse(200, JSON.stringify("short-lived-key")))
+      .mockResolvedValueOnce(proxyResponse(200, JSON.stringify({ executionResult: true })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const key = await createOfficialQrSignCheckCode(env, "access-token", "2", "JWJA211231039");
+    await submitOfficialSign(env, "access-token", "2", "JWJA211231039", key);
+
+    const keyUrl = new URL(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body)).url);
+    const signPayload = JSON.parse(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)).body);
+    expect(Object.fromEntries(keyUrl.searchParams)).toMatchObject({ roomId: "2", systemMac: "JWJA211231039" });
+    expect(signPayload).toEqual({ systemMac: "JWJA211231039", roomId: "2", qrSignCheckCode: "short-lived-key" });
   });
 
   it("reports the campus VPN restriction without logging the upstream HTML", async () => {

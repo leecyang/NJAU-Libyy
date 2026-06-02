@@ -5,6 +5,7 @@ import {
   assertPassword,
   assertReservation,
   assertThreeDayWindow,
+  availableTimeRanges,
   isHalfHour,
   minutesBetween,
   type Room,
@@ -59,5 +60,25 @@ describe("reservation validation", () => {
     expect(() => assertThreeDayWindow("2026-06-01", now)).not.toThrow();
     expect(() => assertThreeDayWindow("2026-06-02", now)).toThrow(HttpError);
   });
-});
 
+  it("merges official ten-minute slices and rejects occupied time", () => {
+    const detail = {
+      ...room,
+      status: 0,
+      minReservationNum: 1,
+      dateTimeSlicesList: [[
+        { startTime: Date.parse("2026-06-02T00:00:00Z"), endTime: Date.parse("2026-06-02T00:10:00Z"), reservationStatus: 0 },
+        { startTime: Date.parse("2026-06-02T00:10:00Z"), endTime: Date.parse("2026-06-02T00:20:00Z"), reservationStatus: 0 },
+        { startTime: Date.parse("2026-06-02T00:20:00Z"), endTime: Date.parse("2026-06-02T00:30:00Z"), reservationStatus: 0 },
+        { startTime: Date.parse("2026-06-02T00:30:00Z"), endTime: Date.parse("2026-06-02T00:40:00Z"), reservationStatus: 21 },
+      ]],
+    };
+    expect(availableTimeRanges(detail)).toEqual([{ startTime: "08:00", endTime: "08:30" }]);
+    expect(assertReservation(detail, { date: "2026-06-02", startTime: "08:00", endTime: "08:30", memberCount: 0 }, false)).toBe(30);
+    expect(() => assertReservation(detail, { date: "2026-06-02", startTime: "08:00", endTime: "09:00", memberCount: 0 }, false)).toThrow(HttpError);
+  });
+
+  it("blocks rooms disabled by the official status", () => {
+    expect(() => assertReservation({ ...room, status: 2 }, { date: "2026-06-02", startTime: "08:00", endTime: "08:30", memberCount: 2 }, true)).toThrow(HttpError);
+  });
+});

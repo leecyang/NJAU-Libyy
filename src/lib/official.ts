@@ -9,8 +9,10 @@ export type OfficialRefreshResult = {
 };
 
 export type OfficialIdentity = {
+  id?: number;
   userId: string;
   realName: string;
+  mobile?: string;
 };
 
 export type OfficialMember = {
@@ -19,6 +21,8 @@ export type OfficialMember = {
 };
 
 export type OfficialReservationRequest = {
+  ownerStudentId: string;
+  mobile: string;
   roomId: number;
   date: string;
   startTime: string;
@@ -46,7 +50,22 @@ type OfficialProxyResponse = {
   contentType?: string;
 };
 
-type OfficialOperation = "refresh-token" | "identity" | "rooms" | "reservation" | "user-search";
+type OfficialOperation =
+  | "refresh-token"
+  | "identity"
+  | "rooms"
+  | "room-detail"
+  | "reservation-dates"
+  | "room-policy"
+  | "reservation-members"
+  | "reservation"
+  | "reservation-history"
+  | "reservation-accept"
+  | "reservation-cancel"
+  | "reservation-sign"
+  | "reservation-signout"
+  | "sign-key"
+  | "user-search";
 
 type OfficialResponseDiagnostic = {
   operation: OfficialOperation;
@@ -283,6 +302,17 @@ async function officialJson(response: Response, operation: OfficialOperation): P
   }
 }
 
+async function officialText(response: Response, operation: OfficialOperation): Promise<string> {
+  const contentLength = Number(response.headers.get("content-length") ?? "0");
+  if (contentLength > 262_144) throw new HttpError(502, "OFFICIAL_INVALID_RESPONSE", "官方接口返回内容过大");
+  try {
+    return await response.text();
+  } catch {
+    console.error(JSON.stringify({ level: "error", event: "official_text_response_failed", operation }));
+    throw new HttpError(502, "OFFICIAL_INVALID_RESPONSE", "官方接口返回格式异常");
+  }
+}
+
 function officialFailure(response: Response, body: unknown): HttpError {
   const detail = body && typeof body === "object" ? body as OfficialError : {};
   if (detail.code === 2003 || detail.code === 2008) {
@@ -339,7 +369,12 @@ export async function fetchOfficialIdentity(env: AppEnv, accessToken: string): P
   if (!identity.userId || !identity.realName) {
     throw new HttpError(502, "OFFICIAL_INVALID_RESPONSE", "官方身份响应缺少必要字段");
   }
-  return { userId: identity.userId, realName: identity.realName };
+  return {
+    id: typeof identity.id === "number" ? identity.id : undefined,
+    userId: identity.userId,
+    realName: identity.realName,
+    mobile: typeof identity.mobile === "string" ? identity.mobile : undefined,
+  };
 }
 
 export async function fetchOfficialRooms(env: AppEnv, accessToken: string, date: string): Promise<Room[]> {
@@ -362,6 +397,8 @@ export async function fetchOfficialRooms(env: AppEnv, accessToken: string, date:
         id: room.id,
         name: room.name,
         roomLocation: room.roomLocation,
+        status: typeof room.status === "number" ? room.status : undefined,
+        remark: typeof room.remark === "string" ? room.remark : undefined,
         minReservationNum: Number(room.minReservationNum ?? 1),
         maxNum: Number(room.maxNum ?? 0),
         startTime: room.startTime,
@@ -375,28 +412,232 @@ export async function fetchOfficialRooms(env: AppEnv, accessToken: string, date:
   return rooms;
 }
 
+export type OfficialReservationRecord = {
+  id: number;
+  roomId: number;
+  userId: string;
+  userName?: string;
+  reservationStatus: number;
+  startTime: number;
+  endTime: number;
+  signInTime?: number | null;
+  signOutTime?: number | null;
+  minSignTime?: number | null;
+  maxSignTime?: number | null;
+  roomName?: string;
+  members?: unknown[];
+};
+
+type OfficialReservationPage = {
+  records?: unknown[];
+};
+
+function parseRoom(raw: unknown): Room {
+  if (!raw || typeof raw !== "object") throw new HttpError(502, "OFFICIAL_INVALID_RESPONSE", "官方房间详情响应格式异常");
+  const room = raw as Partial<Room>;
+  if (typeof room.id !== "number" || typeof room.name !== "string") {
+    throw new HttpError(502, "OFFICIAL_INVALID_RESPONSE", "官方房间详情响应缺少必要字段");
+  }
+  return {
+    id: room.id,
+    name: room.name,
+    roomLocation: room.roomLocation,
+    status: typeof room.status === "number" ? room.status : undefined,
+    remark: typeof room.remark === "string" ? room.remark : undefined,
+    minReservationNum: Number(room.minReservationNum ?? 1),
+    maxNum: Number(room.maxNum ?? 0),
+    startTime: room.startTime,
+    endTime: room.endTime,
+    reservationMinTime: room.reservationMinTime,
+    reservationMaxTime: room.reservationMaxTime,
+    dateTimeSlicesList: Array.isArray(room.dateTimeSlicesList) ? room.dateTimeSlicesList : undefined,
+  };
+}
+
+function parseReservationRecord(raw: unknown): OfficialReservationRecord | null {
+  if (!raw || typeof raw !== "object") return null;
+  const row = raw as Partial<OfficialReservationRecord>;
+  if (
+    typeof row.id !== "number" ||
+    typeof row.roomId !== "number" ||
+    typeof row.userId !== "string" ||
+    typeof row.reservationStatus !== "number" ||
+    typeof row.startTime !== "number" ||
+    typeof row.endTime !== "number"
+  ) return null;
+  return row as OfficialReservationRecord;
+}
+
+export async function fetchOfficialRoomDetail(env: AppEnv, accessToken: string, roomId: number, date: string): Promise<Room> {
+  const url = officialUrl(env, "/api/studyroom/v1/room/reservation");
+  url.searchParams.set("roomId", String(roomId));
+  url.searchParams.set("date", date);
+  const response = await officialFetch(env, url, "room-detail", { headers: officialHeaders(accessToken) });
+  const body = await officialJson(response, "room-detail");
+  if (!response.ok) throw officialFailure(response, body);
+  return parseRoom(body);
+}
+
+export async function fetchOfficialReservationDates(env: AppEnv, accessToken: string): Promise<string[]> {
+  const response = await officialFetch(env, officialUrl(env, "/api/studyroom/v1/room/reservationDate"), "reservation-dates", {
+    headers: officialHeaders(accessToken),
+  });
+  const body = await officialJson(response, "reservation-dates");
+  if (!response.ok) throw officialFailure(response, body);
+  if (!Array.isArray(body) || body.some((value) => typeof value !== "string")) {
+    throw new HttpError(502, "OFFICIAL_INVALID_RESPONSE", "官方预约日期响应格式异常");
+  }
+  return body;
+}
+
+export async function verifyOfficialRoomPolicy(env: AppEnv, accessToken: string, userId: string, roomId: number, memberIds: string[] = []): Promise<boolean> {
+  const url = officialUrl(env, "/api/studyroom/v1/room/verifyRoomPloy");
+  url.searchParams.set("userId", userId);
+  if (memberIds.length) url.searchParams.set("memberIds", memberIds.join(","));
+  url.searchParams.set("roomId", String(roomId));
+  const response = await officialFetch(env, url, "room-policy", { headers: officialHeaders(accessToken) });
+  const body = await officialJson(response, "room-policy");
+  if (!response.ok) throw officialFailure(response, body);
+  if (typeof body !== "boolean") throw new HttpError(502, "OFFICIAL_INVALID_RESPONSE", "官方房间规则响应格式异常");
+  return body;
+}
+
+export async function judgeOfficialReservationUsers(
+  env: AppEnv,
+  accessToken: string,
+  userId: string,
+  memberIds: string[],
+  date: string,
+  startTime: string,
+): Promise<void> {
+  const url = officialUrl(env, "/api/studyroom/v1/reservation/reservationUserJudge");
+  url.searchParams.set("userId", userId);
+  url.searchParams.set("memberIds", memberIds.join(","));
+  url.searchParams.set("startTime", `${date} ${startTime}:00`);
+  const response = await officialFetch(env, url, "reservation-members", { headers: officialHeaders(accessToken) });
+  const body = await officialText(response, "reservation-members");
+  if (!response.ok) throw officialFailure(response, body);
+}
+
 export async function submitOfficialReservation(
   env: AppEnv,
   accessToken: string,
   request: OfficialReservationRequest,
 ): Promise<unknown> {
-  const response = await officialFetch(env, officialUrl(env, "/api/studyroom/v1/reservation/accept"), "reservation", {
+  const url = officialUrl(env, "/api/studyroom/v1.1/reservation/reservation");
+  url.searchParams.set("userId", request.ownerStudentId);
+  url.searchParams.set("memberIds", request.members.map((member) => member.userId).join(","));
+  url.searchParams.set("roomId", String(request.roomId));
+  url.searchParams.set("startTime", `${request.date} ${request.startTime}:00`);
+  url.searchParams.set("endTime", `${request.date} ${request.endTime}:00`);
+  url.searchParams.set("dictId", request.members.length ? "7" : "2");
+  url.searchParams.set("behaviorMode", request.members.length ? "1" : "4");
+  url.searchParams.set("mobile", request.mobile);
+  url.searchParams.set("remark", "");
+  url.searchParams.set("filePath", "");
+  const response = await officialFetch(env, url, "reservation", {
     method: "POST",
-    headers: { ...officialHeaders(accessToken), "content-type": "application/json;charset=UTF-8" },
-    body: JSON.stringify(request),
+    headers: officialHeaders(accessToken),
   });
-  const body = await officialJson(response, "reservation");
+  const text = await officialText(response, "reservation");
+  let body: unknown = text;
+  try {
+    body = text ? JSON.parse(text) : "";
+  } catch {
+    // Some official operations intentionally return plain text.
+  }
   if (!response.ok) throw officialFailure(response, body);
   return body;
 }
 
-export async function searchOfficialUsers(env: AppEnv, accessToken: string, query: string): Promise<unknown> {
-  const url = officialUrl(env, "/api/studyroom/v1/user/pageUser");
+export async function fetchOfficialReservationHistory(
+  env: AppEnv,
+  accessToken: string,
+  userId: string,
+): Promise<OfficialReservationRecord[]> {
+  const url = officialUrl(env, "/api/studyroom/v1/reservation/pageByUserId");
   url.searchParams.set("page", "1");
-  url.searchParams.set("size", "10");
-  url.searchParams.set("userName", query);
+  url.searchParams.set("size", "100");
+  const response = await officialFetch(env, url, "reservation-history", {
+    method: "POST",
+    headers: { ...officialHeaders(accessToken), "content-type": "application/json;charset=UTF-8" },
+    body: JSON.stringify({ userId }),
+  });
+  const body = await officialJson(response, "reservation-history");
+  if (!response.ok) throw officialFailure(response, body);
+  if (!body || typeof body !== "object" || !Array.isArray((body as OfficialReservationPage).records)) {
+    throw new HttpError(502, "OFFICIAL_INVALID_RESPONSE", "官方预约历史响应格式异常");
+  }
+  return (body as OfficialReservationPage).records!.map(parseReservationRecord).filter((row): row is OfficialReservationRecord => Boolean(row));
+}
+
+async function officialEmptyPost(env: AppEnv, accessToken: string, operation: OfficialOperation, path: string, params: Record<string, string>): Promise<void> {
+  const url = officialUrl(env, path);
+  Object.entries(params).forEach(([name, value]) => url.searchParams.set(name, value));
+  const response = await officialFetch(env, url, operation, { method: "POST", headers: officialHeaders(accessToken) });
+  const body = await officialText(response, operation);
+  if (!response.ok) throw officialFailure(response, body);
+}
+
+export async function cancelOfficialReservation(env: AppEnv, accessToken: string, reservationId: string): Promise<void> {
+  return officialEmptyPost(env, accessToken, "reservation-cancel", "/api/studyroom/v1/reservation/cancelReservation", {
+    reservationId,
+    cancelType: "1",
+  });
+}
+
+export async function acceptOfficialReservation(env: AppEnv, accessToken: string, reservationId: string): Promise<void> {
+  return officialEmptyPost(env, accessToken, "reservation-accept", "/api/studyroom/v1/reservation/accept", {
+    reservationId,
+    status: "1",
+  });
+}
+
+export async function submitOfficialSign(env: AppEnv, accessToken: string, roomId: string, systemMac: string, qrSignCheckCode: string): Promise<void> {
+  const response = await officialFetch(env, officialUrl(env, "/api/studyroom/v1/sign"), "reservation-sign", {
+    method: "POST",
+    headers: { ...officialHeaders(accessToken), "content-type": "application/json;charset=UTF-8" },
+    body: JSON.stringify({ systemMac, roomId, qrSignCheckCode }),
+  });
+  const body = await officialJson(response, "reservation-sign");
+  if (!response.ok) throw officialFailure(response, body);
+  if (!body || typeof body !== "object" || (body as { executionResult?: unknown }).executionResult !== true) {
+    throw new HttpError(409, "OFFICIAL_SIGN_REJECTED", "官方签到未成功");
+  }
+}
+
+export async function signOutOfficialReservation(env: AppEnv, accessToken: string, userId: string, roomId: string): Promise<void> {
+  return officialEmptyPost(env, accessToken, "reservation-signout", "/api/studyroom/v1/reservation/signOut", {
+    userId,
+    roomId,
+  });
+}
+
+export async function createOfficialQrSignCheckCode(env: AppEnv, accessToken: string, roomId: string, systemMac: string): Promise<string> {
+  const url = officialUrl(env, "/api/studyroom/v1/reservation/createQrSignCheckCode");
+  url.searchParams.set("roomId", roomId);
+  url.searchParams.set("systemMac", systemMac);
+  const response = await officialFetch(env, url, "sign-key", { headers: officialHeaders(accessToken) });
+  const text = await officialText(response, "sign-key");
+  if (!response.ok) throw officialFailure(response, text);
+  let key = text;
+  try {
+    const body = JSON.parse(text) as unknown;
+    key = typeof body === "string" ? body : "";
+  } catch {
+    // Plain text keys are supported.
+  }
+  if (!key || key.length > 2048) throw new HttpError(502, "OFFICIAL_INVALID_RESPONSE", "官方签到 Key 响应格式异常");
+  return key;
+}
+
+export async function searchOfficialUsers(env: AppEnv, accessToken: string, query: string): Promise<OfficialIdentity> {
+  const url = officialUrl(env, `/api/studyroom/v1/user/${encodeURIComponent(query)}`);
   const response = await officialFetch(env, url, "user-search", { headers: officialHeaders(accessToken) });
   const body = await officialJson(response, "user-search");
   if (!response.ok) throw officialFailure(response, body);
-  return body;
+  if (!body || typeof body !== "object") throw new HttpError(404, "OFFICIAL_USER_NOT_FOUND", "未找到该学号");
+  const user = body as Partial<OfficialIdentity>;
+  if (!user.userId || !user.realName) throw new HttpError(404, "OFFICIAL_USER_NOT_FOUND", "未找到该学号");
+  return { id: user.id, userId: user.userId, realName: user.realName, mobile: user.mobile };
 }

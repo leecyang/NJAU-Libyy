@@ -1,17 +1,34 @@
 import type { AppEnv } from "../config";
 import { flag, integerVar } from "../config";
-import { requireAdmin, requireUser, revokeSession, type User } from "../lib/auth";
+import { currentUser, requireAdmin, requireUser, revokeSession, type User } from "../lib/auth";
 import { audit } from "../lib/audit";
-import { bindCredential, credentialStatus, getAccessToken } from "../lib/credentials";
-import { encryptSecret, sha256, randomToken } from "../lib/crypto";
+import { bindCredential, credentialStatus, getAccessToken, getOfficialReservationProfile } from "../lib/credentials";
+import { sha256, randomToken } from "../lib/crypto";
 import { HttpError, ok, readJsonBody, requireString } from "../lib/http";
 import { queueMail } from "../lib/mail";
 import {
+  acceptOfficialReservation,
+  cancelOfficialReservation,
+  createOfficialQrSignCheckCode,
+  fetchOfficialReservationDates,
+  fetchOfficialReservationHistory,
+  fetchOfficialRoomDetail,
   fetchOfficialRooms,
+  judgeOfficialReservationUsers,
+  searchOfficialUsers,
+  signOutOfficialReservation,
   submitOfficialReservation,
+  verifyOfficialRoomPolicy,
   type OfficialMember,
 } from "../lib/official";
 import {
+  localReservationStatus,
+  resolveSignDevice,
+  shanghaiParts,
+  syncOfficialReservationHistory,
+} from "../lib/reservations";
+import {
+  availableTimeRanges,
   assertReservation,
   assertThreeDayWindow,
   isHalfHour,
@@ -21,6 +38,17 @@ import {
 } from "../lib/validation";
 
 type JsonObject = Record<string, unknown>;
+type ResolvedMember = OfficialMember & {
+  source: "TEAM" | "CONTACT" | "AUTO_JOIN";
+  localUserId?: string;
+  contactId?: string;
+};
+
+const memberSourcePriority: Record<ResolvedMember["source"], number> = {
+  CONTACT: 0,
+  AUTO_JOIN: 1,
+  TEAM: 2,
+};
 
 function isObject(value: unknown): value is JsonObject {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -41,25 +69,87 @@ async function activeRooms(env: AppEnv, userId: string, date: string): Promise<R
 }
 
 function publicRoom(room: Room): Room & { reservable: boolean } {
-  return { ...room, reservable: room.maxNum !== 8 && room.maxNum !== 12 };
+  return { ...room, reservable: (room.status ?? 0) === 0 && room.maxNum !== 8 && room.maxNum !== 12 };
 }
 
-async function resolveMembers(env: AppEnv, owner: User, memberUserIds: unknown): Promise<OfficialMember[]> {
-  const values = requireArray(memberUserIds ?? [], "memberUserIds", 12);
-  const ids = [...new Set(values.map((value) => requireString(value, "memberUserIds", 80)))];
-  if (ids.includes(owner.id)) throw new HttpError(400, "INVALID_MEMBERS", "主预约人不能作为副预约人");
-  if (ids.length === 0) return [];
-  const placeholders = ids.map(() => "?").join(",");
-  const rows = await env.DB.prepare(
-    `SELECT id, student_id, real_name, allow_auto_join_reservation
-       FROM users WHERE id IN (${placeholders}) AND status = 'ACTIVE'`,
-  ).bind(...ids).all<{ id: string; student_id: string | null; real_name: string | null; allow_auto_join_reservation: number }>();
-  if (rows.results.length !== ids.length) throw new HttpError(400, "INVALID_MEMBERS", "副预约人不存在或不可用");
-  return rows.results.map((row) => {
-    if (!row.student_id || !row.real_name) throw new HttpError(400, "MEMBER_UNBOUND", "副预约人尚未绑定官方身份");
-    if (!row.allow_auto_join_reservation) throw new HttpError(409, "MEMBER_APPROVAL_REQUIRED", "副预约人尚未授权自动联约，请先创建邀请");
-    return { userId: row.student_id, userName: row.real_name };
-  });
+async function requireBoundUser(env: AppEnv, request: Request): Promise<User> {
+  const user = await requireUser(env, request);
+  const credential = await credentialStatus(env, user.id);
+  if (!user.student_id || !user.real_name || credential.credential_status !== "ACTIVE") {
+    throw new HttpError(409, "SETUP_REQUIRED", "请先完成官方凭证配置");
+  }
+  return user;
+}
+
+function maskStudentId(value: string | null): string | null {
+  if (!value) return null;
+  if (value.length <= 4) return value;
+  return `${value.slice(0, 2)}****${value.slice(-2)}`;
+}
+
+async function resolveMembers(env: AppEnv, owner: User, teamMemberUserIds: unknown, contactIds: unknown, autoJoinUserIds: unknown): Promise<ResolvedMember[]> {
+  const teamIds = [...new Set(requireArray(teamMemberUserIds ?? [], "teamMemberUserIds", 20).map((value) => requireString(value, "teamMemberUserIds", 80)))];
+  const recentIds = [...new Set(requireArray(contactIds ?? [], "contactIds", 20).map((value) => requireString(value, "contactIds", 80)))];
+  const autoJoinIds = [...new Set(requireArray(autoJoinUserIds ?? [], "autoJoinUserIds", 20).map((value) => requireString(value, "autoJoinUserIds", 80)))];
+  if ([...teamIds, ...autoJoinIds].includes(owner.id)) throw new HttpError(400, "INVALID_MEMBERS", "主预约人不能作为副预约人");
+  const members: ResolvedMember[] = [];
+  if (teamIds.length) {
+    const placeholders = teamIds.map(() => "?").join(",");
+    const rows = await env.DB.prepare(
+      `SELECT u.id, u.student_id, u.real_name
+         FROM teams t
+         JOIN team_members m ON m.team_id = t.id
+         JOIN users u ON u.id = m.user_id
+        WHERE t.leader_user_id = ? AND u.id IN (${placeholders}) AND u.status = 'ACTIVE'`,
+    ).bind(owner.id, ...teamIds).all<{ id: string; student_id: string; real_name: string }>();
+    if (rows.results.length !== teamIds.length) throw new HttpError(403, "TEAM_MEMBER_REQUIRED", "只能自动联约自己带领小队中的成员");
+    members.push(...rows.results.map((row) => ({ userId: row.student_id, userName: row.real_name, source: "TEAM" as const, localUserId: row.id })));
+  }
+  if (recentIds.length) {
+    const placeholders = recentIds.map(() => "?").join(",");
+    const rows = await env.DB.prepare(
+      `SELECT id, official_student_id, official_real_name FROM recent_contacts
+        WHERE owner_user_id = ? AND id IN (${placeholders})`,
+    ).bind(owner.id, ...recentIds).all<{ id: string; official_student_id: string; official_real_name: string }>();
+    if (rows.results.length !== recentIds.length) throw new HttpError(400, "INVALID_CONTACTS", "最近联系人不存在");
+    members.push(...rows.results.map((row) => ({ userId: row.official_student_id, userName: row.official_real_name, source: "CONTACT" as const, contactId: row.id })));
+  }
+  if (autoJoinIds.length) {
+    const placeholders = autoJoinIds.map(() => "?").join(",");
+    const rows = await env.DB.prepare(
+      `SELECT id, student_id, real_name FROM users
+        WHERE id IN (${placeholders})
+          AND status = 'ACTIVE'
+          AND allow_auto_join_reservation = 1
+          AND student_id IS NOT NULL
+          AND real_name IS NOT NULL`,
+    ).bind(...autoJoinIds).all<{ id: string; student_id: string; real_name: string }>();
+    if (rows.results.length !== autoJoinIds.length) {
+      throw new HttpError(403, "AUTO_JOIN_NOT_AUTHORIZED", "只能自动联约已主动开启授权的站内用户");
+    }
+    members.push(...rows.results.map((row) => ({ userId: row.student_id, userName: row.real_name, source: "AUTO_JOIN" as const, localUserId: row.id })));
+  }
+  const deduped = new Map<string, ResolvedMember>();
+  for (const member of members) {
+    const current = deduped.get(member.userId);
+    if (!current || memberSourcePriority[member.source] > memberSourcePriority[current.source]) deduped.set(member.userId, member);
+  }
+  return [...deduped.values()];
+}
+
+async function autoAcceptTeamMembers(env: AppEnv, officialReservationId: string, members: ResolvedMember[]): Promise<{ accepted: number; failed: number }> {
+  let accepted = 0;
+  let failed = 0;
+  for (const member of members) {
+    if (!["TEAM", "AUTO_JOIN"].includes(member.source) || !member.localUserId) continue;
+    try {
+      await acceptOfficialReservation(env, await getAccessToken(env, member.localUserId), officialReservationId);
+      accepted += 1;
+    } catch {
+      failed += 1;
+    }
+  }
+  return { accepted, failed };
 }
 
 async function localReservationLimits(env: AppEnv, userId: string, date: string, duration: number): Promise<void> {
@@ -68,7 +158,7 @@ async function localReservationLimits(env: AppEnv, userId: string, date: string,
             COALESCE(SUM((CAST(substr(end_time, 1, 2) AS INTEGER) * 60 + CAST(substr(end_time, 4, 2) AS INTEGER)) -
                          (CAST(substr(start_time, 1, 2) AS INTEGER) * 60 + CAST(substr(start_time, 4, 2) AS INTEGER))), 0) AS minutes
        FROM reservations
-      WHERE owner_user_id = ? AND date = ? AND status IN ('SUBMITTED_UNVERIFIED', 'SUCCESS')`,
+      WHERE owner_user_id = ? AND date = ? AND status IN ('SUBMITTED_UNVERIFIED', 'SUCCESS', 'SCHEDULED', 'SIGNED_IN', 'SIGNED_OUT')`,
   ).bind(userId, date).first<{ count: number; minutes: number }>();
   if (Number(row?.count ?? 0) >= 2) throw new HttpError(409, "DAILY_RESERVATION_LIMIT", "每日最多预约 2 次");
   if (Number(row?.minutes ?? 0) + duration > 240) throw new HttpError(409, "DAILY_DURATION_LIMIT", "每日累计预约时长不得超过 240 分钟");
@@ -92,6 +182,20 @@ export async function me(env: AppEnv, request: Request): Promise<Response> {
 
 export async function health(env: AppEnv): Promise<Response> {
   const database = await env.DB.prepare("SELECT 1 AS value").first<{ value: number }>();
+  let signRoomSystemMacMapConfigured = false;
+  let room2SignDeviceConfigured = false;
+  try {
+    const parsed = JSON.parse(env.SIGN_ROOM_SYSTEM_MAC_MAP?.trim() || "{}") as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const values = Object.values(parsed as Record<string, unknown>);
+      signRoomSystemMacMapConfigured = values.some((value) => typeof value === "string" && value.trim() !== "");
+      room2SignDeviceConfigured = typeof (parsed as Record<string, unknown>)["2"] === "string"
+        && String((parsed as Record<string, unknown>)["2"]).trim() !== "";
+    }
+  } catch {
+    signRoomSystemMacMapConfigured = false;
+    room2SignDeviceConfigured = false;
+  }
   return ok({
     service: "njau-libyy",
     environment: env.ENVIRONMENT,
@@ -102,7 +206,13 @@ export async function health(env: AppEnv): Promise<Response> {
       officialProxyConfigured: Boolean(env.NJAU_PROXY_ENDPOINT && env.NJAU_PROXY_TOKEN),
       smtpConfigured: Boolean(env.SMTP_PASSWORD),
       emailDeliveryEnabled: flag(env, "EMAIL_DELIVERY_ENABLED"),
-      reservationSubmissionEnabled: flag(env, "ENABLE_OFFICIAL_RESERVATION_SUBMISSION"),
+      reservationSubmissionEnabled: flag(env, "ENABLE_SINGLE_RESERVATION_SUBMISSION"),
+      multiMemberReservationSubmissionEnabled: flag(env, "ENABLE_MULTIMEMBER_RESERVATION_SUBMISSION"),
+      signLinkGenerationEnabled: flag(env, "ENABLE_SIGN_LINK_GENERATION"),
+      signDeviceConfigured: signRoomSystemMacMapConfigured || Boolean(env.AUTHORIZED_SIGN_SYSTEM_MAC && env.AUTHORIZED_SIGN_ROOM_ID),
+      signRoomSystemMacMapConfigured,
+      room2SignDeviceConfigured,
+      autoSignSubmissionEnabled: flag(env, "ENABLE_AUTO_SIGN_SUBMISSION"),
       signParameterIngestEnabled: flag(env, "ENABLE_SIGN_PARAMETER_INGEST"),
       signoutSubmissionEnabled: flag(env, "ENABLE_SIGNOUT_SUBMISSION"),
     },
@@ -115,6 +225,9 @@ export async function deleteAccount(env: AppEnv, request: Request): Promise<Resp
   await env.DB.batch([
     env.DB.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").bind(now, user.id),
     env.DB.prepare("DELETE FROM official_credentials WHERE user_id = ?").bind(user.id),
+    env.DB.prepare("DELETE FROM teams WHERE leader_user_id = ?").bind(user.id),
+    env.DB.prepare("DELETE FROM team_members WHERE user_id = ?").bind(user.id),
+    env.DB.prepare("UPDATE team_invitations SET status = 'CANCELLED', responded_at = ? WHERE invitee_user_id = ? AND status = 'PENDING'").bind(now, user.id),
     env.DB.prepare("UPDATE reservation_tasks SET status = 'CANCELLED', updated_at = ? WHERE owner_user_id = ? AND status NOT IN ('SUCCESS', 'FAILED', 'CANCELLED', 'EXPIRED')").bind(now, user.id),
     env.DB.prepare("UPDATE users SET status = 'DELETED', deleted_at = ?, updated_at = ? WHERE id = ?").bind(now, now, user.id),
   ]);
@@ -137,31 +250,46 @@ export async function getCredentialStatus(env: AppEnv, request: Request): Promis
 }
 
 export async function rooms(env: AppEnv, request: Request): Promise<Response> {
-  const user = await requireUser(env, request);
+  const user = await requireBoundUser(env, request);
   const date = requireString(new URL(request.url).searchParams.get("date"), "date", 10);
   assertThreeDayWindow(date);
   return ok({ date, rooms: (await activeRooms(env, user.id, date)).map(publicRoom) });
 }
 
+export async function roomDetail(env: AppEnv, request: Request, roomIdText: string): Promise<Response> {
+  const user = await requireBoundUser(env, request);
+  const date = requireString(new URL(request.url).searchParams.get("date"), "date", 10);
+  assertThreeDayWindow(date);
+  const roomId = Number(roomIdText);
+  if (!Number.isInteger(roomId)) throw new HttpError(400, "INVALID_FIELD", "roomId 格式错误");
+  const room = publicRoom(await fetchOfficialRoomDetail(env, await getAccessToken(env, user.id), roomId, date));
+  return ok({ ...room, availableRanges: availableTimeRanges(room) });
+}
+
 export async function manualReservation(env: AppEnv, request: Request): Promise<Response> {
-  const user = await requireUser(env, request);
+  const user = await requireBoundUser(env, request);
   const body = await readJsonBody<JsonObject>(request);
   const date = requireString(body.date, "date", 10);
   assertThreeDayWindow(date);
   const roomId = requireInteger(body.roomId, "roomId");
   const startTime = requireString(body.startTime, "startTime", 5);
   const endTime = requireString(body.endTime, "endTime", 5);
-  const members = await resolveMembers(env, user, body.memberUserIds);
+  const members = await resolveMembers(env, user, body.teamMemberUserIds, body.contactIds, body.autoJoinUserIds);
+  if (members.length && !flag(env, "ENABLE_MULTIMEMBER_RESERVATION_SUBMISSION")) {
+    throw new HttpError(503, "MULTIMEMBER_SUBMISSION_DISABLED", "多人官方提交尚未开放，请先使用单人预约");
+  }
   const token = await getAccessToken(env, user.id);
-  const room = (await fetchOfficialRooms(env, token, date)).find((item) => item.id === roomId);
-  if (!room) throw new HttpError(404, "ROOM_NOT_FOUND", "未找到该房间");
+  const profile = await getOfficialReservationProfile(env, user.id, token);
+  const room = await fetchOfficialRoomDetail(env, token, roomId, date);
   const duration = assertReservation(room, { date, startTime, endTime, memberCount: members.length }, false);
   await localReservationLimits(env, user.id, date, duration);
-  if (!flag(env, "ENABLE_OFFICIAL_RESERVATION_SUBMISSION")) {
-    throw new HttpError(503, "RESERVATION_SUBMISSION_DISABLED", "预约成功响应契约尚未补齐，官方提交当前保持关闭");
-  }
+  if (!flag(env, "ENABLE_SINGLE_RESERVATION_SUBMISSION")) throw new HttpError(503, "RESERVATION_SUBMISSION_DISABLED", "单人预约提交当前保持关闭");
+  if (!await verifyOfficialRoomPolicy(env, token, profile.studentId, roomId, members.map((member) => member.userId))) throw new HttpError(409, "ROOM_POLICY_REJECTED", "官方房间规则不允许本次预约");
+  await judgeOfficialReservationUsers(env, token, profile.studentId, members.map((member) => member.userId), date, startTime);
 
-  const officialResponse = await submitOfficialReservation(env, token, {
+  await submitOfficialReservation(env, token, {
+    ownerStudentId: profile.studentId,
+    mobile: profile.mobile,
     roomId,
     date,
     startTime,
@@ -169,33 +297,64 @@ export async function manualReservation(env: AppEnv, request: Request): Promise<
     useDescription: "小组学习",
     members,
   });
-  const now = Date.now();
-  const reservationId = crypto.randomUUID();
-  await env.DB.prepare(
-    `INSERT INTO reservations
-      (id, owner_user_id, room_id, room_name_snapshot, date, start_time, end_time,
-       member_snapshot_json, submission_type, status, official_response_json_redacted, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'MANUAL', 'SUBMITTED_UNVERIFIED', ?, ?, ?)`,
-  ).bind(reservationId, user.id, room.id, room.name, date, startTime, endTime, JSON.stringify(members), JSON.stringify({
-    received: officialResponse !== null,
-    responseType: Array.isArray(officialResponse) ? "array" : typeof officialResponse,
-  }), now, now).run();
-  await audit(env.DB, { actorUserId: user.id, actorType: "USER", action: "MANUAL_RESERVATION_SUBMITTED", targetType: "RESERVATION", targetId: reservationId, result: "SUBMITTED_UNVERIFIED" });
-  return ok({ id: reservationId, status: "SUBMITTED_UNVERIFIED", note: "等待补齐官方成功响应契约后确认订单字段" });
+  let records = await syncOfficialReservationHistory(env, user);
+  let matched = records.find((record) => {
+    const recordStart = shanghaiParts(record.startTime);
+    const recordEnd = shanghaiParts(record.endTime);
+    return record.roomId === roomId && recordStart.date === date && recordStart.time === startTime && recordEnd.time === endTime;
+  });
+  if (!matched) throw new HttpError(502, "RESERVATION_SYNC_FAILED", "官方已接收预约，但订单回读失败，请在预约历史中刷新");
+  const acceptance = await autoAcceptTeamMembers(env, String(matched.id), members);
+  if (acceptance.accepted) {
+    records = await syncOfficialReservationHistory(env, user);
+    matched = records.find((record) => record.id === matched!.id) ?? matched;
+  }
+  const local = await env.DB.prepare(
+    "SELECT id, status FROM reservations WHERE owner_user_id = ? AND official_reservation_id = ?",
+  ).bind(user.id, String(matched.id)).first<{ id: string; status: string }>();
+  await audit(env.DB, { actorUserId: user.id, actorType: "USER", action: "MANUAL_RESERVATION_SUBMITTED", targetType: "RESERVATION", targetId: local?.id, result: "SUCCESS" });
+  return ok({
+    id: local?.id,
+    officialReservationId: String(matched.id),
+    status: local?.status ?? localReservationStatus(matched.reservationStatus),
+    teamMembersAutoAccepted: acceptance.accepted,
+    teamMembersPendingRetry: acceptance.failed,
+  });
 }
 
 export async function reservationHistory(env: AppEnv, request: Request): Promise<Response> {
-  const user = await requireUser(env, request);
+  const user = await requireBoundUser(env, request);
+  if (new URL(request.url).searchParams.get("sync") === "true") await syncOfficialReservationHistory(env, user);
   const rows = await env.DB.prepare(
     `SELECT id, task_id, official_reservation_id, room_id, room_name_snapshot, date,
-            start_time, end_time, member_snapshot_json, submission_type, status, created_at
+            start_time, end_time, member_snapshot_json, submission_type, status, official_status, created_at
        FROM reservations WHERE owner_user_id = ? ORDER BY created_at DESC LIMIT 100`,
   ).bind(user.id).all();
   return ok(rows.results);
 }
 
+export async function syncReservationHistory(env: AppEnv, request: Request): Promise<Response> {
+  const user = await requireBoundUser(env, request);
+  await syncOfficialReservationHistory(env, user);
+  return reservationHistory(env, request);
+}
+
+export async function cancelReservation(env: AppEnv, request: Request, reservationId: string): Promise<Response> {
+  const user = await requireBoundUser(env, request);
+  const row = await env.DB.prepare(
+    "SELECT official_reservation_id FROM reservations WHERE id = ? AND owner_user_id = ? AND status IN ('SCHEDULED', 'SUBMITTED_UNVERIFIED')",
+  ).bind(reservationId, user.id).first<{ official_reservation_id: string | null }>();
+  if (!row?.official_reservation_id) throw new HttpError(409, "RESERVATION_NOT_CANCELLABLE", "当前预约无法取消");
+  await cancelOfficialReservation(env, await getAccessToken(env, user.id), row.official_reservation_id);
+  await syncOfficialReservationHistory(env, user);
+  const updated = await env.DB.prepare("SELECT status FROM reservations WHERE id = ?").bind(reservationId).first<{ status: string }>();
+  if (updated?.status !== "CANCELLED") throw new HttpError(502, "RESERVATION_SYNC_FAILED", "取消请求已提交，但官方状态尚未同步");
+  await audit(env.DB, { actorUserId: user.id, actorType: "USER", action: "RESERVATION_CANCELLED", targetType: "RESERVATION", targetId: reservationId, result: "SUCCESS" });
+  return ok({ id: reservationId, status: "CANCELLED" });
+}
+
 export async function reservationDetail(env: AppEnv, request: Request, reservationId: string): Promise<Response> {
-  const user = await requireUser(env, request);
+  const user = await requireBoundUser(env, request);
   const row = await env.DB.prepare(
     `SELECT id, task_id, official_reservation_id, room_id, room_name_snapshot, date,
             start_time, end_time, member_snapshot_json, submission_type, status, created_at, updated_at
@@ -206,7 +365,7 @@ export async function reservationDetail(env: AppEnv, request: Request, reservati
 }
 
 export async function createTask(env: AppEnv, request: Request): Promise<Response> {
-  const user = await requireUser(env, request);
+  const user = await requireBoundUser(env, request);
   const body = await readJsonBody<JsonObject>(request);
   const targetDate = requireString(body.targetDate, "targetDate", 10);
   const startTime = requireString(body.startTime, "startTime", 5);
@@ -218,6 +377,7 @@ export async function createTask(env: AppEnv, request: Request): Promise<Respons
 
   const candidates = requireArray(body.candidateRooms, "candidateRooms", 12);
   if (candidates.length === 0) throw new HttpError(400, "CANDIDATE_ROOMS_REQUIRED", "请至少选择一个候选房间");
+  const members = await resolveMembers(env, user, body.teamMemberUserIds, body.contactIds, body.autoJoinUserIds);
   const taskId = crypto.randomUUID();
   const now = Date.now();
   const statements = [
@@ -235,13 +395,20 @@ export async function createTask(env: AppEnv, request: Request): Promise<Respons
        VALUES (?, ?, ?, ?, ?, ?)`,
     ).bind(crypto.randomUUID(), taskId, requireInteger(candidate.roomId, "roomId"), requireString(candidate.roomName, "roomName", 80), index + 1, now));
   });
+  members.forEach((member) => {
+    statements.push(env.DB.prepare(
+      `INSERT INTO reservation_task_members
+        (id, task_id, source, member_user_id, contact_id, official_student_id, official_real_name, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(crypto.randomUUID(), taskId, member.source, member.localUserId ?? null, member.contactId ?? null, member.userId, member.userName, now));
+  });
   await env.DB.batch(statements);
   await audit(env.DB, { actorUserId: user.id, actorType: "USER", action: "RESERVATION_TASK_CREATED", targetType: "RESERVATION_TASK", targetId: taskId, result: "SUCCESS" });
   return ok({ id: taskId, status: "DRAFT" });
 }
 
 export async function listTasks(env: AppEnv, request: Request): Promise<Response> {
-  const user = await requireUser(env, request);
+  const user = await requireBoundUser(env, request);
   const rows = await env.DB.prepare(
     `SELECT t.*, COALESCE(json_group_array(json_object('roomId', c.room_id, 'roomName', c.room_name_snapshot, 'priority', c.priority)), '[]') AS candidate_rooms
        FROM reservation_tasks t
@@ -253,19 +420,20 @@ export async function listTasks(env: AppEnv, request: Request): Promise<Response
 }
 
 export async function taskDetail(env: AppEnv, request: Request, taskId: string): Promise<Response> {
-  const user = await requireUser(env, request);
+  const user = await requireBoundUser(env, request);
   const task = await env.DB.prepare("SELECT * FROM reservation_tasks WHERE id = ? AND owner_user_id = ?")
     .bind(taskId, user.id).first<JsonObject>();
   if (!task) throw new HttpError(404, "TASK_NOT_FOUND", "未找到自动预约任务");
-  const [candidates, invitations] = await Promise.all([
+  const [candidates, invitations, members] = await Promise.all([
     env.DB.prepare("SELECT room_id, room_name_snapshot, priority FROM reservation_task_candidate_rooms WHERE task_id = ? ORDER BY priority").bind(taskId).all(),
     env.DB.prepare("SELECT id, invitee_user_id, invitee_student_id, invitee_real_name, status, approval_source, expires_at FROM reservation_invitations WHERE task_id = ? ORDER BY created_at").bind(taskId).all(),
+    env.DB.prepare("SELECT id, source, official_student_id, official_real_name FROM reservation_task_members WHERE task_id = ? ORDER BY created_at").bind(taskId).all(),
   ]);
-  return ok({ ...task, candidateRooms: candidates.results, invitations: invitations.results });
+  return ok({ ...task, candidateRooms: candidates.results, invitations: invitations.results, members: members.results });
 }
 
 export async function updateTask(env: AppEnv, request: Request, taskId: string): Promise<Response> {
-  const user = await requireUser(env, request);
+  const user = await requireBoundUser(env, request);
   const body = await readJsonBody<JsonObject>(request);
   const targetDate = requireString(body.targetDate, "targetDate", 10);
   const startTime = requireString(body.startTime, "startTime", 5);
@@ -282,7 +450,11 @@ export async function updateTask(env: AppEnv, request: Request, taskId: string):
 }
 
 export async function changeTaskStatus(env: AppEnv, request: Request, taskId: string, action: "enable" | "cancel"): Promise<Response> {
-  const user = await requireUser(env, request);
+  const user = await requireBoundUser(env, request);
+  if (action === "enable" && !flag(env, "ENABLE_MULTIMEMBER_RESERVATION_SUBMISSION")) {
+    const member = await env.DB.prepare("SELECT id FROM reservation_task_members WHERE task_id = ? LIMIT 1").bind(taskId).first();
+    if (member) throw new HttpError(503, "MULTIMEMBER_SUBMISSION_DISABLED", "多人自动预约尚未开放，请移除成员后再启用任务");
+  }
   const nextStatus = action === "enable" ? "WAITING_WINDOW" : "CANCELLED";
   const allowed = action === "enable" ? "('DRAFT', 'WAITING_MEMBERS')" : "('DRAFT', 'WAITING_WINDOW', 'WAITING_MEMBERS', 'READY')";
   const result = await env.DB.prepare(
@@ -294,73 +466,220 @@ export async function changeTaskStatus(env: AppEnv, request: Request, taskId: st
 }
 
 export async function squareUsers(env: AppEnv, request: Request): Promise<Response> {
-  const user = await requireUser(env, request);
+  const user = await requireBoundUser(env, request);
   const rows = await env.DB.prepare(
-    `SELECT id, real_name,
-            CASE WHEN length(student_id) > 4 THEN substr(student_id, 1, 2) || '****' || substr(student_id, -2) ELSE '****' END AS student_id_masked,
-            allow_auto_join_reservation
+    `SELECT id, student_id, real_name, allow_auto_join_reservation
        FROM users
-      WHERE status = 'ACTIVE' AND student_id IS NOT NULL AND square_visibility = 'VISIBLE' AND id <> ?
+      WHERE status = 'ACTIVE' AND student_id IS NOT NULL AND real_name IS NOT NULL AND id <> ?
       ORDER BY created_at DESC LIMIT 100`,
-  ).bind(user.id).all();
-  return ok(rows.results);
+  ).bind(user.id).all<{ id: string; student_id: string | null; real_name: string; allow_auto_join_reservation: number }>();
+  return ok(rows.results.map((row) => ({
+    id: row.id,
+    realName: row.real_name,
+    real_name: row.real_name,
+    studentIdMasked: maskStudentId(row.student_id),
+    student_id_masked: maskStudentId(row.student_id),
+    allowAutoJoinReservation: Boolean(row.allow_auto_join_reservation),
+    allow_auto_join_reservation: Boolean(row.allow_auto_join_reservation),
+  })));
 }
 
 export async function autoJoin(env: AppEnv, request: Request): Promise<Response> {
-  const user = await requireUser(env, request);
+  const user = await requireBoundUser(env, request);
   const body = await readJsonBody<JsonObject>(request);
   if (typeof body.enabled !== "boolean") throw new HttpError(400, "INVALID_FIELD", "enabled 格式错误");
   await env.DB.prepare("UPDATE users SET allow_auto_join_reservation = ?, updated_at = ? WHERE id = ?")
     .bind(body.enabled ? 1 : 0, Date.now(), user.id)
     .run();
-  await audit(env.DB, { actorUserId: user.id, actorType: "USER", action: "AUTO_JOIN_UPDATED", targetType: "USER", targetId: user.id, result: "SUCCESS", metadata: { enabled: body.enabled } });
-  return ok({ enabled: body.enabled });
+  await audit(env.DB, {
+    actorUserId: user.id,
+    actorType: "USER",
+    action: "AUTO_JOIN_UPDATED",
+    targetType: "USER",
+    targetId: user.id,
+    result: "SUCCESS",
+    metadata: { enabled: body.enabled },
+  });
+  return ok({ allowAutoJoinReservation: body.enabled });
 }
 
 export async function officialUserSearch(env: AppEnv, request: Request): Promise<Response> {
-  await requireUser(env, request);
-  requireString(new URL(request.url).searchParams.get("q"), "q", 80);
-  throw new HttpError(503, "OFFICIAL_USER_SEARCH_DISABLED", "官方用户搜索响应契约尚未补齐，当前保持关闭");
+  const user = await requireBoundUser(env, request);
+  const query = requireString(new URL(request.url).searchParams.get("q"), "q", 80);
+  if (!/^[A-Za-z0-9_-]+$/.test(query)) throw new HttpError(400, "INVALID_FIELD", "请输入准确学号");
+  const found = await searchOfficialUsers(env, await getAccessToken(env, user.id), query);
+  if (found.userId === user.student_id) throw new HttpError(400, "INVALID_CONTACT", "不能将自己添加为联系人");
+  const now = Date.now();
+  const existing = await env.DB.prepare(
+    "SELECT id FROM recent_contacts WHERE owner_user_id = ? AND official_student_id = ?",
+  ).bind(user.id, found.userId).first<{ id: string }>();
+  const id = existing?.id ?? crypto.randomUUID();
+  if (existing) {
+    await env.DB.prepare(
+      "UPDATE recent_contacts SET official_real_name = ?, last_used_at = ? WHERE id = ?",
+    ).bind(found.realName, now, id).run();
+  } else {
+    await env.DB.prepare(
+      "INSERT INTO recent_contacts (id, owner_user_id, official_student_id, official_real_name, last_used_at, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+    ).bind(id, user.id, found.userId, found.realName, now, now).run();
+  }
+  await env.DB.prepare(
+    `DELETE FROM recent_contacts WHERE owner_user_id = ? AND id NOT IN (
+       SELECT id FROM recent_contacts WHERE owner_user_id = ? ORDER BY last_used_at DESC LIMIT 20
+     )`,
+  ).bind(user.id, user.id).run();
+  return ok({ id, studentId: found.userId, realName: found.realName });
+}
+
+export async function recentContacts(env: AppEnv, request: Request): Promise<Response> {
+  const user = await requireBoundUser(env, request);
+  const rows = await env.DB.prepare(
+    "SELECT id, official_student_id AS studentId, official_real_name AS realName, last_used_at AS lastUsedAt FROM recent_contacts WHERE owner_user_id = ? ORDER BY last_used_at DESC LIMIT 20",
+  ).bind(user.id).all();
+  return ok(rows.results);
+}
+
+export async function createTeam(env: AppEnv, request: Request): Promise<Response> {
+  const leader = await requireBoundUser(env, request);
+  const body = await readJsonBody<JsonObject>(request);
+  const name = requireString(body.name, "name", 40);
+  const description = typeof body.description === "string" ? body.description.trim().slice(0, 240) : "";
+  const id = crypto.randomUUID();
+  const now = Date.now();
+  try {
+    await env.DB.prepare(
+      "INSERT INTO teams (id, leader_user_id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+    ).bind(id, leader.id, name, description, now, now).run();
+  } catch {
+    throw new HttpError(409, "TEAM_ALREADY_OWNED", "每位用户最多创建一个小队");
+  }
+  await audit(env.DB, { actorUserId: leader.id, actorType: "USER", action: "TEAM_CREATED", targetType: "TEAM", targetId: id, result: "SUCCESS" });
+  return ok({ id, name, description });
+}
+
+export async function listMyTeams(env: AppEnv, request: Request): Promise<Response> {
+  const user = await requireBoundUser(env, request);
+  const [teams, invitations] = await Promise.all([
+    env.DB.prepare(
+      `SELECT t.id, t.name, t.description, t.leader_user_id,
+              leader.real_name AS leader_name,
+              CASE WHEN t.leader_user_id = ? THEN 1 ELSE 0 END AS is_leader,
+              COALESCE(json_group_array(CASE WHEN member.id IS NULL THEN NULL ELSE json_object('id', member.id, 'realName', member.real_name) END), '[]') AS members
+         FROM teams t
+         JOIN users leader ON leader.id = t.leader_user_id
+         LEFT JOIN team_members tm ON tm.team_id = t.id
+         LEFT JOIN users member ON member.id = tm.user_id
+        WHERE t.leader_user_id = ? OR EXISTS (SELECT 1 FROM team_members mine WHERE mine.team_id = t.id AND mine.user_id = ?)
+        GROUP BY t.id ORDER BY t.created_at DESC`,
+    ).bind(user.id, user.id, user.id).all(),
+    env.DB.prepare(
+      `SELECT i.id, i.team_id, i.status, i.expires_at, i.created_at, t.name AS team_name, u.real_name AS inviter_name
+         FROM team_invitations i JOIN teams t ON t.id = i.team_id JOIN users u ON u.id = i.inviter_user_id
+        WHERE i.invitee_user_id = ? ORDER BY i.created_at DESC LIMIT 100`,
+    ).bind(user.id).all(),
+  ]);
+  return ok({ teams: teams.results, invitations: invitations.results });
+}
+
+export async function inviteTeamMember(env: AppEnv, request: Request, teamId: string): Promise<Response> {
+  const leader = await requireBoundUser(env, request);
+  const body = await readJsonBody<JsonObject>(request);
+  const inviteeUserId = requireString(body.inviteeUserId, "inviteeUserId", 80);
+  if (inviteeUserId === leader.id) throw new HttpError(400, "INVALID_INVITEE", "不能邀请自己加入小队");
+  const team = await env.DB.prepare("SELECT id, name FROM teams WHERE id = ? AND leader_user_id = ?").bind(teamId, leader.id).first<{ id: string; name: string }>();
+  if (!team) throw new HttpError(404, "TEAM_NOT_FOUND", "未找到自己创建的小队");
+  const invitee = await env.DB.prepare("SELECT id, email, real_name FROM users WHERE id = ? AND status = 'ACTIVE' AND student_id IS NOT NULL")
+    .bind(inviteeUserId).first<{ id: string; email: string; real_name: string }>();
+  if (!invitee) throw new HttpError(404, "INVITEE_NOT_AVAILABLE", "被邀请用户尚未完成官方绑定");
+  const member = await env.DB.prepare("SELECT user_id FROM team_members WHERE team_id = ? AND user_id = ?").bind(teamId, invitee.id).first();
+  if (member) throw new HttpError(409, "TEAM_MEMBER_EXISTS", "该用户已经在小队中");
+  const existing = await env.DB.prepare("SELECT id FROM team_invitations WHERE team_id = ? AND invitee_user_id = ? AND status = 'PENDING'")
+    .bind(teamId, invitee.id).first();
+  if (existing) throw new HttpError(409, "TEAM_INVITATION_EXISTS", "该用户已有待处理邀请");
+  const token = randomToken();
+  const id = crypto.randomUUID();
+  const expiresAt = Date.now() + integerVar(env, "TEAM_INVITATION_TTL_SECONDS", 604_800) * 1000;
+  await env.DB.prepare(
+    `INSERT INTO team_invitations
+      (id, team_id, inviter_user_id, invitee_user_id, status, action_token_hash, expires_at, created_at)
+     VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?)`,
+  ).bind(id, teamId, leader.id, invitee.id, await sha256(`${env.SESSION_SECRET}:${token}`), expiresAt, Date.now()).run();
+  await queueMail(env, invitee.email, "TEAM_INVITATION", {
+    inviterName: leader.real_name ?? leader.email,
+    teamName: team.name,
+    confirmationUrl: `${env.APP_BASE_URL}/?teamInvitation=${encodeURIComponent(id)}&teamToken=${encodeURIComponent(token)}`,
+    expiresAt,
+  });
+  await audit(env.DB, { actorUserId: leader.id, actorType: "USER", action: "TEAM_INVITATION_CREATED", targetType: "TEAM_INVITATION", targetId: id, result: "PENDING" });
+  return ok({ id, status: "PENDING" });
+}
+
+async function acceptTeamInvitation(env: AppEnv, invitationId: string, invitation: { team_id: string; invitee_user_id: string }): Promise<void> {
+  const count = await env.DB.prepare("SELECT COUNT(*) AS count FROM team_members WHERE team_id = ?").bind(invitation.team_id).first<{ count: number }>();
+  if (Number(count?.count ?? 0) >= 20) throw new HttpError(409, "TEAM_FULL", "小队成员已满");
+  await env.DB.batch([
+    env.DB.prepare("INSERT OR IGNORE INTO team_members (team_id, user_id, joined_at) VALUES (?, ?, ?)").bind(invitation.team_id, invitation.invitee_user_id, Date.now()),
+    env.DB.prepare("UPDATE team_invitations SET status = 'ACCEPTED', responded_at = ? WHERE id = ? AND status = 'PENDING'").bind(Date.now(), invitationId),
+  ]);
+}
+
+export async function teamInvitationPreview(env: AppEnv, request: Request, invitationId: string): Promise<Response> {
+  const token = requireString(new URL(request.url).searchParams.get("token"), "token", 500);
+  const invitation = await env.DB.prepare(
+    `SELECT i.id, i.status, i.expires_at, i.action_token_hash, t.name AS team_name, u.real_name AS inviter_name
+       FROM team_invitations i JOIN teams t ON t.id = i.team_id JOIN users u ON u.id = i.inviter_user_id WHERE i.id = ?`,
+  ).bind(invitationId).first<{ id: string; status: string; expires_at: number; action_token_hash: string; team_name: string; inviter_name: string }>();
+  if (!invitation || await sha256(`${env.SESSION_SECRET}:${token}`) !== invitation.action_token_hash) throw new HttpError(403, "INVALID_INVITATION_TOKEN", "邀请链接无效");
+  return ok({ id: invitation.id, status: invitation.status, expiresAt: invitation.expires_at, teamName: invitation.team_name, inviterName: invitation.inviter_name });
+}
+
+export async function respondTeamInvitation(env: AppEnv, request: Request, invitationId: string): Promise<Response> {
+  const body = await readJsonBody<JsonObject>(request);
+  if (body.action !== "accept" && body.action !== "reject") throw new HttpError(400, "INVALID_FIELD", "action 格式错误");
+  const invitation = await env.DB.prepare(
+    "SELECT id, team_id, invitee_user_id, action_token_hash, expires_at FROM team_invitations WHERE id = ? AND status = 'PENDING'",
+  ).bind(invitationId).first<{ id: string; team_id: string; invitee_user_id: string; action_token_hash: string; expires_at: number }>();
+  if (!invitation || invitation.expires_at <= Date.now()) throw new HttpError(409, "INVITATION_NOT_PENDING", "邀请已失效或已处理");
+  const user = await currentUser(env, request);
+  const token = typeof body.token === "string" ? body.token : "";
+  if (user?.id !== invitation.invitee_user_id && await sha256(`${env.SESSION_SECRET}:${token}`) !== invitation.action_token_hash) {
+    throw new HttpError(403, "INVALID_INVITATION_TOKEN", "邀请链接无效");
+  }
+  if (body.action === "accept") await acceptTeamInvitation(env, invitationId, invitation);
+  else await env.DB.prepare("UPDATE team_invitations SET status = 'REJECTED', responded_at = ? WHERE id = ? AND status = 'PENDING'").bind(Date.now(), invitationId).run();
+  await audit(env.DB, { actorUserId: invitation.invitee_user_id, actorType: "USER", action: `TEAM_INVITATION_${String(body.action).toUpperCase()}`, targetType: "TEAM_INVITATION", targetId: invitationId, result: "SUCCESS" });
+  return ok({ id: invitationId, status: body.action === "accept" ? "ACCEPTED" : "REJECTED" });
+}
+
+export async function leaveTeam(env: AppEnv, request: Request, teamId: string): Promise<Response> {
+  const user = await requireBoundUser(env, request);
+  const result = await env.DB.prepare("DELETE FROM team_members WHERE team_id = ? AND user_id = ?").bind(teamId, user.id).run();
+  if (result.meta.changes !== 1) throw new HttpError(404, "TEAM_MEMBERSHIP_NOT_FOUND", "未加入该小队");
+  return ok({ left: true });
+}
+
+export async function removeTeamMember(env: AppEnv, request: Request, teamId: string, memberUserId: string): Promise<Response> {
+  const leader = await requireBoundUser(env, request);
+  const team = await env.DB.prepare("SELECT id FROM teams WHERE id = ? AND leader_user_id = ?").bind(teamId, leader.id).first();
+  if (!team) throw new HttpError(404, "TEAM_NOT_FOUND", "未找到自己创建的小队");
+  await env.DB.prepare("DELETE FROM team_members WHERE team_id = ? AND user_id = ?").bind(teamId, memberUserId).run();
+  return ok({ removed: true });
+}
+
+export async function deleteTeam(env: AppEnv, request: Request, teamId: string): Promise<Response> {
+  const leader = await requireBoundUser(env, request);
+  const result = await env.DB.prepare("DELETE FROM teams WHERE id = ? AND leader_user_id = ?").bind(teamId, leader.id).run();
+  if (result.meta.changes !== 1) throw new HttpError(404, "TEAM_NOT_FOUND", "未找到自己创建的小队");
+  return ok({ deleted: true });
 }
 
 export async function createInvitation(env: AppEnv, request: Request): Promise<Response> {
-  const inviter = await requireUser(env, request);
-  const body = await readJsonBody<JsonObject>(request);
-  const taskId = requireString(body.taskId, "taskId", 80);
-  const inviteeUserId = requireString(body.inviteeUserId, "inviteeUserId", 80);
-  const task = await env.DB.prepare("SELECT id FROM reservation_tasks WHERE id = ? AND owner_user_id = ?")
-    .bind(taskId, inviter.id).first();
-  if (!task) throw new HttpError(404, "TASK_NOT_FOUND", "未找到自动预约任务");
-  const invitee = await env.DB.prepare(
-    "SELECT id, email, student_id, real_name, allow_auto_join_reservation FROM users WHERE id = ? AND status = 'ACTIVE'",
-  ).bind(inviteeUserId).first<{ id: string; email: string; student_id: string | null; real_name: string | null; allow_auto_join_reservation: number }>();
-  if (!invitee?.student_id || !invitee.real_name) throw new HttpError(400, "INVITEE_NOT_AVAILABLE", "被邀请人尚未绑定官方身份");
-  const autoApproved = Boolean(invitee.allow_auto_join_reservation);
-  const token = randomToken();
-  const invitationId = crypto.randomUUID();
-  const expiresAt = Date.now() + integerVar(env, "INVITATION_TTL_SECONDS", 86_400) * 1000;
-  await env.DB.prepare(
-    `INSERT INTO reservation_invitations
-      (id, task_id, inviter_user_id, invitee_user_id, invitee_student_id, invitee_real_name,
-       status, approval_source, action_token_hash, expires_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).bind(invitationId, taskId, inviter.id, invitee.id, invitee.student_id, invitee.real_name,
-    autoApproved ? "AUTO_APPROVED" : "PENDING", autoApproved ? "AUTO_AUTHORIZATION" : "MANUAL",
-    await sha256(`${env.SESSION_SECRET}:${token}`), expiresAt, Date.now()).run();
-  if (!autoApproved) {
-    await queueMail(env, invitee.email, "RESERVATION_INVITATION", {
-      invitationId,
-      actionToken: token,
-      inviterName: inviter.real_name ?? inviter.email,
-      expiresAt,
-    });
-  }
-  await audit(env.DB, { actorUserId: inviter.id, actorType: "USER", action: "INVITATION_CREATED", targetType: "INVITATION", targetId: invitationId, result: autoApproved ? "AUTO_APPROVED" : "PENDING" });
-  return ok({ id: invitationId, status: autoApproved ? "AUTO_APPROVED" : "PENDING" });
+  await requireBoundUser(env, request);
+  throw new HttpError(410, "LEGACY_INVITATION_DEPRECATED", "旧版预约邀请已停用，请使用小队成员或最近联系人");
 }
 
 export async function receivedInvitations(env: AppEnv, request: Request): Promise<Response> {
-  const user = await requireUser(env, request);
+  const user = await requireBoundUser(env, request);
   const rows = await env.DB.prepare(
     `SELECT i.id, i.task_id, i.status, i.expires_at, i.created_at,
             u.real_name AS inviter_name, t.target_date, t.start_time, t.end_time
@@ -373,7 +692,7 @@ export async function receivedInvitations(env: AppEnv, request: Request): Promis
 }
 
 export async function respondInvitation(env: AppEnv, request: Request, invitationId: string, action: "accept" | "reject"): Promise<Response> {
-  const user = await requireUser(env, request);
+  const user = await requireBoundUser(env, request);
   const body = await readJsonBody<JsonObject>(request);
   const invitation = await env.DB.prepare(
     "SELECT id, action_token_hash, expires_at FROM reservation_invitations WHERE id = ? AND invitee_user_id = ? AND status = 'PENDING'",
@@ -393,48 +712,65 @@ export async function respondInvitation(env: AppEnv, request: Request, invitatio
 }
 
 export async function signTasks(env: AppEnv, request: Request): Promise<Response> {
-  const user = await requireUser(env, request);
+  const user = await requireBoundUser(env, request);
   const rows = await env.DB.prepare(
-    `SELECT s.id, s.reservation_id, s.scheduled_at, s.status, s.parameter_received_at, s.executed_at
+    `SELECT s.id, s.reservation_id, s.scheduled_at, s.status, s.attempt_count, s.executed_at, s.official_response_redacted
        FROM sign_tasks s JOIN reservations r ON r.id = s.reservation_id
       WHERE r.owner_user_id = ? ORDER BY s.scheduled_at DESC`,
   ).bind(user.id).all();
   return ok(rows.results);
 }
 
-export async function submitSignParameters(env: AppEnv, request: Request, taskId: string): Promise<Response> {
-  const user = await requireUser(env, request);
-  if (!flag(env, "ENABLE_SIGN_PARAMETER_INGEST")) {
-    throw new HttpError(503, "SIGN_PARAMETERS_DISABLED", "现场签到参数来源尚未接入");
+export async function createSignLink(env: AppEnv, request: Request, reservationId: string): Promise<Response> {
+  const user = await requireBoundUser(env, request);
+  if (!flag(env, "ENABLE_SIGN_LINK_GENERATION")) throw new HttpError(503, "SIGN_LINK_DISABLED", "签到入口当前保持关闭");
+  await syncOfficialReservationHistory(env, user);
+  const reservation = await env.DB.prepare(
+    "SELECT official_reservation_id FROM reservations WHERE id = ? AND owner_user_id = ?",
+  ).bind(reservationId, user.id).first<{ official_reservation_id: string | null }>();
+  if (!reservation?.official_reservation_id) throw new HttpError(404, "RESERVATION_NOT_FOUND", "未找到官方预约记录");
+  const token = await getAccessToken(env, user.id);
+  const profile = await getOfficialReservationProfile(env, user.id, token);
+  const record = (await fetchOfficialReservationHistory(env, token, profile.studentId))
+    .find((item) => String(item.id) === reservation.official_reservation_id);
+  if (!record || record.reservationStatus !== 21) throw new HttpError(409, "SIGN_NOT_AVAILABLE", "当前预约状态无法签到");
+  if (!record.minSignTime || !record.maxSignTime || Date.now() < record.minSignTime || Date.now() > record.maxSignTime) {
+    throw new HttpError(409, "SIGN_OUTSIDE_WINDOW", "当前不在官方允许的签到时间内");
   }
-  const body = await readJsonBody<JsonObject>(request);
-  const systemMac = requireString(body.systemMac, "systemMac", 500);
-  const qrSignCheckCode = requireString(body.qrSignCheckCode, "qrSignCheckCode", 500);
-  const task = await env.DB.prepare(
-    `SELECT s.id FROM sign_tasks s
-       JOIN reservations r ON r.id = s.reservation_id
-      WHERE s.id = ? AND r.owner_user_id = ? AND s.status = 'WAITING_PARAMETERS'`,
-  ).bind(taskId, user.id).first();
-  if (!task) throw new HttpError(404, "SIGN_TASK_NOT_FOUND", "未找到待接收参数的签到任务");
-  await env.DB.prepare(
-    `UPDATE sign_tasks
-        SET system_mac_ciphertext = ?, qr_check_code_ciphertext = ?,
-            parameter_received_at = ?, status = 'READY'
-      WHERE id = ? AND status = 'WAITING_PARAMETERS'`,
-  ).bind(
-    await encryptSecret(systemMac, env.TOKEN_ENCRYPTION_KEY),
-    await encryptSecret(qrSignCheckCode, env.TOKEN_ENCRYPTION_KEY),
-    Date.now(),
-    taskId,
-  ).run();
-  await audit(env.DB, { actorUserId: user.id, actorType: "USER", action: "SIGN_PARAMETERS_RECEIVED", targetType: "SIGN_TASK", targetId: taskId, result: "READY" });
-  return ok({ id: taskId, status: "READY" });
+  const device = resolveSignDevice(env, record.roomId);
+  const key = await createOfficialQrSignCheckCode(env, token, device.roomId, device.systemMac);
+  const url = new URL(env.SIGN_LINK_BASE_URL);
+  url.searchParams.set("systemMac", device.systemMac);
+  url.searchParams.set("roomId", device.roomId);
+  url.searchParams.set("key", key);
+  return ok({ url: url.href, expiresAt: record.maxSignTime });
+}
+
+export async function signoutReservation(env: AppEnv, request: Request, reservationId: string): Promise<Response> {
+  const user = await requireBoundUser(env, request);
+  const reservation = await env.DB.prepare(
+    "SELECT official_reservation_id, room_id FROM reservations WHERE id = ? AND owner_user_id = ? AND status = 'SIGNED_IN'",
+  ).bind(reservationId, user.id).first<{ official_reservation_id: string | null; room_id: number }>();
+  if (!reservation?.official_reservation_id) throw new HttpError(409, "SIGNOUT_NOT_AVAILABLE", "当前预约无法签退");
+  const token = await getAccessToken(env, user.id);
+  const profile = await getOfficialReservationProfile(env, user.id, token);
+  await signOutOfficialReservation(env, token, profile.studentId, String(reservation.room_id));
+  await syncOfficialReservationHistory(env, user);
+  const updated = await env.DB.prepare("SELECT status FROM reservations WHERE id = ?").bind(reservationId).first<{ status: string }>();
+  if (updated?.status !== "SIGNED_OUT") throw new HttpError(502, "SIGNOUT_SYNC_FAILED", "签退请求已提交，但官方状态尚未同步");
+  return ok({ id: reservationId, status: "SIGNED_OUT" });
+}
+
+export async function submitSignParameters(env: AppEnv, request: Request, taskId: string): Promise<Response> {
+  await requireBoundUser(env, request);
+  void taskId;
+  throw new HttpError(410, "SIGN_PARAMETER_INGEST_DEPRECATED", "现场参数注入已停用，系统会即时生成短效签到码");
 }
 
 export async function signoutTasks(env: AppEnv, request: Request): Promise<Response> {
-  const user = await requireUser(env, request);
+  const user = await requireBoundUser(env, request);
   const rows = await env.DB.prepare(
-    `SELECT s.id, s.reservation_id, s.scheduled_at, s.status, s.attempt_count, s.executed_at
+    `SELECT s.id, s.reservation_id, s.scheduled_at, s.status, s.attempt_count, s.executed_at, s.official_response_redacted
        FROM signout_tasks s JOIN reservations r ON r.id = s.reservation_id
       WHERE r.owner_user_id = ? ORDER BY s.scheduled_at DESC`,
   ).bind(user.id).all();
@@ -473,7 +809,9 @@ export async function adminCollection(env: AppEnv, request: Request, collection:
     tasks: "SELECT * FROM reservation_tasks ORDER BY created_at DESC LIMIT 200",
     reservations: "SELECT * FROM reservations ORDER BY created_at DESC LIMIT 200",
     invitations: "SELECT id, task_id, inviter_user_id, invitee_user_id, invitee_student_id, invitee_real_name, status, approval_source, expires_at, responded_at, created_at FROM reservation_invitations ORDER BY created_at DESC LIMIT 200",
-    "sign-tasks": "SELECT id, reservation_id, scheduled_at, status, parameter_received_at, executed_at FROM sign_tasks ORDER BY scheduled_at DESC LIMIT 200",
+    teams: "SELECT t.id, t.name, t.description, t.leader_user_id, u.real_name AS leader_name, t.created_at FROM teams t JOIN users u ON u.id = t.leader_user_id ORDER BY t.created_at DESC LIMIT 200",
+    "team-invitations": "SELECT id, team_id, inviter_user_id, invitee_user_id, status, expires_at, responded_at, created_at FROM team_invitations ORDER BY created_at DESC LIMIT 200",
+    "sign-tasks": "SELECT id, reservation_id, scheduled_at, status, attempt_count, executed_at FROM sign_tasks ORDER BY scheduled_at DESC LIMIT 200",
     "signout-tasks": "SELECT id, reservation_id, official_reservation_id, scheduled_at, status, attempt_count, executed_at FROM signout_tasks ORDER BY scheduled_at DESC LIMIT 200",
     emails: "SELECT id, recipient_email, template, status, attempt_count, next_attempt_at, last_error_message, created_at, sent_at FROM email_outbox ORDER BY created_at DESC LIMIT 200",
     "audit-logs": "SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 300",
@@ -487,6 +825,9 @@ export async function adminUserStatus(env: AppEnv, request: Request, userId: str
   const admin = await requireAdmin(env, request);
   const body = await readJsonBody<JsonObject>(request);
   if (body.status !== "ACTIVE" && body.status !== "BANNED") throw new HttpError(400, "INVALID_STATUS", "账号状态错误");
+  const target = await env.DB.prepare("SELECT status FROM users WHERE id = ?").bind(userId).first<{ status: string }>();
+  if (!target) throw new HttpError(404, "NOT_FOUND", "用户不存在");
+  if (target.status !== "ACTIVE" && target.status !== "BANNED") throw new HttpError(400, "INVALID_STATUS_TRANSITION", "只能在活跃和封禁状态之间切换");
   await env.DB.prepare("UPDATE users SET status = ?, updated_at = ? WHERE id = ?").bind(body.status, Date.now(), userId).run();
   if (body.status === "BANNED") {
     await env.DB.batch([

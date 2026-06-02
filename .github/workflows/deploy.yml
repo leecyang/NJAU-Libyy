@@ -59,7 +59,7 @@ jobs:
       - name: Smoke test staging
         run: |
           for attempt in 1 2 3 4 5 6; do
-            curl --fail --silent --show-error https://staging-libyy.way2api.fun/api/v1/health && exit 0
+            node -e "fetch('https://staging-libyy.way2api.fun/api/v1/health').then(r=>r.ok?r.json():Promise.reject(new Error('health '+r.status))).then(({data})=>{const c=data.config||{}; if(!c.reservationSubmissionEnabled||!c.multiMemberReservationSubmissionEnabled||!c.autoSignSubmissionEnabled||!c.signoutSubmissionEnabled||!c.room2SignDeviceConfigured) throw new Error('health config not ready'); console.log(JSON.stringify(data));}).then(()=>process.exit(0)).catch(e=>{console.error(e.message); process.exit(1);})" && exit 0
             sleep 10
           done
           exit 1
@@ -100,7 +100,7 @@ jobs:
       - name: Smoke test production
         run: |
           for attempt in 1 2 3 4 5 6; do
-            curl --fail --silent --show-error https://libyy.way2api.fun/api/v1/health && exit 0
+            node -e "fetch('https://libyy.way2api.fun/api/v1/health').then(r=>r.ok?r.json():Promise.reject(new Error('health '+r.status))).then(({data})=>{const c=data.config||{}; if(!c.reservationSubmissionEnabled||!c.multiMemberReservationSubmissionEnabled||!c.autoSignSubmissionEnabled||!c.signoutSubmissionEnabled||!c.room2SignDeviceConfigured) throw new Error('health config not ready'); console.log(JSON.stringify(data));}).then(()=>process.exit(0)).catch(e=>{console.error(e.message); process.exit(1);})" && exit 0
             sleep 10
           done
           exit 1

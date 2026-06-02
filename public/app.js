@@ -1,197 +1,102 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
-const state = { me: null, page: "overview" };
+const state = { me: null, page: "overview", room: null, teams: [], contacts: [], users: [] };
+const titles = { overview: "今天，从一间合适的研讨室开始", rooms: "查找研讨室", tasks: "自动预约", square: "用户广场", teams: "我的小队", reservations: "预约历史", sign: "签到状态", signout: "签退状态", account: "账号与凭证", admin: "管理后台" };
+const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 
 async function api(path, options = {}) {
-  const response = await fetch(path, {
-    ...options,
-    credentials: "same-origin",
-    headers: { "content-type": "application/json", ...(options.headers || {}) },
-  });
+  const response = await fetch(path, { ...options, credentials: "same-origin", headers: { "content-type": "application/json", ...(options.headers || {}) } });
   const body = await response.json().catch(() => ({ ok: false, error: { message: "响应格式异常" } }));
-  if (!response.ok || !body.ok) throw new Error(body.error?.message || "请求失败");
+  if (!response.ok || !body.ok) { const error = new Error(body.error?.message || "请求失败"); error.code = body.error?.code; throw error; }
   return body.data;
 }
-
-function toast(message, error = false) {
-  const element = $("#toast");
-  element.textContent = message;
-  element.classList.toggle("error", error);
-  element.classList.remove("hidden");
-  clearTimeout(toast.timer);
-  toast.timer = setTimeout(() => element.classList.add("hidden"), 3800);
-}
-
-function formData(form) {
-  return Object.fromEntries(new FormData(form).entries());
-}
-
-function setPage(page) {
-  state.page = page;
-  $$(".page").forEach((view) => view.classList.toggle("hidden", view.dataset.pageView !== page));
-  $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.page === page));
-  const title = { overview: "今天，从一间合适的研讨室开始", rooms: "查找研讨室", tasks: "自动预约", square: "用户广场", invitations: "我的邀请", account: "账号与凭证", admin: "管理后台" };
-  $("#page-title").textContent = title[page] || "Libyy";
-  $(".sidebar").classList.remove("open");
-  if (page === "rooms") loadRooms();
-  if (page === "tasks") loadTasks();
-  if (page === "square") loadSquare();
-  if (page === "invitations") loadInvitations();
-  if (page === "admin") loadAdmin();
-}
+function toast(message, error = false) { const node = $("#toast"); node.textContent = message; node.classList.toggle("error", error); node.classList.remove("hidden"); clearTimeout(toast.timer); toast.timer = setTimeout(() => node.classList.add("hidden"), 3800); }
+function formData(form) { return Object.fromEntries(new FormData(form).entries()); }
+async function busy(button, work) { const label = button?.textContent; if (button) { button.disabled = true; button.textContent = "处理中..."; } try { return await work(); } finally { if (button) { button.disabled = false; button.textContent = label; } } }
+function today(offset = 0) { const date = new Date(); date.setDate(date.getDate() + offset); return date.toISOString().slice(0, 10); }
+function credentialActive() { return state.me?.credential?.credential_status === "ACTIVE"; }
 
 function renderSession() {
-  const loggedIn = Boolean(state.me);
-  $("#auth-view").classList.toggle("hidden", loggedIn);
-  $("#app-view").classList.toggle("hidden", !loggedIn);
-  $("#logout-button").classList.toggle("hidden", !loggedIn);
-  $("#user-label").textContent = loggedIn ? (state.me.user.realName || state.me.user.email) : "尚未登录";
-  if (!loggedIn) return;
-  const bound = state.me.credential.credential_status !== "UNBOUND";
-  $("#credential-hint").textContent = bound ? `官方凭证状态：${state.me.credential.credential_status}` : "尚未绑定官方凭证，请先在账号页面完成绑定。";
+  const ready = Boolean(state.me && credentialActive());
+  $("#setup-view").classList.toggle("hidden", ready);
+  $("#app-shell").classList.toggle("hidden", !ready);
+  $("#setup-logout").classList.toggle("hidden", !state.me);
+  $$("[data-step-indicator]").forEach((node) => node.classList.toggle("complete", Number(node.dataset.stepIndicator) < (state.me ? 3 : 1)));
+  $("[data-step-complete='1']").classList.toggle("hidden", !state.me);
+  $$("#login-form, #register-form, #reset-form, .segmented").forEach((node) => node.classList.toggle("hidden", Boolean(state.me)));
+  if (!ready) return;
+  $("#user-label").textContent = state.me.user.realName || state.me.user.email;
   $("#welcome-title").textContent = `${state.me.user.realName || "你好"}，欢迎回来`;
-  $("#auto-join").checked = state.me.user.allowAutoJoinReservation;
+  $("#credential-hint").textContent = `官方凭证状态：${state.me.credential.credential_status}`;
+  $("#account-detail").innerHTML = `<p><strong>${escapeHtml(state.me.user.realName)}</strong></p><p class="muted">${escapeHtml(state.me.user.email)} · ${escapeHtml(state.me.user.studentId)}</p>`;
+  const autoJoin = $("#auto-join-toggle");
+  if (autoJoin) autoJoin.checked = Boolean(state.me.user.allowAutoJoinReservation);
   $$(".admin-only").forEach((node) => node.classList.toggle("hidden", state.me.user.role !== "ADMIN"));
 }
-
-async function refreshMe() {
-  try {
-    state.me = await api("/api/v1/me");
-  } catch {
-    state.me = null;
-  }
-  renderSession();
-}
-
-function today(offset = 0) {
-  const date = new Date();
-  date.setDate(date.getDate() + offset);
-  return date.toISOString().slice(0, 10);
+async function refreshMe() { try { state.me = await api("/api/v1/me"); } catch { state.me = null; } renderSession(); }
+function setPage(page) {
+  state.page = page; $$(".page").forEach((view) => view.classList.toggle("hidden", view.dataset.pageView !== page)); $$(".nav-item").forEach((item) => item.classList.toggle("active", item.dataset.page === page)); $("#page-title").textContent = titles[page] || "Libyy"; $(".sidebar").classList.remove("open");
+  ({ rooms: loadRooms, tasks: loadTasks, square: loadSquare, teams: loadTeams, reservations: loadReservations, sign: () => loadSimpleList("/api/v1/sign-tasks", "#sign-list"), signout: () => loadSimpleList("/api/v1/signout-tasks", "#signout-list"), admin: loadAdmin }[page] || (() => {}))();
 }
 
 async function loadRooms() {
-  const date = $("#room-date").value || today();
-  $("#room-date").value = date;
+  const date = $("#room-date").value || today(); $("#room-date").value = date;
+  try { const data = await api(`/api/v1/rooms?date=${encodeURIComponent(date)}`); $("#room-list").innerHTML = data.rooms.map((room) => `<button class="room-card room-open ${room.reservable ? "" : "disabled"}" data-room-id="${room.id}" ${room.reservable ? "" : "disabled"}><div class="list-card-row"><h3>${escapeHtml(room.name)}</h3><span class="badge ${room.reservable ? "" : "warn"}">${room.reservable ? "查看时段" : "暂不开放"}</span></div><p class="muted">位置 ${escapeHtml(room.roomLocation || "-")} · 容量 ${room.maxNum} 人 · 最少 ${room.minReservationNum} 人</p><small>${escapeHtml(room.remark || `${room.startTime || "--:--"} 至 ${room.endTime || "--:--"}`)}</small></button>`).join("") || "<p>当天没有可展示的研讨室。</p>"; } catch (error) { toast(error.message, true); }
+}
+function choiceMarkup(prefix) {
+  const led = state.teams.filter((team) => Number(team.is_leader) === 1).flatMap((team) => (JSON.parse(team.members || "[]")).filter(Boolean).map((member) => ({ ...member, teamName: team.name })));
+  const autoJoinUsers = state.users.filter((user) => Boolean(user.allowAutoJoinReservation || user.allow_auto_join_reservation));
+  return `<fieldset><legend>队内成员（领队自动授权）</legend>${led.map((member) => `<label class="check-row"><input type="checkbox" name="${prefix}TeamMember" value="${escapeHtml(member.id)}" />${escapeHtml(member.realName)} <small>${escapeHtml(member.teamName)}</small></label>`).join("") || "<small>暂无可选队员</small>"}</fieldset><fieldset><legend>站内自动联约用户</legend>${autoJoinUsers.map((user) => `<label class="check-row"><input type="checkbox" name="${prefix}AutoJoin" value="${escapeHtml(user.id)}" />${escapeHtml(user.realName || user.real_name)} <small>${escapeHtml(user.studentIdMasked || user.student_id_masked || "已授权")}</small></label>`).join("") || "<small>暂无已授权用户</small>"}</fieldset><fieldset><legend>最近联系人（官方手动确认）</legend>${state.contacts.map((item) => `<label class="check-row"><input type="checkbox" name="${prefix}Contact" value="${escapeHtml(item.id)}" />${escapeHtml(item.realName || item.realname)} <small>${escapeHtml(item.studentId || item.studentid)}</small></label>`).join("") || "<small>暂无最近联系人</small>"}</fieldset>`;
+}
+async function openRoom(roomId) {
   try {
-    const data = await api(`/api/v1/rooms?date=${encodeURIComponent(date)}`);
-    $("#room-list").classList.remove("empty");
-    $("#room-list").innerHTML = data.rooms.map((room) => `
-      <article class="room-card ${room.reservable ? "" : "disabled"}">
-        <div class="list-card-row"><h3>${room.name}</h3><span class="badge ${room.reservable ? "" : "warn"}">${room.reservable ? "可预约" : "暂不开放"}</span></div>
-        <p class="muted">位置 ${room.roomLocation || "-"} · 容量 ${room.maxNum} 人 · 最少 ${room.minReservationNum} 人</p>
-        <small>${room.startTime || "--:--"} 至 ${room.endTime || "--:--"}</small>
-      </article>`).join("") || "<p>当天没有可展示的研讨室。</p>";
+    await Promise.all([loadTeams(false), loadContacts(), loadSquare(false)]);
+    state.room = await api(`/api/v1/rooms/${roomId}?date=${encodeURIComponent($("#room-date").value)}`);
+    const ranges = state.room.availableRanges.map((range) => `${range.startTime}-${range.endTime}`).join("、") || "没有连续空闲时段";
+    $("#room-dialog-content").innerHTML = `<p class="eyebrow">ROOM ${state.room.id}</p><h2>${escapeHtml(state.room.name)}</h2><p class="muted">可用时段：${escapeHtml(ranges)}</p><button class="button soft task-prefill" type="button">用这个房间创建自动预约</button><form id="manual-form" class="form section-block"><div class="inline-field"><label>开始时间<input name="startTime" type="time" step="1800" required /></label><label>结束时间<input name="endTime" type="time" step="1800" required /></label></div><div class="contact-search"><label>查询非站内联约用户<input id="manual-contact-query" placeholder="输入学号" /></label><button id="manual-contact-search" class="button ghost" type="button">查询并保存联系人</button></div><div id="manual-members" class="choice-stack">${choiceMarkup("manual")}</div><button class="button primary">提交预约</button></form>`;
+    $("#room-dialog").showModal();
   } catch (error) { toast(error.message, true); }
 }
+async function submitManual(event) { event.preventDefault(); const form = event.target; const values = formData(form); const selected = (name) => $$(`input[name='${name}']:checked`, form).map((node) => node.value); await busy($("button[type=submit]", form), async () => { try { const result = await api("/api/v1/reservations/manual", { method: "POST", body: JSON.stringify({ date: $("#room-date").value, roomId: state.room.id, startTime: values.startTime, endTime: values.endTime, teamMemberUserIds: selected("manualTeamMember"), contactIds: selected("manualContact"), autoJoinUserIds: selected("manualAutoJoin") }) }); $("#room-dialog").close(); toast(`预约成功：${result.status}`); } catch (error) { toast(error.message, true); } }); }
+async function searchContact(studentId, targetSelector, prefix) { if (!studentId.trim()) throw new Error("请输入学号"); await api(`/api/v1/official-users/search?q=${encodeURIComponent(studentId.trim())}`); await loadContacts(); $(targetSelector).innerHTML = choiceMarkup(prefix); toast("联系人已保存"); }
 
-async function loadTasks() {
+async function loadTasks() { try { await Promise.all([loadTeams(false), loadContacts(), loadSquare(false)]); $("#task-members").innerHTML = choiceMarkup("task"); const tasks = await api("/api/v1/reservation-tasks"); $("#task-list").innerHTML = tasks.map((task) => `<article class="list-card"><div class="list-card-row"><strong>${escapeHtml(task.target_date)} ${escapeHtml(task.start_time)}-${escapeHtml(task.end_time)}</strong><span class="badge">${escapeHtml(task.status)}</span></div><p class="muted">候选房间：${escapeHtml(JSON.parse(task.candidate_rooms || "[]").map((room) => room.roomName).join("、") || "未设置")}</p>${task.status === "DRAFT" ? `<button class="button soft task-action" data-id="${task.id}" data-action="enable">启用</button>` : ""}${["DRAFT", "WAITING_WINDOW", "WAITING_MEMBERS", "READY"].includes(task.status) ? `<button class="button ghost task-action" data-id="${task.id}" data-action="cancel">取消</button>` : ""}</article>`).join("") || "<p>暂无自动预约任务。</p>"; } catch (error) { toast(error.message, true); } }
+async function loadSquare(render = true) { try { state.users = await api("/api/v1/square/users"); if (!render) return; $("#square-list").innerHTML = state.users.map((user) => `<article class="room-card"><h3>${escapeHtml(user.realName || user.real_name)}</h3><p class="muted">${escapeHtml(user.studentIdMasked || user.student_id_masked || "已完成官方身份绑定")}</p><span class="badge">${user.allowAutoJoinReservation || user.allow_auto_join_reservation ? "允许自动联约" : "需要小队邀请"}</span></article>`).join("") || "<p>暂无其他站内用户。</p>"; } catch (error) { if (render) toast(error.message, true); else state.users = []; } }
+async function loadContacts() { try { state.contacts = await api("/api/v1/recent-contacts"); } catch { state.contacts = []; } }
+async function loadTeams(render = true) {
   try {
-    const tasks = await api("/api/v1/reservation-tasks");
-    $("#task-list").innerHTML = tasks.map((task) => `
-      <article class="list-card">
-        <div class="list-card-row"><strong>${task.target_date} ${task.start_time}-${task.end_time}</strong><span class="badge">${task.status}</span></div>
-        <p class="muted">候选房间：${JSON.parse(task.candidate_rooms || "[]").map((room) => room.roomName).join("、") || "未设置"}</p>
-        ${task.status === "DRAFT" ? `<button class="button soft task-action" data-id="${task.id}" data-action="enable">启用</button>` : ""}
-        ${["DRAFT", "WAITING_WINDOW", "WAITING_MEMBERS", "READY"].includes(task.status) ? `<button class="button ghost task-action" data-id="${task.id}" data-action="cancel">取消</button>` : ""}
-      </article>`).join("") || "<p>暂无自动预约任务。</p>";
+    const data = await api("/api/v1/teams/mine"); state.teams = data.teams;
+    if (!render) return;
+    const own = state.teams.find((team) => Number(team.is_leader) === 1); $("#team-form").classList.toggle("hidden", Boolean(own));
+    $("#team-invitations").innerHTML = data.invitations.filter((item) => item.status === "PENDING").map((item) => `<article class="list-card"><strong>${escapeHtml(item.team_name)}</strong><p class="muted">${escapeHtml(item.inviter_name)} 邀请你加入</p><button class="button soft team-invitation-action" data-id="${item.id}" data-action="accept">接受</button><button class="button ghost team-invitation-action" data-id="${item.id}" data-action="reject">拒绝</button></article>`).join("");
+    await loadSquare();
+    $("#team-list").innerHTML = state.teams.map((team) => { const members = JSON.parse(team.members || "[]").filter(Boolean); const leader = Number(team.is_leader) === 1; return `<article class="list-card"><div class="list-card-row"><strong>${escapeHtml(team.name)}</strong><span class="badge">${leader ? "我创建的" : "已加入"}</span></div><p class="muted">${escapeHtml(team.description || "暂无简介")} · 领队 ${escapeHtml(team.leader_name)}</p><div class="member-list">${members.map((member) => `<span>${escapeHtml(member.realName)}${leader ? ` <button class="text-button team-remove" data-team="${team.id}" data-user="${member.id}">移除</button>` : ""}</span>`).join("") || "<small>暂无成员</small>"}</div>${leader ? `<label>邀请站内用户<select class="team-user-select"><option value="">请选择</option>${state.users.map((user) => `<option value="${user.id}">${escapeHtml(user.real_name)}</option>`).join("")}</select></label><button class="button soft team-invite" data-id="${team.id}">发送邀请</button><button class="button danger team-delete" data-id="${team.id}">解散小队</button>` : `<button class="button ghost team-leave" data-id="${team.id}">退出小队</button>`}</article>`; }).join("") || "<p>尚未创建或加入小队。</p>";
   } catch (error) { toast(error.message, true); }
 }
+async function loadReservations(sync = false) { try { const rows = await api(sync ? "/api/v1/reservations/sync" : "/api/v1/reservations/history", sync ? { method: "POST" } : {}); $("#reservation-list").innerHTML = rows.map((item) => { const waiting = item.status === "WAITING_MEMBER_CONFIRMATION" ? "<p class=\"muted\">正在等待副预约人同意；站内小队成员会由系统自动尝试确认。</p>" : ""; return `<article class="list-card"><div class="list-card-row"><strong>${escapeHtml(item.room_name_snapshot)} · ${escapeHtml(item.date)} ${escapeHtml(item.start_time)}-${escapeHtml(item.end_time)}</strong><span class="badge">${escapeHtml(item.status)}</span></div><p class="muted">官方订单 ${escapeHtml(item.official_reservation_id || "同步中")}</p>${waiting}${item.status === "SCHEDULED" ? `<button class="button soft reservation-action" data-id="${item.id}" data-action="sign-link">获取签到入口</button><button class="button ghost reservation-action" data-id="${item.id}" data-action="cancel">取消预约</button>` : ""}${item.status === "SIGNED_IN" ? `<button class="button ghost reservation-action" data-id="${item.id}" data-action="signout">立即签退</button>` : ""}</article>`; }).join("") || "<p>暂无预约记录。</p>"; } catch (error) { toast(error.message, true); } }
+async function loadSimpleList(path, selector) { try { const rows = await api(path); $(selector).innerHTML = rows.map((item) => { let detail = ""; try { const parsed = item.official_response_redacted ? JSON.parse(item.official_response_redacted) : null; detail = parsed?.reason ? ` · ${parsed.reason}` : ""; } catch { detail = ""; } return `<article class="list-card"><div class="list-card-row"><strong>${escapeHtml(item.reservation_id)}</strong><span class="badge">${escapeHtml(item.status)}</span></div><p class="muted">计划时间：${new Date(item.scheduled_at).toLocaleString()} · 尝试 ${escapeHtml(item.attempt_count ?? 0)} 次${detail}</p>${item.executed_at ? `<p class="muted">执行时间：${new Date(item.executed_at).toLocaleString()}</p>` : ""}</article>`; }).join("") || "<p>暂无记录。</p>"; } catch (error) { toast(error.message, true); } }
+async function loadAdmin() { if (state.me?.user.role !== "ADMIN") return; try { const stats = await api("/api/v1/admin/dashboard"); $("#admin-stats").innerHTML = Object.entries(stats).map(([key, value]) => `<article class="quick-card"><strong>${value}</strong><span>${escapeHtml(key)}</span></article>`).join(""); await loadAdminCollection(); } catch (error) { toast(error.message, true); } }
+function adminUserAction(row) { if (!["ACTIVE", "BANNED"].includes(row.status)) return ""; return `<button class="button ghost admin-user-status" data-id="${row.id}" data-status="${row.status === "ACTIVE" ? "BANNED" : "ACTIVE"}">${row.status === "ACTIVE" ? "封禁" : "恢复"}</button>`; }
+async function loadAdminCollection() { try { const collection = $("#admin-collection").value; const rows = await api(`/api/v1/admin/${collection}`); const actions = collection === "users" ? rows.map((row) => `<article class="list-card"><div class="list-card-row"><strong>${escapeHtml(row.email)}</strong><span class="badge">${escapeHtml(row.status)}</span></div><p class="muted">${escapeHtml(row.real_name || "-")} · ${escapeHtml(row.student_id || "-")}</p>${adminUserAction(row)}</article>`).join("") : `<pre>${escapeHtml(JSON.stringify(rows, null, 2))}</pre>`; $("#admin-table").innerHTML = actions; } catch (error) { toast(error.message, true); } }
 
-async function loadSquare() {
-  try {
-    const users = await api("/api/v1/square/users");
-    $("#square-list").innerHTML = users.map((user) => `
-      <article class="room-card">
-        <h3>${user.real_name}</h3>
-        <p class="muted">${user.student_id_masked}</p>
-        <span class="badge">${user.allow_auto_join_reservation ? "允许自动联约" : "需要邀请确认"}</span>
-      </article>`).join("") || "<p>广场还没有可展示用户。</p>";
-  } catch (error) { toast(error.message, true); }
-}
+async function checkInvitationLink() { const params = new URLSearchParams(location.search); const id = params.get("teamInvitation"), token = params.get("teamToken"); if (!id || !token) return; try { const item = await api(`/api/v1/team-invitations/${encodeURIComponent(id)}?token=${encodeURIComponent(token)}`); $("#invitation-dialog-content").innerHTML = `<p class="eyebrow">TEAM INVITATION</p><h2>${escapeHtml(item.teamName)}</h2><p>${escapeHtml(item.inviterName)} 邀请你加入小队。</p><button class="button primary public-invitation-action" data-id="${id}" data-token="${escapeHtml(token)}" data-action="accept">接受邀请</button><button class="button ghost public-invitation-action" data-id="${id}" data-token="${escapeHtml(token)}" data-action="reject">拒绝邀请</button>`; $("#invitation-dialog").showModal(); } catch (error) { toast(error.message, true); } }
+async function bindForm(event) { event.preventDefault(); const textarea = event.target.elements.reflushToken; await busy($("button[type=submit]", event.target), async () => { try { await api("/api/v1/credentials/bind", { method: "POST", body: JSON.stringify({ reflushToken: textarea.value }) }); textarea.value = ""; await refreshMe(); toast("官方身份绑定成功"); } catch (error) { textarea.value = ""; toast(error.message, true); } }); }
+async function logout() { await api("/api/v1/auth/logout", { method: "POST" }); state.me = null; renderSession(); }
 
-async function loadInvitations() {
-  try {
-    const items = await api("/api/v1/invitations/received");
-    $("#invitation-list").innerHTML = items.map((item) => `
-      <article class="list-card">
-        <div class="list-card-row"><strong>${item.inviter_name || "用户邀请"}</strong><span class="badge">${item.status}</span></div>
-        <p class="muted">${item.target_date || ""} ${item.start_time || ""}-${item.end_time || ""}</p>
-        ${item.status === "PENDING" ? `<button class="button soft invitation-action" data-id="${item.id}" data-action="accept">接受</button> <button class="button ghost invitation-action" data-id="${item.id}" data-action="reject">拒绝</button>` : ""}
-      </article>`).join("") || "<p>暂无邀请。</p>";
-  } catch (error) { toast(error.message, true); }
-}
-
-async function loadAdmin() {
-  try {
-    const stats = await api("/api/v1/admin/dashboard");
-    $("#admin-stats").innerHTML = Object.entries(stats).map(([key, value]) => `<article class="quick-card"><strong>${value}</strong><span>${key}</span></article>`).join("");
-  } catch (error) { toast(error.message, true); }
-}
-
-$$("[data-auth-tab]").forEach((button) => button.addEventListener("click", () => {
-  $$("[data-auth-tab]").forEach((item) => item.classList.toggle("active", item === button));
-  $$(".auth-form").forEach((form) => form.classList.add("hidden"));
-  $(`#${button.dataset.authTab}-form`).classList.remove("hidden");
-}));
-$("#login-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  try { await api("/api/v1/auth/login", { method: "POST", body: JSON.stringify(formData(event.target)) }); await refreshMe(); toast("登录成功"); } catch (error) { toast(error.message, true); }
-});
-$("#register-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  try { await api("/api/v1/auth/register", { method: "POST", body: JSON.stringify(formData(event.target)) }); toast("注册成功，请登录"); $("[data-auth-tab=login]").click(); } catch (error) { toast(error.message, true); }
-});
-$("#reset-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  try { await api("/api/v1/auth/reset-password", { method: "POST", body: JSON.stringify(formData(event.target)) }); toast("密码已更新，请重新登录"); $("[data-auth-tab=login]").click(); } catch (error) { toast(error.message, true); }
-});
-$$(".send-code").forEach((button) => button.addEventListener("click", async () => {
-  const form = button.closest("form");
-  try {
-    const result = await api(button.dataset.purpose === "register" ? "/api/v1/auth/send-register-code" : "/api/v1/auth/send-reset-code", { method: "POST", body: JSON.stringify({ email: form.elements.email.value }) });
-    toast(result.devCode ? `验证码已排队，开发验证码：${result.devCode}` : "验证码邮件已排队");
-  } catch (error) { toast(error.message, true); }
-}));
-$("#logout-button").addEventListener("click", async () => { await api("/api/v1/auth/logout", { method: "POST" }); state.me = null; renderSession(); });
-$("#menu-toggle").addEventListener("click", () => $(".sidebar").classList.toggle("open"));
-$$("[data-page], [data-go]").forEach((button) => button.addEventListener("click", () => setPage(button.dataset.page || button.dataset.go)));
-$("#room-date").addEventListener("change", loadRooms);
-$("#manual-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const values = formData(event.target);
-  const memberUserIds = String(values.memberUserIds || "").split(/\s+/).map((item) => item.trim()).filter(Boolean);
-  try {
-    const result = await api("/api/v1/reservations/manual", { method: "POST", body: JSON.stringify({ date: $("#room-date").value, roomId: Number(values.roomId), startTime: values.startTime, endTime: values.endTime, memberUserIds }) });
-    event.target.reset(); toast(`预约已提交：${result.status}`);
-  } catch (error) { toast(error.message, true); }
-});
-$("#task-form").addEventListener("submit", async (event) => {
-  event.preventDefault();
-  const values = formData(event.target);
-  try {
-    await api("/api/v1/reservation-tasks", { method: "POST", body: JSON.stringify({ targetDate: values.targetDate, startTime: values.startTime, endTime: values.endTime, candidateRooms: [{ roomId: Number(values.roomId), roomName: values.roomName }] }) });
-    event.target.reset(); toast("自动预约草稿已创建"); loadTasks();
-  } catch (error) { toast(error.message, true); }
-});
-$("#task-list").addEventListener("click", async (event) => {
-  const button = event.target.closest(".task-action"); if (!button) return;
-  try { await api(`/api/v1/reservation-tasks/${button.dataset.id}/${button.dataset.action}`, { method: "POST" }); toast("任务状态已更新"); loadTasks(); } catch (error) { toast(error.message, true); }
-});
-$("#invitation-list").addEventListener("click", async (event) => {
-  const button = event.target.closest(".invitation-action"); if (!button) return;
-  try { await api(`/api/v1/invitations/${button.dataset.id}/${button.dataset.action}`, { method: "POST", body: "{}" }); toast("邀请状态已更新"); loadInvitations(); } catch (error) { toast(error.message, true); }
-});
-$("#bind-form").addEventListener("submit", async (event) => {
-  event.preventDefault(); const textarea = event.target.elements.reflushToken;
-  try { await api("/api/v1/credentials/bind", { method: "POST", body: JSON.stringify({ reflushToken: textarea.value }) }); textarea.value = ""; await refreshMe(); toast("官方身份绑定成功"); } catch (error) { textarea.value = ""; toast(error.message, true); }
-});
-$("#auto-join").addEventListener("change", async (event) => {
-  try { await api("/api/v1/profile/auto-join", { method: "PATCH", body: JSON.stringify({ enabled: event.target.checked }) }); await refreshMe(); toast("自动联约设置已更新"); } catch (error) { event.target.checked = !event.target.checked; toast(error.message, true); }
-});
-$("#delete-account").addEventListener("click", async () => {
-  if (!confirm("确定注销账号？官方凭证会被销毁，未来任务会停止。")) return;
-  try { await api("/api/v1/account/delete", { method: "POST" }); state.me = null; renderSession(); toast("账号已注销"); } catch (error) { toast(error.message, true); }
-});
-
-$("#room-date").min = today(); $("#room-date").max = today(2);
-refreshMe();
+$$("[data-auth-tab]").forEach((button) => button.addEventListener("click", () => { $$("[data-auth-tab]").forEach((item) => item.classList.toggle("active", item === button)); $$(".auth-form").forEach((form) => form.classList.add("hidden")); $(`#${button.dataset.authTab}-form`).classList.remove("hidden"); }));
+$("#login-form").addEventListener("submit", async (event) => { event.preventDefault(); await busy($("button[type=submit]", event.target), async () => { try { await api("/api/v1/auth/login", { method: "POST", body: JSON.stringify(formData(event.target)) }); await refreshMe(); toast("登录成功，请继续完成官方凭证配置"); } catch (error) { toast(error.message, true); } }); });
+$("#register-form").addEventListener("submit", async (event) => { event.preventDefault(); await busy($("button[type=submit]", event.target), async () => { try { await api("/api/v1/auth/register", { method: "POST", body: JSON.stringify(formData(event.target)) }); toast("注册成功，请登录"); $("[data-auth-tab=login]").click(); } catch (error) { toast(error.message, true); } }); });
+$("#reset-form").addEventListener("submit", async (event) => { event.preventDefault(); try { await api("/api/v1/auth/reset-password", { method: "POST", body: JSON.stringify(formData(event.target)) }); toast("密码已更新，请重新登录"); $("[data-auth-tab=login]").click(); } catch (error) { toast(error.message, true); } });
+$$(".send-code").forEach((button) => button.addEventListener("click", () => busy(button, async () => { try { const form = button.closest("form"); const result = await api(button.dataset.purpose === "register" ? "/api/v1/auth/send-register-code" : "/api/v1/auth/send-reset-code", { method: "POST", body: JSON.stringify({ email: form.elements.email.value }) }); toast(result.devCode ? `验证码已排队，开发验证码：${result.devCode}` : "验证码邮件已排队"); } catch (error) { toast(error.message, true); } })));
+$("#setup-bind-form").addEventListener("submit", bindForm); $("#bind-form").addEventListener("submit", bindForm); $("#logout-button").addEventListener("click", logout); $("#setup-logout").addEventListener("click", logout); $("#menu-toggle").addEventListener("click", () => $(".sidebar").classList.toggle("open")); $$("[data-page], [data-go]").forEach((button) => button.addEventListener("click", () => setPage(button.dataset.page || button.dataset.go)));
+$("#room-date").addEventListener("change", loadRooms); $("#refresh-rooms").addEventListener("click", loadRooms); $("#room-list").addEventListener("click", (event) => { const card = event.target.closest(".room-open"); if (card) openRoom(card.dataset.roomId); }); $("#room-dialog-content").addEventListener("submit", submitManual); $("#room-dialog-content").addEventListener("click", (event) => { if (event.target.closest(".task-prefill")) { $("input[name=roomId]", $("#task-form")).value = state.room.id; $("input[name=roomName]", $("#task-form")).value = state.room.name; $("#room-dialog").close(); setPage("tasks"); toast("已带入候选房间"); return; } if (event.target.id !== "manual-contact-search") return; busy(event.target, async () => { try { await searchContact($("#manual-contact-query").value, "#manual-members", "manual"); } catch (error) { toast(error.message, true); } }); });
+$("#task-contact-search").addEventListener("click", (event) => busy(event.target, async () => { try { await searchContact($("#task-contact-query").value, "#task-members", "task"); } catch (error) { toast(error.message, true); } }));
+$("#task-form").addEventListener("submit", async (event) => { event.preventDefault(); const values = formData(event.target); const selected = (name) => $$(`input[name='${name}']:checked`, event.target).map((node) => node.value); try { await api("/api/v1/reservation-tasks", { method: "POST", body: JSON.stringify({ targetDate: values.targetDate, startTime: values.startTime, endTime: values.endTime, candidateRooms: [{ roomId: Number(values.roomId), roomName: values.roomName }], teamMemberUserIds: selected("taskTeamMember"), contactIds: selected("taskContact"), autoJoinUserIds: selected("taskAutoJoin") }) }); event.target.reset(); toast("自动预约草稿已创建"); loadTasks(); } catch (error) { toast(error.message, true); } });
+$("#task-list").addEventListener("click", async (event) => { const button = event.target.closest(".task-action"); if (!button) return; try { await api(`/api/v1/reservation-tasks/${button.dataset.id}/${button.dataset.action}`, { method: "POST" }); toast("任务状态已更新"); loadTasks(); } catch (error) { toast(error.message, true); } });
+$("#team-form").addEventListener("submit", async (event) => { event.preventDefault(); try { await api("/api/v1/teams", { method: "POST", body: JSON.stringify(formData(event.target)) }); event.target.reset(); toast("小队已创建"); loadTeams(); } catch (error) { toast(error.message, true); } });
+$("#team-list").addEventListener("click", async (event) => { const invite = event.target.closest(".team-invite"), remove = event.target.closest(".team-remove"), leave = event.target.closest(".team-leave"), del = event.target.closest(".team-delete"); try { if (invite) { const user = $(".team-user-select", invite.closest(".list-card")).value; if (!user) return toast("请选择要邀请的用户", true); await api(`/api/v1/teams/${invite.dataset.id}/invitations`, { method: "POST", body: JSON.stringify({ inviteeUserId: user }) }); toast("邀请邮件已排队"); } if (remove) await api(`/api/v1/teams/${remove.dataset.team}/members/${remove.dataset.user}`, { method: "DELETE" }); if (leave) await api(`/api/v1/teams/${leave.dataset.id}/members/me`, { method: "DELETE" }); if (del && confirm("确定解散小队？")) await api(`/api/v1/teams/${del.dataset.id}`, { method: "DELETE" }); loadTeams(); } catch (error) { toast(error.message, true); } });
+async function respondTeam(button) { try { await api(`/api/v1/team-invitations/${button.dataset.id}/respond`, { method: "POST", body: JSON.stringify({ action: button.dataset.action, token: button.dataset.token }) }); $("#invitation-dialog").close(); history.replaceState({}, "", location.pathname); toast("邀请状态已更新"); if (credentialActive()) loadTeams(); } catch (error) { toast(error.message, true); } }
+$("#team-invitations").addEventListener("click", (event) => { const button = event.target.closest(".team-invitation-action"); if (button) respondTeam(button); }); $("#invitation-dialog").addEventListener("click", (event) => { const button = event.target.closest(".public-invitation-action"); if (button) respondTeam(button); });
+$("#sync-reservations").addEventListener("click", (event) => busy(event.target, () => loadReservations(true))); $("#reservation-list").addEventListener("click", async (event) => { const button = event.target.closest(".reservation-action"); if (!button) return; try { const result = await api(`/api/v1/reservations/${button.dataset.id}/${button.dataset.action}`, { method: "POST" }); if (result.url) window.open(result.url, "_blank", "noopener,noreferrer"); else toast("订单状态已更新"); loadReservations(); } catch (error) { toast(error.message, true); } });
+$("#admin-collection").addEventListener("change", loadAdminCollection); $("#admin-test-email")?.addEventListener("click", (event) => busy(event.target, async () => { try { await api("/api/v1/admin/emails/test", { method: "POST" }); toast("测试邮件已加入队列"); } catch (error) { toast(error.message, true); } })); $("#admin-config")?.addEventListener("click", async () => { try { const config = await api("/api/v1/admin/config"); $("#admin-table").innerHTML = `<pre>${escapeHtml(JSON.stringify(config, null, 2))}</pre>`; } catch (error) { toast(error.message, true); } }); $("#admin-table").addEventListener("click", async (event) => { const button = event.target.closest(".admin-user-status"); if (!button) return; try { await api(`/api/v1/admin/users/${button.dataset.id}/status`, { method: "PATCH", body: JSON.stringify({ status: button.dataset.status }) }); toast("用户状态已更新"); loadAdminCollection(); } catch (error) { toast(error.message, true); } }); $("#auto-join-toggle")?.addEventListener("change", async (event) => { try { const result = await api("/api/v1/profile/auto-join", { method: "PATCH", body: JSON.stringify({ enabled: event.target.checked }) }); state.me.user.allowAutoJoinReservation = result.allowAutoJoinReservation; toast(result.allowAutoJoinReservation ? "已开启自动联约授权" : "已关闭自动联约授权"); } catch (error) { event.target.checked = !event.target.checked; toast(error.message, true); } }); $("#delete-account").addEventListener("click", async () => { if (!confirm("确定注销账号？官方凭证会被销毁，未来任务会停止。")) return; try { await api("/api/v1/account/delete", { method: "POST" }); state.me = null; renderSession(); toast("账号已注销"); } catch (error) { toast(error.message, true); } });
+$("#room-date").min = today(); $("#room-date").max = today(2); $("input[name=targetDate]", $("#task-form")).min = today(); checkInvitationLink(); refreshMe();
