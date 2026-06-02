@@ -136,4 +136,22 @@ describe("official API adapter", () => {
       message: "官方登录已失效，请重新绑定凭证",
     });
   });
+
+  it("reports an unknown official error code without exposing the upstream message", async () => {
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.stubGlobal("fetch", vi.fn<typeof fetch>().mockResolvedValue(proxyResponse(400, JSON.stringify({
+      msg: "upstream detail must stay private",
+      code: 2999,
+    }))));
+
+    await expect(refreshOfficialToken(env, "reflush-token")).rejects.toMatchObject({
+      status: 502,
+      code: "OFFICIAL_REQUEST_FAILED",
+      message: "官方接口请求失败 (400, 官方错误码: 2999)",
+    });
+
+    expect(String(consoleError.mock.calls[0]?.[0])).toBe(
+      '{"level":"error","event":"official_request_failed","status":400,"officialCode":2999}',
+    );
+  });
 });
