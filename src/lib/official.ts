@@ -289,7 +289,15 @@ function officialFailure(response: Response, body: unknown): HttpError {
     return new HttpError(401, "OFFICIAL_REAUTH_REQUIRED", "官方登录已失效，请重新绑定凭证");
   }
   if (detail.code === 2004) return new HttpError(400, "OFFICIAL_TOKEN_INVALID", "凭证格式错误，请重新复制");
-  return new HttpError(502, "OFFICIAL_REQUEST_FAILED", `官方接口请求失败 (${response.status})`);
+  const officialCode = Number.isInteger(detail.code) ? detail.code : null;
+  console.error(JSON.stringify({
+    level: "error",
+    event: "official_request_failed",
+    status: response.status,
+    officialCode,
+  }));
+  const suffix = officialCode === null ? "" : `, 官方错误码: ${officialCode}`;
+  return new HttpError(502, "OFFICIAL_REQUEST_FAILED", `官方接口请求失败 (${response.status}${suffix})`);
 }
 
 export async function refreshOfficialToken(env: AppEnv, reflushToken: string): Promise<OfficialRefreshResult> {
