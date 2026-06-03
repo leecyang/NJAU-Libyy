@@ -501,27 +501,47 @@ input:focus, textarea:focus, select:focus { border-color: var(--ink); }
   font-weight: 600;
   white-space: nowrap;
 }
-.availability-cells {
-  display: grid;
-  grid-template-columns: repeat(14, minmax(0, 1fr));
-  gap: 3px;
+.tremor-tracker {
+  display: flex;
+  width: 100%;
+  height: 24px;
+  align-items: center;
 }
-.availability-cell {
-  height: 13px;
-  border: 1px solid var(--hairline);
-  border-radius: 3px;
+.tremor-tracker-block-shell {
+  height: 100%;
+  min-width: 0;
+  flex: 1 1 0;
+  overflow: hidden;
+  padding: 0 0.5px;
+  transition: opacity 160ms ease;
+}
+.tremor-tracker-block-shell:first-child {
+  padding-left: 0;
+  border-top-left-radius: 4px;
+  border-bottom-left-radius: 4px;
+}
+.tremor-tracker-block-shell:last-child {
+  padding-right: 0;
+  border-top-right-radius: 4px;
+  border-bottom-right-radius: 4px;
+}
+.tremor-tracker-block-shell:hover {
+  opacity: 0.58;
+}
+.tremor-tracker-block {
+  width: 100%;
+  height: 100%;
+  border-radius: 1px;
   background: var(--surface-card);
 }
-.availability-cell.available {
-  border-color: var(--ink);
+.tremor-tracker-block.available {
   background: var(--ink);
 }
-.availability-cell.partial {
-  border-color: #9ca3af;
+.tremor-tracker-block.partial {
   background: #9ca3af;
 }
-.availability-cell.empty {
-  background: var(--surface-soft);
+.tremor-tracker-block.empty {
+  background: var(--surface-card);
 }
 .availability-legend {
   display: flex;
@@ -980,8 +1000,8 @@ input:focus, textarea:focus, select:focus { border-color: var(--ink); }
     grid-template-columns: 50px minmax(0, 1fr);
     gap: 8px;
   }
-  .availability-cell {
-    height: 12px;
+  .tremor-tracker {
+    height: 22px;
   }
   .room-detail-head,
   .reservation-summary {

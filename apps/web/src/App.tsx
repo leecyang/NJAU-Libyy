@@ -267,6 +267,11 @@ function rangeText(ranges: AvailabilityRange[]): string {
 const timeSlots = Array.from({ length: 28 }, (_, index) => minutesToTime(8 * 60 + index * 30));
 const availabilityHours = Array.from({ length: 14 }, (_, index) => 8 + index);
 const availabilityTicks = [8, 12, 16, 20, 22];
+type TrackerBlock = {
+  key: string;
+  state: "available" | "partial" | "empty";
+  tooltip: string;
+};
 
 function slotAvailable(ranges: AvailabilityRange[], slot: string): boolean {
   const start = timeToMinutes(slot);
@@ -288,6 +293,18 @@ function availabilityCellState(ranges: AvailabilityRange[], hour: number): "avai
   return "empty";
 }
 
+function TremorTracker({ data, label }: { data: TrackerBlock[]; label: string }) {
+  return (
+    <div className="tremor-tracker" role="img" aria-label={label}>
+      {data.map((block) => (
+        <div className="tremor-tracker-block-shell" key={block.key} title={block.tooltip}>
+          <div className={`tremor-tracker-block ${block.state}`} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function RoomAvailabilityHistory({ dates, room }: { dates: string[]; room: RoomWithDays }) {
   return (
     <div className="availability-history" aria-label={`${room.name} 三天可用时间状态`}>
@@ -300,18 +317,20 @@ function RoomAvailabilityHistory({ dates, room }: { dates: string[]; room: RoomW
           return (
             <div className="availability-row" key={`${room.id}-${date}`}>
               <span className="availability-day">{dayLabel(date)}</span>
-              <div className="availability-cells">
-                {availabilityHours.map((hour) => {
+              <TremorTracker
+                label={`${room.name} ${dayLabel(date)} 08:00 到 22:00 可用状态`}
+                data={availabilityHours.map((hour) => {
+                  const start = `${String(hour).padStart(2, "0")}:00`;
+                  const end = `${String(hour + 1).padStart(2, "0")}:00`;
                   const state = availabilityCellState(ranges, hour);
-                  return (
-                    <span
-                      key={`${date}-${hour}`}
-                      className={`availability-cell ${state}`}
-                      title={`${dayLabel(date)} ${String(hour).padStart(2, "0")}:00-${String(hour + 1).padStart(2, "0")}:00`}
-                    />
-                  );
+                  const stateText = state === "available" ? "整小时可用" : state === "partial" ? "部分可用" : "不可用";
+                  return {
+                    key: `${date}-${hour}`,
+                    state,
+                    tooltip: `${dayLabel(date)} ${start}-${end} ${stateText}`,
+                  };
                 })}
-              </div>
+              />
             </div>
           );
         })}
