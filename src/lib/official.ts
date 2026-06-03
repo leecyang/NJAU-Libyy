@@ -1,5 +1,5 @@
 import type { AppEnv } from "../config";
-import { HttpError, readBoundedJson } from "./http";
+import { HttpError, readBoundedJson, readBoundedText } from "./http";
 import type { Room } from "./validation";
 
 export type OfficialRefreshResult = {
@@ -88,6 +88,7 @@ const OFFICIAL_BROWSER_HEADERS = {
 };
 
 const OFFICIAL_PROXY_TIMEOUT_MS = 30_000;
+const OFFICIAL_WORKER_FETCH_TIMEOUT_MS = 18_000;
 
 function officialUrl(env: AppEnv, path: string): URL {
   return new URL(path, env.LIBYY_API_BASE_URL);
@@ -238,8 +239,10 @@ async function officialFetch(
 
   let response: Response;
   try {
+    const signal = AbortSignal.timeout(OFFICIAL_WORKER_FETCH_TIMEOUT_MS);
     response = await fetch(proxyEndpoint(env), {
       method: "POST",
+      signal,
       headers: {
         authorization: `Bearer ${env.NJAU_PROXY_TOKEN}`,
         "content-type": "application/json",
@@ -253,8 +256,9 @@ async function officialFetch(
         timeoutMs: OFFICIAL_PROXY_TIMEOUT_MS,
       }),
     });
-  } catch {
-    throw new HttpError(502, "OFFICIAL_PROXY_UNAVAILABLE", "校园网代理暂时不可用");
+  } catch (error) {
+    const code = error instanceof Error && error.name === "TimeoutError" ? "OFFICIAL_PROXY_TIMEOUT" : "OFFICIAL_PROXY_UNAVAILABLE";
+    throw new HttpError(502, code, code === "OFFICIAL_PROXY_TIMEOUT" ? "校园网代理请求超时" : "校园网代理暂时不可用");
   }
 
   let body: unknown;
@@ -303,10 +307,8 @@ async function officialJson(response: Response, operation: OfficialOperation): P
 }
 
 async function officialText(response: Response, operation: OfficialOperation): Promise<string> {
-  const contentLength = Number(response.headers.get("content-length") ?? "0");
-  if (contentLength > 262_144) throw new HttpError(502, "OFFICIAL_INVALID_RESPONSE", "官方接口返回内容过大");
   try {
-    return await response.text();
+    return await readBoundedText(response, 262_144);
   } catch {
     console.error(JSON.stringify({ level: "error", event: "official_text_response_failed", operation }));
     throw new HttpError(502, "OFFICIAL_INVALID_RESPONSE", "官方接口返回格式异常");
@@ -429,6 +431,10 @@ export type OfficialReservationRecord = {
 };
 
 type OfficialReservationPage = {
+  records?: unknown[];
+};
+
+type OfficialUserPage = {
   records?: unknown[];
 };
 
@@ -632,12 +638,25 @@ export async function createOfficialQrSignCheckCode(env: AppEnv, accessToken: st
 }
 
 export async function searchOfficialUsers(env: AppEnv, accessToken: string, query: string): Promise<OfficialIdentity> {
-  const url = officialUrl(env, `/api/studyroom/v1/user/${encodeURIComponent(query)}`);
-  const response = await officialFetch(env, url, "user-search", { headers: officialHeaders(accessToken) });
+  const url = officialUrl(env, "/api/studyroom/v1/user/pageUser");
+  url.searchParams.set("param", query);
+  url.searchParams.set("page", "1");
+  url.searchParams.set("size", "10");
+  const response = await officialFetch(env, url, "user-search", { headers: officialHeaders(accessToken, "application/json;charset=UTF-8") });
   const body = await officialJson(response, "user-search");
   if (!response.ok) throw officialFailure(response, body);
-  if (!body || typeof body !== "object") throw new HttpError(404, "OFFICIAL_USER_NOT_FOUND", "未找到该学号");
-  const user = body as Partial<OfficialIdentity>;
-  if (!user.userId || !user.realName) throw new HttpError(404, "OFFICIAL_USER_NOT_FOUND", "未找到该学号");
-  return { id: user.id, userId: user.userId, realName: user.realName, mobile: user.mobile };
+  if (!body || typeof body !== "object" || !Array.isArray((body as OfficialUserPage).records)) {
+    throw new HttpError(502, "OFFICIAL_INVALID_RESPONSE", "官方用户搜索响应格式异常");
+  }
+  const users = (body as OfficialUserPage).records!
+    .map((raw) => raw && typeof raw === "object" ? raw as Partial<OfficialIdentity> : null)
+    .filter((user): user is Partial<OfficialIdentity> => Boolean(user?.userId && user.realName));
+  const user = users.find((candidate) => candidate.userId === query) ?? (users.length === 1 ? users[0] : null);
+  if (!user?.userId || !user.realName) throw new HttpError(404, "OFFICIAL_USER_NOT_FOUND", "未找到该学号");
+  return {
+    id: typeof user.id === "number" ? user.id : undefined,
+    userId: user.userId,
+    realName: user.realName,
+    mobile: typeof user.mobile === "string" ? user.mobile : undefined,
+  };
 }

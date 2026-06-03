@@ -28,20 +28,61 @@ import {
 } from "./reservations";
 import { assertReservation, type Room } from "./validation";
 
+type SchedulerLimitName =
+  | "SCHEDULER_REFRESH_LIMIT"
+  | "SCHEDULER_PREPARE_LIMIT"
+  | "SCHEDULER_RESERVATION_SUBMIT_LIMIT"
+  | "SCHEDULER_SYNC_LIMIT"
+  | "SCHEDULER_SIGN_LIMIT"
+  | "SCHEDULER_SIGNOUT_LIMIT"
+  | "SCHEDULER_MAIL_LIMIT";
+
+class SchedulerBudget {
+  private readonly startedAt = Date.now();
+
+  constructor(private readonly maxRuntimeMs: number) {}
+
+  hasTime(reserveMs = 1500): boolean {
+    return Date.now() - this.startedAt < this.maxRuntimeMs - reserveMs;
+  }
+
+  async run(name: string, operation: () => Promise<void>, reserveMs = 1500): Promise<void> {
+    if (!this.hasTime(reserveMs)) {
+      console.log(JSON.stringify({ level: "info", event: "scheduler_phase_skipped", phase: name, reason: "budget_exhausted" }));
+      return;
+    }
+    try {
+      await operation();
+    } catch (error) {
+      console.error(JSON.stringify({ level: "error", event: "scheduler_phase_failed", phase: name, code: error instanceof HttpError ? error.code : "SCHEDULER_PHASE_FAILED" }));
+    }
+  }
+}
+
+function boundedInteger(value: unknown, fallback: number, min: number, max: number): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(numeric)));
+}
+
+function schedulerLimit(env: AppEnv, name: SchedulerLimitName, fallback: number, max: number): number {
+  return boundedInteger(env[name], fallback, 1, max);
+}
+
 export async function runScheduler(env: AppEnv): Promise<void> {
   const now = Date.now();
-  await Promise.all([
-    refreshDueCredentials(env, now),
-    expireInvitations(env, now),
-    expireTeamInvitations(env, now),
-    prepareReservationTasks(env, now),
-    submitReadyReservationTasks(env, now),
-    deliverDueMail(env, now),
-    cleanupSessions(env, now),
-  ]);
-  await syncPendingOfficialReservations(env);
-  await submitDueSignTasks(env, now);
-  await submitDueSignoutTasks(env, now);
+  const budget = new SchedulerBudget(boundedInteger(env.SCHEDULER_MAX_RUNTIME_MS, 18_000, 5_000, 28_000));
+  await budget.run("expire-invitations", async () => {
+    await Promise.all([expireInvitations(env, now), expireTeamInvitations(env, now)]);
+  });
+  await budget.run("prepare-reservation-tasks", () => prepareReservationTasks(env, now, schedulerLimit(env, "SCHEDULER_PREPARE_LIMIT", 5, 20)));
+  await budget.run("submit-reservation-tasks", () => submitReadyReservationTasks(env, now, schedulerLimit(env, "SCHEDULER_RESERVATION_SUBMIT_LIMIT", 2, 10)), 4000);
+  await budget.run("submit-sign-tasks", () => submitDueSignTasks(env, now, schedulerLimit(env, "SCHEDULER_SIGN_LIMIT", 5, 20)), 3000);
+  await budget.run("submit-signout-tasks", () => submitDueSignoutTasks(env, now, schedulerLimit(env, "SCHEDULER_SIGNOUT_LIMIT", 5, 20)), 3000);
+  await budget.run("sync-official-reservations", () => syncPendingOfficialReservations(env, schedulerLimit(env, "SCHEDULER_SYNC_LIMIT", 3, 20)), 4000);
+  await budget.run("refresh-credentials", () => refreshDueCredentials(env, now, schedulerLimit(env, "SCHEDULER_REFRESH_LIMIT", 3, 20)), 4000);
+  await budget.run("deliver-mail", () => deliverDueMail(env, now, schedulerLimit(env, "SCHEDULER_MAIL_LIMIT", 2, 10)), 4000);
+  await budget.run("cleanup-sessions", () => cleanupSessions(env, now));
 }
 
 async function expireTeamInvitations(env: AppEnv, now: number): Promise<void> {
@@ -50,15 +91,21 @@ async function expireTeamInvitations(env: AppEnv, now: number): Promise<void> {
   ).bind(now).run();
 }
 
-async function refreshDueCredentials(env: AppEnv, now: number): Promise<void> {
+async function refreshDueCredentials(env: AppEnv, now: number, limit = 3): Promise<void> {
   const cutoff = now - 90 * 60 * 1000;
   const rows = await env.DB.prepare(
     `SELECT user_id FROM official_credentials
       WHERE credential_status IN ('ACTIVE', 'REFRESH_FAILED')
         AND COALESCE(last_refresh_success_at, 0) < ?
-      LIMIT 100`,
+      LIMIT ${limit}`,
   ).bind(cutoff).all<{ user_id: string }>();
-  await Promise.all(rows.results.map((row) => refreshCredential(env, row.user_id, "SCHEDULED")));
+  for (const row of rows.results) {
+    try {
+      await refreshCredential(env, row.user_id, "SCHEDULED");
+    } catch (error) {
+      console.error(JSON.stringify({ level: "error", event: "credential_refresh_failed", userId: row.user_id, code: error instanceof HttpError ? error.code : "CREDENTIAL_REFRESH_FAILED" }));
+    }
+  }
 }
 
 async function expireInvitations(env: AppEnv, now: number): Promise<void> {
@@ -72,10 +119,10 @@ async function cleanupSessions(env: AppEnv, now: number): Promise<void> {
   await env.DB.prepare("DELETE FROM login_attempts WHERE created_at <= ?").bind(now - 24 * 60 * 60 * 1000).run();
 }
 
-async function prepareReservationTasks(env: AppEnv, now: number): Promise<void> {
+async function prepareReservationTasks(env: AppEnv, now: number, limit = 5): Promise<void> {
   const rows = await env.DB.prepare(
     `SELECT id, owner_user_id, target_date FROM reservation_tasks
-      WHERE status IN ('WAITING_WINDOW', 'WAITING_MEMBERS') LIMIT 50`,
+      WHERE status IN ('WAITING_WINDOW', 'WAITING_MEMBERS') LIMIT ${limit}`,
   ).all<{ id: string; owner_user_id: string; target_date: string }>();
 
   for (const task of rows.results) {
@@ -150,10 +197,10 @@ function redactedResponse(response: unknown): string {
   });
 }
 
-async function submitReadyReservationTasks(env: AppEnv, now: number): Promise<void> {
+async function submitReadyReservationTasks(env: AppEnv, now: number, limit = 2): Promise<void> {
   if (!flag(env, "ENABLE_SINGLE_RESERVATION_SUBMISSION")) return;
   const tasks = await env.DB.prepare(
-    "SELECT id, owner_user_id, target_date, start_time, end_time FROM reservation_tasks WHERE status = 'READY' LIMIT 20",
+    `SELECT id, owner_user_id, target_date, start_time, end_time FROM reservation_tasks WHERE status = 'READY' LIMIT ${limit}`,
   ).all<ReadyTask>();
 
   for (const task of tasks.results) {
@@ -246,14 +293,14 @@ async function submitReadyReservationTasks(env: AppEnv, now: number): Promise<vo
   }
 }
 
-export async function syncPendingOfficialReservations(env: AppEnv): Promise<void> {
+export async function syncPendingOfficialReservations(env: AppEnv, limit = 3): Promise<void> {
   const rows = await env.DB.prepare(
     `SELECT DISTINCT u.id, u.student_id, u.real_name
        FROM reservations r
        JOIN users u ON u.id = r.owner_user_id
       WHERE r.official_reservation_id IS NOT NULL
         AND r.status IN ('WAITING_MEMBER_CONFIRMATION', 'SCHEDULED', 'SIGNED_IN')
-      LIMIT 50`,
+      LIMIT ${limit}`,
   ).all<{ id: string; student_id: string | null; real_name: string | null }>();
 
   for (const user of rows.results) {
@@ -297,12 +344,12 @@ async function markSignSuccess(env: AppEnv, taskId: string, reservationId: strin
   ]);
 }
 
-export async function submitDueSignTasks(env: AppEnv, now: number): Promise<void> {
+export async function submitDueSignTasks(env: AppEnv, now: number, limit = 20): Promise<void> {
   if (!flag(env, "ENABLE_AUTO_SIGN_SUBMISSION")) return;
   const rows = await env.DB.prepare(
     `SELECT s.id, s.reservation_id, s.status, r.official_reservation_id, r.owner_user_id, r.member_snapshot_json
        FROM sign_tasks s JOIN reservations r ON r.id = s.reservation_id
-      WHERE s.scheduled_at <= ? AND s.status IN ('PENDING', 'SUBMITTING') LIMIT 20`,
+      WHERE s.scheduled_at <= ? AND s.status IN ('PENDING', 'SUBMITTING') LIMIT ${limit}`,
   ).bind(now).all<DueSignTask>();
 
   for (const task of rows.results) {
@@ -317,7 +364,7 @@ export async function submitDueSignTasks(env: AppEnv, now: number): Promise<void
         await markSignSuccess(env, task.id, task.reservation_id, record.reservationStatus);
         continue;
       }
-      if (record?.reservationStatus === 51) {
+      if (record?.reservationStatus === 51 || record?.reservationStatus === 53) {
         await markSignSuccess(env, task.id, task.reservation_id, record.reservationStatus);
         continue;
       }
@@ -374,18 +421,18 @@ export async function submitDueSignTasks(env: AppEnv, now: number): Promise<void
   }
 }
 
-export async function submitDueSignoutTasks(env: AppEnv, now: number): Promise<void> {
+export async function submitDueSignoutTasks(env: AppEnv, now: number, limit = 20): Promise<void> {
   if (!flag(env, "ENABLE_SIGNOUT_SUBMISSION")) return;
   const rows = await env.DB.prepare(
     `SELECT s.id, s.reservation_id, s.official_reservation_id, s.status, r.owner_user_id
        FROM signout_tasks s JOIN reservations r ON r.id = s.reservation_id
-      WHERE s.scheduled_at <= ? AND s.status IN ('PENDING', 'SUBMITTING') LIMIT 20`,
+      WHERE s.scheduled_at <= ? AND s.status IN ('PENDING', 'SUBMITTING') LIMIT ${limit}`,
   ).bind(now).all<{ id: string; reservation_id: string; official_reservation_id: string; status: string; owner_user_id: string }>();
 
   for (const task of rows.results) {
     try {
       let { token, studentId, record } = await findOfficialRecord(env, task.owner_user_id, task.official_reservation_id);
-      if (record?.reservationStatus === 51) {
+      if (record?.reservationStatus === 51 || record?.reservationStatus === 53) {
         await markSignoutSuccess(env, task.id, task.reservation_id, record.reservationStatus);
         continue;
       }
@@ -401,7 +448,7 @@ export async function submitDueSignoutTasks(env: AppEnv, now: number): Promise<v
       if (claimed.meta.changes !== 1) continue;
       await signOutOfficialReservation(env, token, studentId, String(record.roomId));
       ({ record } = await findOfficialRecord(env, task.owner_user_id, task.official_reservation_id));
-      if (record?.reservationStatus === 51) {
+      if (record?.reservationStatus === 51 || record?.reservationStatus === 53) {
         await markSignoutSuccess(env, task.id, task.reservation_id, record.reservationStatus);
       } else {
         await env.DB.prepare("UPDATE signout_tasks SET status = 'PENDING', official_response_redacted = ? WHERE id = ?")

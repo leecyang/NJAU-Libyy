@@ -81,7 +81,9 @@ describe("official API adapter", () => {
       .mockResolvedValueOnce(proxyResponse(200, JSON.stringify({ userId: "student-id", realName: "Student" })))
       .mockResolvedValueOnce(proxyResponse(200, "[]"))
       .mockResolvedValueOnce(proxyResponse(200, JSON.stringify({ accepted: true })))
-      .mockResolvedValueOnce(proxyResponse(200, JSON.stringify({ userId: "student-id", realName: "Student" })));
+      .mockResolvedValueOnce(proxyResponse(200, JSON.stringify({
+        records: [{ userId: "student-id", realName: "Student" }],
+      })));
     vi.stubGlobal("fetch", fetchMock);
 
     await fetchOfficialIdentity(env, "access-token");
@@ -109,8 +111,34 @@ describe("official API adapter", () => {
       "/api/oauth/v1/user",
       "/api/studyroom/v1/room/mRooms",
       "/api/studyroom/v1.1/reservation/reservation",
-      "/api/studyroom/v1/user/student-id",
+      "/api/studyroom/v1/user/pageUser",
     ]);
+  });
+
+  it("searches official users with the browser-confirmed pageUser query", async () => {
+    const fetchMock = vi.fn<typeof fetch>().mockResolvedValue(proxyResponse(200, JSON.stringify({
+      records: [
+        { id: 12, userId: "other-id", realName: "Other" },
+        { id: 34, userId: "student-id", realName: "Student", mobile: "13000000000" },
+      ],
+    })));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(searchOfficialUsers(env, "access-token", "student-id")).resolves.toEqual({
+      id: 34,
+      userId: "student-id",
+      realName: "Student",
+      mobile: "13000000000",
+    });
+
+    const proxyPayload = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    const url = new URL(proxyPayload.url);
+    expect(url.pathname).toBe("/api/studyroom/v1/user/pageUser");
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      param: "student-id",
+      page: "1",
+      size: "10",
+    });
   });
 
   it("uses the browser-confirmed reservation query shape", async () => {
@@ -195,6 +223,8 @@ describe("official API adapter", () => {
       "/api/studyroom/v1/reservation/signOut",
       "/api/studyroom/v1/reservation/createQrSignCheckCode",
     ]);
+    const cancelUrl = new URL(JSON.parse(String(fetchMock.mock.calls[1]?.[1]?.body)).url);
+    expect(Object.fromEntries(cancelUrl.searchParams)).toMatchObject({ reservationId: "18651", cancelType: "1" });
     const signoutUrl = new URL(JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body)).url);
     expect(Object.fromEntries(signoutUrl.searchParams)).toMatchObject({ userId: "student-id", roomId: "23" });
   });

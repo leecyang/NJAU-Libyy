@@ -8,6 +8,14 @@ export type AppEnv = Env & {
   SIGN_ROOM_SYSTEM_MAC_MAP?: string;
   AUTHORIZED_SIGN_SYSTEM_MAC?: string;
   AUTHORIZED_SIGN_ROOM_ID?: string;
+  SCHEDULER_MAX_RUNTIME_MS?: string;
+  SCHEDULER_REFRESH_LIMIT?: string;
+  SCHEDULER_PREPARE_LIMIT?: string;
+  SCHEDULER_RESERVATION_SUBMIT_LIMIT?: string;
+  SCHEDULER_SYNC_LIMIT?: string;
+  SCHEDULER_SIGN_LIMIT?: string;
+  SCHEDULER_SIGNOUT_LIMIT?: string;
+  SCHEDULER_MAIL_LIMIT?: string;
 };
 
 export function flag(env: AppEnv, name: keyof Env): boolean {

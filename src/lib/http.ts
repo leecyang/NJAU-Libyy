@@ -55,13 +55,13 @@ export function requireString(value: unknown, field: string, maxLength = 500): s
   return value.trim();
 }
 
-export async function readBoundedJson(response: Response, maxBytes = 262_144): Promise<unknown> {
+export async function readBoundedText(response: Response, maxBytes = 262_144): Promise<string> {
   const contentLength = Number(response.headers.get("content-length") ?? "0");
   if (contentLength > maxBytes) {
-    throw new Error("Official response is too large");
+    throw new Error("Response is too large");
   }
 
-  if (!response.body) return null;
+  if (!response.body) return "";
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -72,7 +72,7 @@ export async function readBoundedJson(response: Response, maxBytes = 262_144): P
     total += value.byteLength;
     if (total > maxBytes) {
       await reader.cancel();
-      throw new Error("Official response is too large");
+      throw new Error("Response is too large");
     }
     chunks.push(value);
   }
@@ -84,8 +84,11 @@ export async function readBoundedJson(response: Response, maxBytes = 262_144): P
     offset += chunk.byteLength;
   }
 
-  const text = new TextDecoder().decode(bytes);
+  return new TextDecoder().decode(bytes);
+}
+
+export async function readBoundedJson(response: Response, maxBytes = 262_144): Promise<unknown> {
+  const text = await readBoundedText(response, maxBytes);
   if (!text) return null;
   return JSON.parse(text) as unknown;
 }
-

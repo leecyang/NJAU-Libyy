@@ -51,7 +51,15 @@
     "ENABLE_SIGN_PARAMETER_INGEST": "false",
     "SIGN_ROOM_SYSTEM_MAC_MAP": "{}",
     "SIGN_LINK_BASE_URL": "https://libyy.njau.edu.cn/mStudent/codeSignIn/",
-    "DEV_EXPOSE_VERIFICATION_CODES": "false"
+    "DEV_EXPOSE_VERIFICATION_CODES": "false",
+    "SCHEDULER_MAX_RUNTIME_MS": "18000",
+    "SCHEDULER_REFRESH_LIMIT": "3",
+    "SCHEDULER_PREPARE_LIMIT": "5",
+    "SCHEDULER_RESERVATION_SUBMIT_LIMIT": "2",
+    "SCHEDULER_SYNC_LIMIT": "3",
+    "SCHEDULER_SIGN_LIMIT": "5",
+    "SCHEDULER_SIGNOUT_LIMIT": "5",
+    "SCHEDULER_MAIL_LIMIT": "2"
   },
   "secrets": {
     "required": [
@@ -112,7 +120,15 @@
         "ENABLE_SIGN_PARAMETER_INGEST": "false",
         "SIGN_ROOM_SYSTEM_MAC_MAP": "{\"2\":\"JWJA211231039\"}",
         "SIGN_LINK_BASE_URL": "https://libyy.njau.edu.cn/mStudent/codeSignIn/",
-        "DEV_EXPOSE_VERIFICATION_CODES": "false"
+        "DEV_EXPOSE_VERIFICATION_CODES": "false",
+        "SCHEDULER_MAX_RUNTIME_MS": "18000",
+        "SCHEDULER_REFRESH_LIMIT": "3",
+        "SCHEDULER_PREPARE_LIMIT": "5",
+        "SCHEDULER_RESERVATION_SUBMIT_LIMIT": "2",
+        "SCHEDULER_SYNC_LIMIT": "3",
+        "SCHEDULER_SIGN_LIMIT": "5",
+        "SCHEDULER_SIGNOUT_LIMIT": "5",
+        "SCHEDULER_MAIL_LIMIT": "2"
       },
       "secrets": {
         "required": [

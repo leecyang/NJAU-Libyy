@@ -51,8 +51,34 @@ export function localReservationStatus(officialStatus: number): string {
     21: "SCHEDULED",
     31: "SIGNED_IN",
     51: "SIGNED_OUT",
+    53: "SIGNED_OUT",
     61: "CANCELLED",
+    63: "CANCELLED",
   } as Record<number, string>)[officialStatus] ?? `OFFICIAL_${officialStatus}`;
+}
+
+export function reservationStatusLabel(status: string, officialStatus?: number | null): string {
+  if (typeof officialStatus === "number") {
+    const official = ({
+      12: "待成员确认",
+      21: "待签到",
+      31: "已签到",
+      51: "已签退",
+      53: "系统签退",
+      61: "已取消",
+      63: "系统取消",
+    } as Record<number, string>)[officialStatus];
+    if (official) return official;
+  }
+  return ({
+    WAITING_MEMBER_CONFIRMATION: "待成员确认",
+    SUBMITTED_UNVERIFIED: "同步中",
+    SUCCESS: "预约成功",
+    SCHEDULED: "待签到",
+    SIGNED_IN: "已签到",
+    SIGNED_OUT: "已签退",
+    CANCELLED: "已取消",
+  } as Record<string, string>)[status] ?? status;
 }
 
 function nullableNumber(value: unknown): number | null {
@@ -89,7 +115,7 @@ export async function officialMemberSnapshot(env: AppEnv, record: OfficialReserv
       realName: typeof record.userName === "string" ? record.userName : "",
       userType: 1,
       status: null,
-      swipe: record.reservationStatus === 31 || record.reservationStatus === 51 ? 1 : 0,
+      swipe: record.reservationStatus === 31 || record.reservationStatus === 51 || record.reservationStatus === 53 ? 1 : 0,
     }];
 
   const localIds = await localUsersByStudentId(env, members.map((member) => member.userId));
@@ -185,11 +211,11 @@ export async function syncOfficialReservationHistory(env: AppEnv, user: Reservat
       await env.DB.prepare("UPDATE sign_tasks SET status = 'SUCCESS', executed_at = COALESCE(executed_at, ?) WHERE reservation_id = ? AND status <> 'SUCCESS'")
         .bind(record.signInTime ?? now, reservationId).run();
     }
-    if (record.reservationStatus === 51) {
+    if (record.reservationStatus === 51 || record.reservationStatus === 53) {
       await env.DB.prepare("UPDATE signout_tasks SET status = 'SUCCESS', executed_at = COALESCE(executed_at, ?) WHERE reservation_id = ? AND status <> 'SUCCESS'")
         .bind(record.signOutTime ?? now, reservationId).run();
     }
-    if (record.reservationStatus === 61) {
+    if (record.reservationStatus === 61 || record.reservationStatus === 63) {
       await env.DB.batch([
         env.DB.prepare("UPDATE sign_tasks SET status = 'DISABLED' WHERE reservation_id = ? AND status <> 'SUCCESS'").bind(reservationId),
         env.DB.prepare("UPDATE signout_tasks SET status = 'DISABLED' WHERE reservation_id = ? AND status <> 'SUCCESS'").bind(reservationId),

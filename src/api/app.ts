@@ -23,6 +23,7 @@ import {
 } from "../lib/official";
 import {
   localReservationStatus,
+  reservationStatusLabel,
   resolveSignDevice,
   shanghaiParts,
   syncOfficialReservationHistory,
@@ -254,6 +255,16 @@ export async function rooms(env: AppEnv, request: Request): Promise<Response> {
   return ok({ date, rooms: detailed.filter((room) => room.reservable) });
 }
 
+function isReservationExpired(date: string, endTime: string, now = Date.now()): boolean {
+  return new Date(`${date}T${endTime}:00+08:00`).valueOf() <= now;
+}
+
+function canCancelReservation(row: { status: string; official_reservation_id: string | null; date: string; end_time: string }): boolean {
+  return Boolean(row.official_reservation_id)
+    && ["WAITING_MEMBER_CONFIRMATION", "SUBMITTED_UNVERIFIED", "SUCCESS", "SCHEDULED"].includes(row.status)
+    && !isReservationExpired(row.date, row.end_time);
+}
+
 export async function roomDetail(env: AppEnv, request: Request, roomIdText: string): Promise<Response> {
   const user = await requireBoundUser(env, request);
   const date = requireString(new URL(request.url).searchParams.get("date"), "date", 10);
@@ -327,8 +338,28 @@ export async function reservationHistory(env: AppEnv, request: Request): Promise
     `SELECT id, task_id, official_reservation_id, room_id, room_name_snapshot, date,
             start_time, end_time, member_snapshot_json, submission_type, status, official_status, created_at
        FROM reservations WHERE owner_user_id = ? ORDER BY date DESC, start_time DESC, created_at DESC LIMIT 100`,
-  ).bind(user.id).all();
-  return ok(rows.results);
+  ).bind(user.id).all<{
+    id: string;
+    task_id: string | null;
+    official_reservation_id: string | null;
+    room_id: number;
+    room_name_snapshot: string;
+    date: string;
+    start_time: string;
+    end_time: string;
+    member_snapshot_json: string;
+    submission_type: string;
+    status: string;
+    official_status: number | null;
+    created_at: number;
+  }>();
+  return ok(rows.results.map((row) => ({
+    ...row,
+    statusLabel: reservationStatusLabel(row.status, row.official_status),
+    status_label: reservationStatusLabel(row.status, row.official_status),
+    canCancel: canCancelReservation(row),
+    can_cancel: canCancelReservation(row),
+  })));
 }
 
 export async function syncReservationHistory(env: AppEnv, request: Request): Promise<Response> {
@@ -340,10 +371,10 @@ export async function syncReservationHistory(env: AppEnv, request: Request): Pro
 export async function cancelReservation(env: AppEnv, request: Request, reservationId: string): Promise<Response> {
   const user = await requireBoundUser(env, request);
   const row = await env.DB.prepare(
-    "SELECT official_reservation_id FROM reservations WHERE id = ? AND owner_user_id = ? AND status IN ('SCHEDULED', 'SUBMITTED_UNVERIFIED')",
-  ).bind(reservationId, user.id).first<{ official_reservation_id: string | null }>();
-  if (!row?.official_reservation_id) throw new HttpError(409, "RESERVATION_NOT_CANCELLABLE", "当前预约无法取消");
-  await cancelOfficialReservation(env, await getAccessToken(env, user.id), row.official_reservation_id);
+    "SELECT official_reservation_id, date, end_time, status FROM reservations WHERE id = ? AND owner_user_id = ? AND status IN ('WAITING_MEMBER_CONFIRMATION', 'SCHEDULED', 'SUCCESS', 'SUBMITTED_UNVERIFIED')",
+  ).bind(reservationId, user.id).first<{ official_reservation_id: string | null; date: string; end_time: string; status: string }>();
+  if (!row || !canCancelReservation(row)) throw new HttpError(409, "RESERVATION_NOT_CANCELLABLE", "当前预约无法取消");
+  await cancelOfficialReservation(env, await getAccessToken(env, user.id), row.official_reservation_id!);
   await syncOfficialReservationHistory(env, user);
   const updated = await env.DB.prepare("SELECT status FROM reservations WHERE id = ?").bind(reservationId).first<{ status: string }>();
   if (updated?.status !== "CANCELLED") throw new HttpError(502, "RESERVATION_SYNC_FAILED", "取消请求已提交，但官方状态尚未同步");

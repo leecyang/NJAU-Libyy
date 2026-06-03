@@ -29,7 +29,7 @@ type OutboxRow = {
   attempt_count: number;
 };
 
-export async function deliverDueMail(env: AppEnv, now = Date.now()): Promise<void> {
+export async function deliverDueMail(env: AppEnv, now = Date.now(), limit = 20): Promise<void> {
   if (!flag(env, "EMAIL_DELIVERY_ENABLED") || !env.SMTP_PASSWORD) return;
   const rows = await env.DB.prepare(
     `SELECT id, recipient_email, template, payload_json, attempt_count
@@ -37,7 +37,7 @@ export async function deliverDueMail(env: AppEnv, now = Date.now()): Promise<voi
       WHERE status = 'PENDING'
         AND COALESCE(next_attempt_at, 0) <= ?
         AND (delivery_lock_until IS NULL OR delivery_lock_until < ?)
-      ORDER BY created_at LIMIT 20`,
+      ORDER BY created_at LIMIT ${limit}`,
   ).bind(now, now).all<OutboxRow>();
 
   for (const row of rows.results) {
