@@ -39,6 +39,11 @@ import {
 } from "../lib/validation";
 
 type JsonObject = Record<string, unknown>;
+type DailyAvailability = {
+  date: string;
+  label: string;
+  availableRanges: Array<{ startTime: string; endTime: string }>;
+};
 type ResolvedMember = OfficialMember & {
   source: "TEAM" | "CONTACT";
   localUserId?: string;
@@ -74,6 +79,36 @@ function publicRoom(room: Room): Room & { reservable: boolean } {
 
 function publicRoomWithRanges(room: Room, date: string): Room & { reservable: boolean; availableRanges: Array<{ startTime: string; endTime: string }> } {
   return { ...publicRoom(room), availableRanges: availableTimeRanges(room, date) };
+}
+
+function shanghaiDate(offset = 0, now = new Date()): string {
+  const base = new Date(now.valueOf());
+  base.setUTCDate(base.getUTCDate() + offset);
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(base);
+  const year = parts.find((part) => part.type === "year")?.value ?? "1970";
+  const month = parts.find((part) => part.type === "month")?.value ?? "01";
+  const day = parts.find((part) => part.type === "day")?.value ?? "01";
+  return `${year}-${month}-${day}`;
+}
+
+function threeDayWindow(now = new Date()): Array<{ date: string; label: string }> {
+  return ["今天", "明天", "后天"].map((label, index) => ({ date: shanghaiDate(index, now), label }));
+}
+
+async function roomDailyAvailability(env: AppEnv, token: string, roomId: number, dates = threeDayWindow()): Promise<DailyAvailability[]> {
+  return Promise.all(dates.map(async ({ date, label }) => {
+    try {
+      const detail = await fetchOfficialRoomDetail(env, token, roomId, date);
+      return { date, label, availableRanges: availableTimeRanges(detail, date) };
+    } catch {
+      return { date, label, availableRanges: [] };
+    }
+  }));
 }
 
 async function requireBoundUser(env: AppEnv, request: Request): Promise<User> {
@@ -241,9 +276,23 @@ export async function getCredentialStatus(env: AppEnv, request: Request): Promis
 
 export async function rooms(env: AppEnv, request: Request): Promise<Response> {
   const user = await requireBoundUser(env, request);
-  const date = requireString(new URL(request.url).searchParams.get("date"), "date", 10);
-  assertThreeDayWindow(date);
+  const requestedDate = new URL(request.url).searchParams.get("date");
+  const date = requestedDate ? requireString(requestedDate, "date", 10) : null;
   const token = await getAccessToken(env, user.id);
+  if (!date) {
+    const dates = threeDayWindow();
+    const dailyRooms = await Promise.all(dates.map(({ date }) => fetchOfficialRooms(env, token, date)));
+    const roomMap = new Map<number, Room & { reservable: boolean }>();
+    for (const room of dailyRooms.flat().map(publicRoom).filter((room) => room.reservable)) {
+      if (!roomMap.has(room.id)) roomMap.set(room.id, room);
+    }
+    const detailed = await Promise.all([...roomMap.values()].map(async (room) => ({
+      ...room,
+      dailyAvailability: await roomDailyAvailability(env, token, room.id, dates),
+    })));
+    return ok({ dates, rooms: detailed.filter((room) => room.reservable) });
+  }
+  assertThreeDayWindow(date);
   const rooms = (await fetchOfficialRooms(env, token, date)).map(publicRoom).filter((room) => room.reservable);
   const detailed = await Promise.all(rooms.map(async (room) => {
     try {
@@ -267,11 +316,32 @@ function canCancelReservation(row: { status: string; official_reservation_id: st
 
 export async function roomDetail(env: AppEnv, request: Request, roomIdText: string): Promise<Response> {
   const user = await requireBoundUser(env, request);
-  const date = requireString(new URL(request.url).searchParams.get("date"), "date", 10);
-  assertThreeDayWindow(date);
+  const requestedDate = new URL(request.url).searchParams.get("date");
+  const date = requestedDate ? requireString(requestedDate, "date", 10) : null;
   const roomId = Number(roomIdText);
   if (!Number.isInteger(roomId)) throw new HttpError(400, "INVALID_FIELD", "roomId 格式错误");
-  const room = publicRoom(await fetchOfficialRoomDetail(env, await getAccessToken(env, user.id), roomId, date));
+  const token = await getAccessToken(env, user.id);
+  if (!date) {
+    const dates = threeDayWindow();
+    const dailyDetails = await Promise.all(dates.map(async ({ date }) => {
+      try {
+        return await fetchOfficialRoomDetail(env, token, roomId, date);
+      } catch {
+        return null;
+      }
+    }));
+    const room = dailyDetails.find((detail): detail is Room => Boolean(detail));
+    if (!room) throw new HttpError(502, "ROOM_DETAIL_UNAVAILABLE", "研讨室详情暂时不可用");
+    return ok({
+      ...publicRoom(room),
+      dailyAvailability: dailyDetails.map((detail, index) => ({
+        ...dates[index],
+        availableRanges: detail ? availableTimeRanges(detail, dates[index]!.date) : [],
+      })),
+    });
+  }
+  assertThreeDayWindow(date);
+  const room = publicRoom(await fetchOfficialRoomDetail(env, token, roomId, date));
   return ok({ ...room, availableRanges: availableTimeRanges(room, date) });
 }
 
