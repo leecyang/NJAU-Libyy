@@ -12,7 +12,7 @@ function Set-EnvironmentSecret {
     [Parameter(Mandatory = $true)][string]$Name,
     [Parameter(Mandatory = $true)][string]$Value
   )
-  Set-GitHubSecret -Repository $Repository -Name $Name -Value $Value
+  Set-GitHubSecret -Repository $Repository -Environment "production" -Name $Name -Value $Value
   Set-WranglerSecret -Environment "production" -Name $Name -Value $Value
 }
 

@@ -45,11 +45,11 @@ npm run check
 | --- | --- | --- | --- |
 | production | `njau-libyy-production` | `njau-libyy-production` | `https://libyy.way2api.fun` |
 
-GitHub Actions 会在 `main` 更新后自动执行 production D1 迁移并部署到 Cloudflare。`main` 可以直接修改并 push，不再要求通过 PR 或 GitHub Environment 审批发布。首次启用前，在仓库中设置：
+GitHub Actions 会在 `main` 更新后自动执行 production D1 迁移并部署到 Cloudflare。`main` 可以直接修改并 push，不再要求通过 PR 发布。首次启用前，在仓库中设置：
 
 - Repository variable：`CLOUDFLARE_ACCOUNT_ID`
 - Repository secret：`CLOUDFLARE_API_TOKEN`
-- Repository secrets：`LIBYY_APP_SECRET`、`NJAU_PROXY_TOKEN`、`TOKEN_ENCRYPTION_KEY`、`SESSION_SECRET`、`PASSWORD_HASH_SECRET`、`SMTP_PASSWORD`
+- production Environment secrets：`LIBYY_APP_SECRET`、`NJAU_PROXY_TOKEN`、`TOKEN_ENCRYPTION_KEY`、`SESSION_SECRET`、`PASSWORD_HASH_SECRET`、`SMTP_PASSWORD`
 - 签到房间映射变量：`SIGN_ROOM_SYSTEM_MAC_MAP`，当前默认包含 `{"2":"JWJA211231039"}`；补齐其他房间后可扩大自动签到覆盖范围。
 - 可选兼容签到入口 secrets：`AUTHORIZED_SIGN_SYSTEM_MAC`、`AUTHORIZED_SIGN_ROOM_ID`
 

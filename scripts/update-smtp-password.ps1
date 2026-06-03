@@ -9,7 +9,7 @@ $ErrorActionPreference = "Stop"
 $smtpPassword = Normalize-Secret (Read-PlainSecret "SMTP_PASSWORD (Alibaba enterprise email third-party client security password)")
 
 try {
-  Set-GitHubSecret -Repository $Repository -Name "SMTP_PASSWORD" -Value $smtpPassword
+  Set-GitHubSecret -Repository $Repository -Environment "production" -Name "SMTP_PASSWORD" -Value $smtpPassword
   Set-WranglerSecret -Environment "production" -Name "SMTP_PASSWORD" -Value $smtpPassword
   npx wrangler d1 execute DB --env production --remote --command @"
 UPDATE email_outbox
