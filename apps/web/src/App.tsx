@@ -770,15 +770,20 @@ function CredentialLockPage({
   refresh,
   toast,
   navigate,
+  onLogout,
 }: {
   session: Session;
   refresh: () => Promise<void>;
   toast: (message: string, error?: boolean) => void;
   navigate: (path: string) => void;
+  onLogout: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   return (
     <div className="credential-lock-page">
+      <button className="icon-button credential-lock-logout" onClick={onLogout} aria-label="退出登录" type="button">
+        <LogOut size={18} />
+      </button>
       <section className="credential-lock-panel">
         <div className="credential-lock-mark"><KeyRound size={22} /></div>
         <div className="credential-intro">
@@ -841,7 +846,7 @@ function RoomsPage({ toast, navigate }: { toast: (message: string, error?: boole
             <span className="eyebrow">三天可用日期</span>
             <div className="date-strip">{dates.map((date) => <span key={date}>{dayLabel(date)}</span>)}</div>
           </div>
-          <Button onClick={loadRooms} busy={busy} type="button"><RefreshCw size={16} />刷新</Button>
+          <Button className="desktop-only-action" onClick={loadRooms} busy={busy} type="button"><RefreshCw size={16} />刷新</Button>
         </div>
         <div className="room-grid">
           {rooms.map((room) => (
@@ -984,7 +989,7 @@ function RoomDetailPage({
                 <h2>{room.name}</h2>
                 <p>{room.roomLocation ?? "研讨室"} · {room.minReservationNum}-{room.maxNum} 人 · {room.reservable === false ? "当前不可预约" : "可预约"}</p>
               </div>
-              <Button onClick={loadRoom} busy={busy} type="button" variant="secondary"><RefreshCw size={16} />刷新</Button>
+              <Button className="desktop-only-action" onClick={loadRoom} busy={busy} type="button" variant="secondary"><RefreshCw size={16} />刷新</Button>
             </div>
             {room.reservable === false ? <div className="room-warning">该房间当前由官方标记为不可预约，时间线仅用于查看状态。</div> : null}
             <SquareTimeGridPicker dates={dates} room={room} selection={selection} onChange={setSelection} />
@@ -1103,7 +1108,7 @@ function TasksPage({
       <Card title="任务列表" icon={<History size={20} />}>
         <div className="toolbar page-toolbar">
           <Button type="button" onClick={() => navigate("/tasks/new")}><ClipboardList size={16} />新建任务</Button>
-          <Button type="button" variant="secondary" onClick={load}><RefreshCw size={16} />刷新</Button>
+          <Button className="desktop-only-action" type="button" variant="secondary" onClick={load}><RefreshCw size={16} />刷新</Button>
         </div>
         <div className="task-sections">
           <section className="task-section">
@@ -1279,7 +1284,7 @@ function TeamsPage({
       <Card title="成员邀请" icon={<Mail size={20} />}>
         <div className="toolbar page-toolbar">
           <Button type="button" disabled={!canCreateTeam} onClick={() => navigate("/teams/new")}><UsersRound size={16} />{canCreateTeam ? "新建小队" : "已创建小队"}</Button>
-          <Button type="button" variant="secondary" onClick={load}><RefreshCw size={16} />刷新</Button>
+          <Button className="desktop-only-action" type="button" variant="secondary" onClick={load}><RefreshCw size={16} />刷新</Button>
         </div>
         {pendingInvitations.length ? (
           <div className="list team-invitation-list">
@@ -1355,7 +1360,7 @@ function HistoryPage({ toast }: { toast: (message: string, error?: boolean) => v
 
   return (
     <Card title="预约历史" icon={<History size={20} />}>
-      <div className="toolbar"><Button type="button" onClick={() => load(true)}><RefreshCw size={16} />同步</Button></div>
+      <div className="toolbar desktop-only-toolbar"><Button type="button" onClick={() => load(true)}><RefreshCw size={16} />同步</Button></div>
       <div className="list">
         {visibleItems.map((item) => (
           <article className="list-row" key={String(item.id)}>
@@ -1483,7 +1488,7 @@ export function App() {
   if (session.credential.credential_status !== "ACTIVE") {
     return (
       <>
-        <CredentialLockPage session={session} refresh={refreshMe} toast={toast} navigate={navigate} />
+        <CredentialLockPage session={session} refresh={refreshMe} toast={toast} navigate={navigate} onLogout={logout} />
         <Toast message={message} error={isError} />
       </>
     );
