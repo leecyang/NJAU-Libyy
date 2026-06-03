@@ -44,14 +44,22 @@ if [ -f "$APP_DIR/.release.env" ]; then
   CURRENT_VERSION="$(sed -n 's/^APP_IMAGE_TAG=//p' "$APP_DIR/.release.env" | head -n 1)"
 fi
 
-if [ "$CURRENT_VERSION" = "$VERSION" ] && curl -fsS http://127.0.0.1:3000/api/v1/health >/dev/null 2>&1; then
+if [ "$CURRENT_VERSION" = "$VERSION" ] && curl -fsS --connect-timeout 5 --max-time 15 http://127.0.0.1:3000/api/v1/health >/dev/null 2>&1; then
   echo "[deploy] Already running $VERSION"
   exit 0
 fi
 
-curl -fsSL "$R2_PUBLIC_BASE_URL/$CHANNEL/$IMAGE_OBJECT" -o "$IMAGE_PATH"
-curl -fsSL "$R2_PUBLIC_BASE_URL/$CHANNEL/$COMPOSE_OBJECT" -o "$COMPOSE_PATH"
-curl -fsSL "$R2_PUBLIC_BASE_URL/$CHANNEL/$ENV_EXAMPLE_OBJECT" -o "$APP_DIR/.env.example"
+download() {
+  local url="$1"
+  local output="$2"
+  echo "[deploy] Downloading $url"
+  curl --fail --location --continue-at - --connect-timeout 15 --max-time 1800 --progress-bar "$url" -o "$output"
+  echo
+}
+
+download "$R2_PUBLIC_BASE_URL/$CHANNEL/$IMAGE_OBJECT" "$IMAGE_PATH"
+download "$R2_PUBLIC_BASE_URL/$CHANNEL/$COMPOSE_OBJECT" "$COMPOSE_PATH"
+download "$R2_PUBLIC_BASE_URL/$CHANNEL/$ENV_EXAMPLE_OBJECT" "$APP_DIR/.env.example"
 
 if docker compose ps -q app >/dev/null 2>&1; then
   CONTAINER_ID="$(docker compose ps -q app || true)"
