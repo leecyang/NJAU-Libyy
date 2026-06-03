@@ -330,17 +330,17 @@ export async function rooms(env: AppEnv, request: Request): Promise<Response> {
     const dates = threeDayWindow();
     const dailyRooms = await Promise.all(dates.map(({ date }) => fetchOfficialRooms(env, token, date)));
     const roomMap = new Map<number, Room & { reservable: boolean }>();
-    for (const room of dailyRooms.flat().map(publicRoom).filter((room) => room.reservable)) {
+    for (const room of dailyRooms.flat().map(publicRoom)) {
       if (!roomMap.has(room.id)) roomMap.set(room.id, room);
     }
     const detailed = await Promise.all([...roomMap.values()].map(async (room) => ({
       ...room,
       dailyAvailability: await roomDailyAvailability(env, token, room.id, dates),
     })));
-    return ok({ dates, rooms: detailed.filter((room) => room.reservable) });
+    return ok({ dates, rooms: detailed });
   }
   assertThreeDayWindow(date);
-  const rooms = (await fetchOfficialRooms(env, token, date)).map(publicRoom).filter((room) => room.reservable);
+  const rooms = (await fetchOfficialRooms(env, token, date)).map(publicRoom);
   const detailed = await Promise.all(rooms.map(async (room) => {
     try {
       return publicRoomWithRanges(await fetchOfficialRoomDetail(env, token, room.id, date), date);
@@ -348,7 +348,7 @@ export async function rooms(env: AppEnv, request: Request): Promise<Response> {
       return { ...room, availableRanges: [] };
     }
   }));
-  return ok({ date, rooms: detailed.filter((room) => room.reservable) });
+  return ok({ date, rooms: detailed });
 }
 
 function isReservationExpired(date: string, endTime: string, now = Date.now()): boolean {

@@ -48,6 +48,8 @@ type Room = {
   id: number;
   name: string;
   roomLocation?: string;
+  status?: number;
+  reservable?: boolean;
   maxNum: number;
   minReservationNum: number;
   availableRanges?: AvailabilityRange[];
@@ -70,17 +72,37 @@ type TimeSelection = {
 };
 type Reservation = Record<string, string | number | boolean | null>;
 type Task = Record<string, string | number | null>;
+type TeamMember = {
+  id: string;
+  email?: string;
+  realName?: string;
+  real_name?: string;
+  studentId?: string;
+  student_id?: string;
+  teamName?: string;
+};
 type Team = {
   id: string;
   name: string;
   description?: string;
-  members?: Array<{ id: string; email: string; real_name?: string; student_id?: string }>;
+  leader_user_id?: string;
+  is_leader?: boolean | number;
+  members?: TeamMember[] | string | null;
 };
 type InvitableUser = {
   id: string;
   email: string;
   real_name?: string;
   student_id?: string;
+};
+type RecentContact = {
+  id: string;
+  studentId?: string;
+  student_id?: string;
+  realName?: string;
+  real_name?: string;
+  lastUsedAt?: number;
+  last_used_at?: number;
 };
 type QueueRow = Record<string, unknown> & { type: string };
 
@@ -118,6 +140,44 @@ function minutesToTime(value: number): string {
 
 function formData(form: HTMLFormElement): Record<string, string> {
   return Object.fromEntries(new FormData(form).entries()) as Record<string, string>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function parseTeamMembers(value: Team["members"]): TeamMember[] {
+  if (!value) return [];
+  const raw = typeof value === "string"
+    ? (() => {
+      try {
+        return JSON.parse(value) as unknown;
+      } catch {
+        return [];
+      }
+    })()
+    : value;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(isRecord).map((member) => ({
+    id: String(member.id ?? ""),
+    email: typeof member.email === "string" ? member.email : undefined,
+    realName: typeof member.realName === "string" ? member.realName : undefined,
+    real_name: typeof member.real_name === "string" ? member.real_name : undefined,
+    studentId: typeof member.studentId === "string" ? member.studentId : undefined,
+    student_id: typeof member.student_id === "string" ? member.student_id : undefined,
+  })).filter((member) => member.id);
+}
+
+function memberName(member: TeamMember): string {
+  return member.realName ?? member.real_name ?? member.email ?? member.id;
+}
+
+function contactName(contact: RecentContact): string {
+  return contact.realName ?? contact.real_name ?? contact.studentId ?? contact.student_id ?? contact.id;
+}
+
+function toggleValue(values: string[], value: string): string[] {
+  return values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
 }
 
 function Toast({ message, error }: { message: string; error?: boolean }) {
@@ -210,6 +270,11 @@ function rangeText(ranges: AvailabilityRange[]): string {
   return ranges.slice(0, 4).map((range) => `${range.startTime}-${range.endTime}`).join("、");
 }
 
+function roomRangeText(room: RoomWithDays, date: string): string {
+  if (room.reservable === false) return "当前不可预约";
+  return rangeText(room.days[date] ?? []);
+}
+
 const timeSlots = Array.from({ length: 28 }, (_, index) => minutesToTime(8 * 60 + index * 30));
 const hourStarts = Array.from({ length: 14 }, (_, index) => 8 + index);
 
@@ -236,7 +301,7 @@ function SquareTimeGridPicker({
 }) {
   function choose(date: string, index: number) {
     const ranges = room.days[date] ?? [];
-    if (!slotAvailable(ranges, timeSlots[index] ?? "")) return;
+    if (room.reservable === false || !slotAvailable(ranges, timeSlots[index] ?? "")) return;
 
     if (selectionContains(selection, date, index)) {
       onChange(null);
@@ -292,7 +357,7 @@ function SquareTimeGridPicker({
               </div>
               <div className="slot-cells">
                 {timeSlots.map((slot, index) => {
-                  const available = slotAvailable(room.days[date] ?? [], slot);
+                  const available = room.reservable !== false && slotAvailable(room.days[date] ?? [], slot);
                   const selected = selectionContains(selection, date, index);
                   return (
                     <button
@@ -317,6 +382,101 @@ function SquareTimeGridPicker({
         {selection ? `${dayLabel(selection.date)} ${selection.startTime}-${selection.endTime}` : "选择同一天连续时间段，最多 2 小时"}
       </div>
     </div>
+  );
+}
+
+function ReservationGuestsPicker({
+  teamMembers,
+  contacts,
+  selectedTeamMemberIds,
+  selectedContactIds,
+  contactQuery,
+  contactBusy,
+  onToggleTeamMember,
+  onToggleContact,
+  onContactQueryChange,
+  onSearchContact,
+}: {
+  teamMembers: TeamMember[];
+  contacts: RecentContact[];
+  selectedTeamMemberIds: string[];
+  selectedContactIds: string[];
+  contactQuery: string;
+  contactBusy: boolean;
+  onToggleTeamMember: (id: string) => void;
+  onToggleContact: (id: string) => void;
+  onContactQueryChange: (value: string) => void;
+  onSearchContact: () => Promise<void>;
+}) {
+  return (
+    <section className="guest-picker" aria-label="邀请同行成员">
+      <div className="guest-picker-head">
+        <div>
+          <span className="eyebrow">Guests</span>
+          <h3>邀请同行成员</h3>
+        </div>
+        <span>{selectedTeamMemberIds.length + selectedContactIds.length} 人</span>
+      </div>
+      <div className="guest-section">
+        <div className="guest-section-title">
+          <strong>小队成员</strong>
+          <small>仅展示你作为队长的小队成员</small>
+        </div>
+        <div className="guest-option-grid">
+          {teamMembers.map((member) => (
+            <label className="guest-option" key={member.id}>
+              <input
+                type="checkbox"
+                checked={selectedTeamMemberIds.includes(member.id)}
+                onChange={() => onToggleTeamMember(member.id)}
+              />
+              <span>
+                <strong>{memberName(member)}</strong>
+                <small>{member.teamName ?? "小队成员"}</small>
+              </span>
+            </label>
+          ))}
+          {!teamMembers.length ? <div className="guest-empty">暂无可直接邀请的小队成员</div> : null}
+        </div>
+      </div>
+      <div className="guest-section">
+        <div className="guest-section-title">
+          <strong>最近联系人</strong>
+          <small>输入准确学号查询后会加入最近联系人</small>
+        </div>
+        <div className="contact-search-row">
+          <input
+            value={contactQuery}
+            onChange={(event) => onContactQueryChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void onSearchContact();
+              }
+            }}
+            placeholder="输入学号添加联系人"
+            inputMode="numeric"
+          />
+          <Button type="button" variant="secondary" busy={contactBusy} onClick={() => void onSearchContact()}>添加</Button>
+        </div>
+        <div className="guest-option-grid">
+          {contacts.map((contact) => (
+            <label className="guest-option" key={contact.id}>
+              <input
+                type="checkbox"
+                checked={selectedContactIds.includes(contact.id)}
+                onChange={() => onToggleContact(contact.id)}
+              />
+              <span>
+                <strong>{contactName(contact)}</strong>
+                <small>{contact.studentId ?? contact.student_id ?? "最近联系人"}</small>
+              </span>
+            </label>
+          ))}
+          {!contacts.length ? <div className="guest-empty">还没有最近联系人</div> : null}
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -508,12 +668,14 @@ function CredentialsPage({
         </div>
         <form className="credential-form" onSubmit={async (event) => {
           event.preventDefault();
+          const form = event.currentTarget;
+          const data = formData(form);
           setBusy(true);
           try {
-            await api("/api/v1/credentials/bind", { method: "POST", body: JSON.stringify(formData(event.currentTarget)) });
+            await api("/api/v1/credentials/bind", { method: "POST", body: JSON.stringify(data) });
             toast("官方身份绑定成功");
             await refresh();
-            event.currentTarget.reset();
+            form.reset();
             navigate("/rooms");
           } catch (error) {
             toast(error instanceof Error ? error.message : "绑定失败", true);
@@ -565,22 +727,27 @@ function RoomsPage({ toast, navigate }: { toast: (message: string, error?: boole
           {rooms.map((room) => (
             <button
               key={room.id}
-              className="room-card"
+              className={`room-card ${room.reservable === false ? "room-card-muted" : ""}`}
               onClick={() => navigate(`/rooms/${room.id}`)}
             >
               <div className="room-card-main">
-                <strong>{room.name}</strong>
+                <div className="room-card-titleline">
+                  <strong>{room.name}</strong>
+                  <span className={`room-state ${room.reservable === false ? "blocked" : "open"}`}>
+                    {room.reservable === false ? "暂不开放" : "可预约"}
+                  </span>
+                </div>
                 <span>{room.roomLocation ?? "研讨室"} · {room.minReservationNum}-{room.maxNum} 人</span>
               </div>
               <div className="room-day-ranges">
                 {dates.map((date) => (
                   <div className="room-day-range" key={`${room.id}-${date}`}>
                     <b>{dayLabel(date)}</b>
-                    <small>{rangeText(room.days[date] ?? [])}</small>
+                    <small>{roomRangeText(room, date)}</small>
                   </div>
                 ))}
               </div>
-              <span className="room-card-action">进入时间选择</span>
+              <span className="room-card-action">{room.reservable === false ? "查看状态" : "进入时间选择"}</span>
             </button>
           ))}
         </div>
@@ -603,16 +770,39 @@ function RoomDetailPage({
   const [dates, setDates] = useState<string[]>(fallbackDates);
   const [room, setRoom] = useState<RoomWithDays | null>(null);
   const [selection, setSelection] = useState<TimeSelection | null>(null);
+  const [teams, setTeams] = useState<Team[]>([]);
+  const [contacts, setContacts] = useState<RecentContact[]>([]);
+  const [selectedTeamMemberIds, setSelectedTeamMemberIds] = useState<string[]>([]);
+  const [selectedContactIds, setSelectedContactIds] = useState<string[]>([]);
+  const [contactQuery, setContactQuery] = useState("");
   const [busy, setBusy] = useState(false);
+  const [contactBusy, setContactBusy] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+
+  const teamMemberOptions = useMemo(() => {
+    const members = new Map<string, TeamMember>();
+    for (const team of teams) {
+      if (team.is_leader !== true && team.is_leader !== 1) continue;
+      for (const member of parseTeamMembers(team.members)) {
+        if (!members.has(member.id)) members.set(member.id, { ...member, teamName: team.name });
+      }
+    }
+    return [...members.values()];
+  }, [teams]);
 
   async function loadRoom() {
     setBusy(true);
     try {
-      const response = await api<RoomsResponse>("/api/v1/rooms");
+      const [response, teamData, contactData] = await Promise.all([
+        api<RoomsResponse>("/api/v1/rooms"),
+        api<{ teams: Team[] }>("/api/v1/teams/mine").catch(() => ({ teams: [] })),
+        api<RecentContact[]>("/api/v1/recent-contacts").catch(() => []),
+      ]);
       const normalized = normalizeRooms(response, fallbackDates);
       setDates(normalized.dates);
       setRoom(normalized.rooms.find((item) => item.id === roomId) ?? null);
+      setTeams(teamData.teams);
+      setContacts(contactData);
       setSelection(null);
     } catch (error) {
       toast(error instanceof Error ? error.message : "加载失败", true);
@@ -623,9 +813,27 @@ function RoomDetailPage({
 
   useEffect(() => { void loadRoom(); }, [roomId]);
 
+  async function searchContact() {
+    const query = contactQuery.trim();
+    if (!query) return;
+    setContactBusy(true);
+    try {
+      const found = await api<RecentContact>(`/api/v1/official-users/search?q=${encodeURIComponent(query)}`);
+      const latest = await api<RecentContact[]>("/api/v1/recent-contacts");
+      setContacts(latest);
+      setSelectedContactIds((current) => current.includes(found.id) ? current : [...current, found.id]);
+      setContactQuery("");
+      toast(`已添加 ${contactName(found)}`);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "联系人查询失败", true);
+    } finally {
+      setContactBusy(false);
+    }
+  }
+
   async function reserve(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!room || !selection) return;
+    if (!room || !selection || room.reservable === false) return;
     setSubmitting(true);
     try {
       await api("/api/v1/reservations/manual", {
@@ -635,12 +843,14 @@ function RoomDetailPage({
           roomId: room.id,
           startTime: selection.startTime,
           endTime: selection.endTime,
-          teamMemberUserIds: [],
-          contactIds: [],
+          teamMemberUserIds: selectedTeamMemberIds,
+          contactIds: selectedContactIds,
         }),
       });
       toast("预约已提交");
       setSelection(null);
+      setSelectedTeamMemberIds([]);
+      setSelectedContactIds([]);
       await loadRoom();
     } catch (error) {
       toast(error instanceof Error ? error.message : "预约失败", true);
@@ -663,17 +873,31 @@ function RoomDetailPage({
               <div>
                 <span className="eyebrow">Room</span>
                 <h2>{room.name}</h2>
-                <p>{room.roomLocation ?? "研讨室"} · {room.minReservationNum}-{room.maxNum} 人</p>
+                <p>{room.roomLocation ?? "研讨室"} · {room.minReservationNum}-{room.maxNum} 人 · {room.reservable === false ? "当前不可预约" : "可预约"}</p>
               </div>
               <Button onClick={loadRoom} busy={busy} type="button" variant="secondary"><RefreshCw size={16} />刷新</Button>
             </div>
+            {room.reservable === false ? <div className="room-warning">该房间当前由官方标记为不可预约，时间线仅用于查看状态。</div> : null}
             <SquareTimeGridPicker dates={dates} room={room} selection={selection} onChange={setSelection} />
+            <ReservationGuestsPicker
+              teamMembers={teamMemberOptions}
+              contacts={contacts}
+              selectedTeamMemberIds={selectedTeamMemberIds}
+              selectedContactIds={selectedContactIds}
+              contactQuery={contactQuery}
+              contactBusy={contactBusy}
+              onToggleTeamMember={(id) => setSelectedTeamMemberIds((current) => toggleValue(current, id))}
+              onToggleContact={(id) => setSelectedContactIds((current) => toggleValue(current, id))}
+              onContactQueryChange={setContactQuery}
+              onSearchContact={searchContact}
+            />
             <div className="reservation-summary">
               <div>
                 <span className="eyebrow">Selected</span>
                 <strong>{selection ? `${dayLabel(selection.date)} ${selection.startTime}-${selection.endTime}` : "尚未选择时间段"}</strong>
+                <small>主预约人 + {selectedTeamMemberIds.length + selectedContactIds.length} 位同行成员</small>
               </div>
-              <Button disabled={!selection} busy={submitting}>提交预约</Button>
+              <Button disabled={!selection || room.reservable === false} busy={submitting}>提交预约</Button>
             </div>
           </form>
         ) : null}
@@ -704,7 +928,8 @@ function TasksPage({
 
   async function create(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const data = formData(event.currentTarget);
+    const form = event.currentTarget;
+    const data = formData(form);
     try {
       await api("/api/v1/reservation-tasks", {
         method: "POST",
@@ -717,7 +942,7 @@ function TasksPage({
         }),
       });
       toast("自动任务已创建");
-      event.currentTarget.reset();
+      form.reset();
       await load();
       navigate("/tasks");
     } catch (error) {
@@ -807,10 +1032,12 @@ function TeamsPage({
 
   async function create(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const form = event.currentTarget;
+    const data = formData(form);
     try {
-      await api("/api/v1/teams", { method: "POST", body: JSON.stringify(formData(event.currentTarget)) });
+      await api("/api/v1/teams", { method: "POST", body: JSON.stringify(data) });
       toast("小队已创建");
-      event.currentTarget.reset();
+      form.reset();
       await load();
       navigate("/teams");
     } catch (error) {

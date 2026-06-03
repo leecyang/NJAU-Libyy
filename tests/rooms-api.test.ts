@@ -67,9 +67,9 @@ async function responseJson(response: Response): Promise<Record<string, any>> {
   return response.json() as Promise<Record<string, any>>;
 }
 
-function roomDetailFor(date: string): Room {
+function roomDetailFor(date: string, room: Room = baseRoom): Room {
   return {
-    ...baseRoom,
+    ...room,
     dateTimeSlicesList: [[
       { startTime: Date.parse(`${date}T00:00:00Z`), endTime: Date.parse(`${date}T00:10:00Z`), reservationStatus: 0 },
       { startTime: Date.parse(`${date}T00:10:00Z`), endTime: Date.parse(`${date}T00:20:00Z`), reservationStatus: 0 },
@@ -113,6 +113,28 @@ describe("rooms API availability windows", () => {
     ]);
     expect(fetchOfficialRooms).toHaveBeenCalledTimes(3);
     expect(fetchOfficialRoomDetail).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps official rooms that are not currently reservable in the list response", async () => {
+    const unavailableRoom: Room = {
+      ...baseRoom,
+      id: 12,
+      name: "7E12",
+      maxNum: 8,
+    };
+    vi.mocked(fetchOfficialRooms).mockResolvedValue([baseRoom, unavailableRoom]);
+    vi.mocked(fetchOfficialRoomDetail).mockImplementation(async (_env, _token, roomId, date) => {
+      return roomDetailFor(date, roomId === unavailableRoom.id ? unavailableRoom : baseRoom);
+    });
+
+    const response = await rooms(env(), new Request("https://app.test/api/v1/rooms"));
+    const body = await responseJson(response);
+
+    expect(body.ok).toBe(true);
+    expect(body.data.rooms).toHaveLength(2);
+    expect(body.data.rooms.map((room: { name: string }) => room.name)).toEqual(["7E01", "7E12"]);
+    expect(body.data.rooms.find((room: { id: number }) => room.id === unavailableRoom.id).reservable).toBe(false);
+    expect(fetchOfficialRoomDetail).toHaveBeenCalledTimes(6);
   });
 
   it("keeps the single-date response shape for existing callers", async () => {
