@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import { api, ApiError } from "./api";
 
-type Page = "rooms" | "tasks" | "teams" | "history" | "sign" | "admin";
+type Page = "rooms" | "credentials" | "tasks" | "teams" | "history" | "sign" | "admin";
 type Route = {
   page: Page;
   roomId?: number;
@@ -158,6 +158,7 @@ function Empty({ children }: { children: ReactNode }) {
 
 const pagePaths: Record<Page, string> = {
   rooms: "/rooms",
+  credentials: "/credentials",
   tasks: "/tasks",
   teams: "/teams",
   history: "/history",
@@ -174,6 +175,7 @@ function routeFromPath(pathname: string): Route {
   const roomMatch = normalized.match(/^\/rooms\/(\d+)$/);
   const adminMatch = normalized.match(/^\/admin\/([a-z-]+)$/);
   if (roomMatch) return { page: "rooms", roomId: Number(roomMatch[1]) };
+  if (normalized === "/credentials") return { page: "credentials" };
   if (normalized === "/tasks/new") return { page: "tasks", taskMode: "new" };
   if (normalized === "/tasks") return { page: "tasks" };
   if (normalized === "/teams/new") return { page: "teams", teamMode: "new" };
@@ -358,28 +360,36 @@ function AuthPanel({ onReady, toast }: { onReady: () => Promise<void>; toast: (m
         <div className="brand-mark">NJAU Libyy</div>
         <h1>研讨室预约工作台</h1>
         <p>同源前端、容器后端和校园网 VPN 出口已经合并到一个部署形态。</p>
-        <div className="product-fragment room-status-preview">
+        <div className="product-fragment auth-grid-preview">
           <div className="fragment-bar">
             <span />
             <span />
             <span />
-            <strong>今日房间状态</strong>
+            <strong>三天时间线</strong>
           </div>
-          <div className="status-board">
-            {[
-              { room: "7E08", time: "09:00-11:00", status: "待签到", tone: "warning" },
-              { room: "7E10", time: "10:00-12:00", status: "可预约", tone: "success" },
-              { room: "8A03", time: "14:00-16:00", status: "已占用", tone: "muted" },
-              { room: "9B12", time: "16:30-18:30", status: "可预约", tone: "success" },
-            ].map((item) => (
-              <div className="status-row" key={`${item.room}-${item.time}`}>
-                <div>
-                  <strong>{item.room}</strong>
-                  <span>{item.time}</span>
-                </div>
-                <small className={item.tone}>{item.status}</small>
-              </div>
+          <div className="preview-head">
+            <div>
+              <strong>7E08</strong>
+              <span>可视化半小时粒度</span>
+            </div>
+            <small>最多 2 小时</small>
+          </div>
+          <div className="preview-calendar-grid" aria-hidden="true">
+            {Array.from({ length: 45 }, (_, index) => (
+              <span
+                key={index}
+                className={
+                  [4, 5, 6, 17, 18, 31].includes(index) ? "selected"
+                  : [0, 1, 2, 12, 13, 14, 20, 21, 29, 30, 32, 33, 34, 42].includes(index) ? "available"
+                  : ""
+                }
+              />
             ))}
+          </div>
+          <div className="preview-foot">
+            <span>今天</span>
+            <b>09:00-10:30</b>
+            <span>连续选择</span>
           </div>
         </div>
       </section>
@@ -453,6 +463,7 @@ function Shell({
 }) {
   const items: Array<{ id: Page; label: string; icon: ReactNode; admin?: boolean }> = [
     { id: "rooms", label: "房间", icon: <DoorOpen size={18} /> },
+    { id: "credentials", label: "凭证", icon: <KeyRound size={18} /> },
     { id: "tasks", label: "任务", icon: <ClipboardList size={18} /> },
     { id: "teams", label: "小队", icon: <UsersRound size={18} /> },
     { id: "history", label: "历史", icon: <History size={18} /> },
@@ -476,29 +487,45 @@ function Shell({
   );
 }
 
-function SetupCard({ session, refresh, toast }: { session: Session; refresh: () => Promise<void>; toast: (message: string, error?: boolean) => void }) {
+function CredentialsPage({
+  session,
+  refresh,
+  toast,
+  navigate,
+}: {
+  session: Session;
+  refresh: () => Promise<void>;
+  toast: (message: string, error?: boolean) => void;
+  navigate: (path: string) => void;
+}) {
   const [busy, setBusy] = useState(false);
-  if (session.credential.credential_status === "ACTIVE") return null;
   return (
-    <Card title="官方凭证" icon={<KeyRound size={20} />}>
-      <form className="inline-form" onSubmit={async (event) => {
-        event.preventDefault();
-        setBusy(true);
-        try {
-          await api("/api/v1/credentials/bind", { method: "POST", body: JSON.stringify(formData(event.currentTarget)) });
-          toast("官方身份绑定成功");
-          await refresh();
-          event.currentTarget.reset();
-        } catch (error) {
-          toast(error instanceof Error ? error.message : "绑定失败", true);
-        } finally {
-          setBusy(false);
-        }
-      }}>
-        <Field label="reflushToken"><textarea name="reflushToken" required rows={3} /></Field>
-        <Button busy={busy}>绑定</Button>
-      </form>
-    </Card>
+    <div className="credential-page">
+      <Card title="重新绑定官方凭证" icon={<KeyRound size={20} />}>
+        <div className="credential-intro">
+          <span className="status-pill">{session.credential.credential_status}</span>
+          <p>官方登录凭证未绑定或已经失效。请粘贴新的 reflushToken，完成后系统会重新同步身份并返回工作台。</p>
+        </div>
+        <form className="credential-form" onSubmit={async (event) => {
+          event.preventDefault();
+          setBusy(true);
+          try {
+            await api("/api/v1/credentials/bind", { method: "POST", body: JSON.stringify(formData(event.currentTarget)) });
+            toast("官方身份绑定成功");
+            await refresh();
+            event.currentTarget.reset();
+            navigate("/rooms");
+          } catch (error) {
+            toast(error instanceof Error ? error.message : "绑定失败", true);
+          } finally {
+            setBusy(false);
+          }
+        }}>
+          <Field label="reflushToken"><textarea name="reflushToken" required rows={8} autoFocus /></Field>
+          <Button busy={busy}>保存并返回工作台</Button>
+        </form>
+      </Card>
+    </div>
   );
 }
 
@@ -994,6 +1021,12 @@ export function App() {
 
   useEffect(() => { void refreshMe(); }, []);
 
+  useEffect(() => {
+    if (session && session.credential.credential_status !== "ACTIVE" && route.page !== "credentials") {
+      navigate("/credentials");
+    }
+  }, [session, route.page]);
+
   async function logout() {
     await api("/api/v1/auth/logout", { method: "POST" }).catch(() => null);
     setSession(null);
@@ -1004,6 +1037,7 @@ export function App() {
 
   const pageTitle =
     route.page === "rooms" && route.roomId ? "选择预约时间"
+    : route.page === "credentials" ? "官方凭证"
     : route.page === "tasks" && route.taskMode === "new" ? "新建自动任务"
     : route.page === "teams" && route.teamMode === "new" ? "创建小队"
     : session.user.studentId ? "预约工作台" : "账号配置";
@@ -1015,9 +1049,9 @@ export function App() {
           <div><span className="eyebrow">Workspace</span><h1>{pageTitle}</h1></div>
           <div className="status-pill">{session.credential.credential_status}</div>
         </div>
-        <SetupCard session={session} refresh={refreshMe} toast={toast} />
         {route.page === "rooms" && !route.roomId ? <RoomsPage toast={toast} navigate={navigate} /> : null}
         {route.page === "rooms" && route.roomId ? <RoomDetailPage roomId={route.roomId} toast={toast} navigate={navigate} /> : null}
+        {route.page === "credentials" ? <CredentialsPage session={session} refresh={refreshMe} toast={toast} navigate={navigate} /> : null}
         {route.page === "tasks" ? <TasksPage toast={toast} navigate={navigate} mode={route.taskMode ?? "list"} /> : null}
         {route.page === "teams" ? <TeamsPage toast={toast} navigate={navigate} mode={route.teamMode ?? "list"} /> : null}
         {route.page === "history" ? <HistoryPage toast={toast} /> : null}

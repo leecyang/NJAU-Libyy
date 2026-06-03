@@ -13,6 +13,8 @@
 
 前端保持同源 API 访问，不需要跨域配置。你的反向代理只需要把公网域名转发到服务器本机 `127.0.0.1:3000`。
 
+默认 Compose 只监听 `127.0.0.1:3000`，适合 Nginx/Caddy 反向代理。如果确实要公网直接访问服务器 `3000` 端口，将 `.env` 中的 `APP_BIND_ADDR` 改为 `0.0.0.0` 后重新 `docker compose up -d`。
+
 ## 本地开发
 
 ```powershell
@@ -179,6 +181,7 @@ journalctl -u njau-libyy-update.service -f
 | --- | --- |
 | `OFFICIAL_NETWORK_MODE` | 默认 `tailscale-direct`，官方接口从容器直连并走 Tailscale 路由 |
 | `TS_EXTRA_ARGS` | Tailscale 启动参数，默认使用 exit node `100.87.36.34` |
+| `APP_BIND_ADDR` | Compose 端口绑定地址，默认 `127.0.0.1`；公网直连 3000 时设为 `0.0.0.0` |
 | `LIBYY_API_BASE_URL` | 官方图书馆接口地址，默认 `https://libyy.njau.edu.cn` |
 | `SIGN_ROOM_SYSTEM_MAC_MAP` | 房间 id 到签到设备 `systemMac` 的 JSON 映射 |
 | `SQLITE_PATH` | 容器内 SQLite 文件路径，Compose 默认 `/data/njau-libyy.sqlite` |
