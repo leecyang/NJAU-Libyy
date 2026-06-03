@@ -1,5 +1,7 @@
+import type { AppDatabase } from "../db/types";
+
 export async function audit(
-  db: D1Database,
+  db: AppDatabase,
   entry: {
     actorUserId?: string;
     actorType: "USER" | "ADMIN" | "SYSTEM";
@@ -26,4 +28,3 @@ export async function audit(
     Date.now(),
   ).run();
 }
-

@@ -7,13 +7,13 @@ import {
   bind,
   cancelReservation,
   changeTaskStatus,
-  createSignLink,
-  createTeam,
   createInvitation,
+  createSignLink,
   createTask,
+  createTeam,
   dashboard,
-  deleteTeam,
   deleteAccount,
+  deleteTeam,
   getCredentialStatus,
   health,
   inviteTeamMember,
@@ -24,13 +24,13 @@ import {
   manualReservation,
   me,
   officialUserSearch,
-  recentContacts,
   receivedInvitations,
+  recentContacts,
   removeTeamMember,
   reservationDetail,
   reservationHistory,
-  respondTeamInvitation,
   respondInvitation,
+  respondTeamInvitation,
   roomDetail,
   rooms,
   signTasks,
@@ -38,13 +38,12 @@ import {
   signoutTasks,
   submitSignParameters,
   syncReservationHistory,
-  teamInvitationPreview,
   taskDetail,
+  teamInvitationPreview,
   updateTask,
 } from "./api/app";
 import { login, logout, register, resetPassword, sendRegisterCode, sendResetCode } from "./api/auth";
-import { fail, json } from "./lib/http";
-import { runScheduler } from "./lib/scheduler";
+import { json } from "./lib/http";
 
 type Handler = (env: AppEnv, request: Request) => Promise<Response>;
 
@@ -81,7 +80,7 @@ const routes = new Map<string, Handler>([
   ["POST /api/v1/admin/emails/test", adminTestEmail],
 ]);
 
-async function routeApi(env: AppEnv, request: Request): Promise<Response> {
+export async function routeApi(env: AppEnv, request: Request): Promise<Response> {
   const url = new URL(request.url);
   const direct = routes.get(`${request.method} ${url.pathname}`);
   if (direct) return direct(env, request);
@@ -137,19 +136,3 @@ async function routeApi(env: AppEnv, request: Request): Promise<Response> {
 
   return json({ ok: false, error: { code: "NOT_FOUND", message: "接口不存在" } }, 404);
 }
-
-export default {
-  async fetch(request: Request, env: AppEnv): Promise<Response> {
-    try {
-      const url = new URL(request.url);
-      if (url.pathname.startsWith("/api/")) return await routeApi(env, request);
-      return env.ASSETS.fetch(request);
-    } catch (error) {
-      return fail(error);
-    }
-  },
-
-  async scheduled(_controller: ScheduledController, env: AppEnv, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(runScheduler(env));
-  },
-};

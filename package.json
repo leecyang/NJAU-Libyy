@@ -4,20 +4,32 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy --env production",
-    "types": "wrangler types",
-    "types:check": "wrangler types --check",
-    "db:migrate:local": "wrangler d1 migrations apply DB --local",
-    "db:migrate:remote": "wrangler d1 migrations apply DB --env production --remote",
-    "typecheck": "tsc --noEmit",
+    "dev": "npm run build:web && npm run build:server && node dist/server/node/server.js",
+    "dev:web": "vite --config apps/web/vite.config.ts --host 0.0.0.0",
+    "build:web": "vite build --config apps/web/vite.config.ts",
+    "build:server": "esbuild src/node/server.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/server/node/server.js --external:better-sqlite3 --external:dotenv",
+    "build": "npm run build:web && npm run build:server",
+    "start": "node dist/server/node/server.js",
+    "typecheck": "tsc --noEmit && tsc -p apps/web/tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit",
     "test": "vitest run",
-    "check": "npm run types && npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test && npm run build"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.9.1",
+    "@types/react": "^19.2.16",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "esbuild": "^0.28.0",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.15",
-    "wrangler": "^4.88.0"
+    "vite": "^8.0.16",
+    "vitest": "^4.0.15"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.10.0",
+    "dotenv": "^17.4.2",
+    "lucide-react": "^1.17.0",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
   }
 }

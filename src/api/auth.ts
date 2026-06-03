@@ -3,6 +3,7 @@ import { flag, integerVar } from "../config";
 import { createSession, hashClientIp, revokeSession } from "../lib/auth";
 import { audit } from "../lib/audit";
 import { hashPassword, randomDigits, sha256, verifyPassword } from "../lib/crypto";
+import type { AppPreparedStatement } from "../db/types";
 import { HttpError, ok, readJsonBody, requireString } from "../lib/http";
 import { queueMail } from "../lib/mail";
 import { assertAllowedEmail, assertPassword, normalizeEmail } from "../lib/validation";
@@ -50,7 +51,7 @@ async function findCode(env: AppEnv, email: string, purpose: string, code: strin
   return record;
 }
 
-function consumeCode(env: AppEnv, id: string, usedAt: number): D1PreparedStatement {
+function consumeCode(env: AppEnv, id: string, usedAt: number): AppPreparedStatement {
   return env.DB.prepare("UPDATE email_verification_codes SET used_at = ? WHERE id = ? AND used_at IS NULL")
     .bind(usedAt, id);
 }

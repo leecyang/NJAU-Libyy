@@ -1,0 +1,2 @@
+◇ injected env (0) from .env // tip: ⌘ multiple files { path: ['.env.local', '.env'] }
+{"level":"info","event":"server_started","port":3000,"staticRoot":"E:\\leecyang\\NJAU-Libyy\\apps\\web\\dist","databasePath":"E:\\leecyang\\NJAU-Libyy\\.local-data\\njau-libyy-preview.sqlite"}

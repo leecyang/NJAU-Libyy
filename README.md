@@ -1,92 +1,220 @@
 # NJAU Libyy
 
-南京农业大学图书馆研讨室预约辅助系统。项目使用 Cloudflare Workers Static Assets 和 D1，提供三步账号配置、官方凭证绑定、房间时间片查询、单人预约、自动预约任务、小队、最近联系人、预约历史同步、取消预约、签到入口、自动签退和管理员查询能力。
+南京农业大学图书馆研讨室预约辅助系统。当前架构已经迁移为国内服务器 Docker Compose 部署：React 前端、Node API、SQLite、定时任务和 Tailscale 校园网出口运行在同一个 Compose 栈内。
 
-## 当前边界
+## 架构
 
-官方接口适配器依据浏览器 HAR 中的真实链路实现。以下能力保留显式门禁与配置保护：
+- `app`：Node 22 服务，托管 `apps/web/dist` 静态前端和 `/api/v1/*` API。
+- `tailscale`：官方 `tailscale/tailscale` 镜像，接收 tailnet 中的校园网路由。
+- Tailscale 默认启动参数为 `--accept-routes --exit-node=100.87.36.34 --exit-node-allow-lan-access`，可通过 `.env` 中的 `TS_EXTRA_ARGS` 覆盖。
+- `SQLite`：默认数据文件 `/data/njau-libyy.sqlite`，由 Compose volume 持久化。
+- `scheduler`：Node 服务内每分钟执行自动预约、签到、签退、邮件 outbox 和清理任务。
+- `SMTP`：Node TLS 直连阿里企业邮。
 
-- 多人官方预约提交：单人使用 `dictId=2&behaviorMode=4`，多人联约使用 HAR 确认的 `dictId=7&behaviorMode=1`，小队成员会自动接受官方邀请，最近联系人保持等待对方确认。
-- Worker 自动签到：已支持按预约房间生成短效签到 key 并提交签到。当前 HAR 仅确认 room 2 的设备映射，production 默认开启自动签到，但未配置映射的房间会失败并记录原因，不会兜底使用其他房间设备。
-- 签到入口：推荐配置 `SIGN_ROOM_SYSTEM_MAC_MAP`，值为房间 id 到 systemMac 的 JSON 映射。当前已确认 `{"2":"JWJA211231039"}`；旧的 `AUTHORIZED_SIGN_SYSTEM_MAC` 与 `AUTHORIZED_SIGN_ROOM_ID` 仅作为单房间兼容回退。
-- 邮件发送：使用阿里企业邮 SMTP SSL，邮件先进入 `email_outbox`，再由 Cron 异步发送。
-
-预约通过 `/api/studyroom/v1.1/reservation/reservation` 提交，并通过官方历史接口回读订单 ID。签到默认在预约开始前 15 分钟起由任一可用站内参与者尝试一次或多次，任意一人成功即可；自动签退默认在结束前 10 分钟由主预约人提交，随后回读官方状态避免重复请求。
+前端保持同源 API 访问，不需要跨域配置。你的反向代理只需要把公网域名转发到服务器本机 `127.0.0.1:3000`。
 
 ## 本地开发
 
 ```powershell
 npm install
-Copy-Item .dev.vars.example .dev.vars
-npm run types
-npm run db:migrate:local
+Copy-Item .env.example .env
+npm run build
 npm run dev
 ```
 
-生成 32 字节 token 加密密钥：
+开发时如果只调前端：
 
 ```powershell
-node -e "console.log(Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString('base64url'))"
+npm run dev:web
 ```
 
-开发联调时可以在 `.dev.vars` 中设置 `DEV_EXPOSE_VERIFICATION_CODES=true`，验证码会随开发环境 API 响应返回。生产环境不得启用。
+前端 dev server 会把 `/api` 代理到 `http://localhost:3000`。
+
+## Docker Compose 部署
+
+1. 复制环境变量模板：
+
+```powershell
+Copy-Item .env.example .env
+```
+
+2. 设置至少这些值：
+
+- `TS_AUTHKEY`
+- `APP_BASE_URL`
+- `LIBYY_APP_SECRET`
+- `SMTP_PASSWORD`
+
+`TOKEN_ENCRYPTION_KEY`、`SESSION_SECRET`、`PASSWORD_HASH_SECRET` 可留空，Node 运行时会使用内置兜底值启动。生产环境仍建议设置为稳定随机值，并在后续升级和数据迁移时保持不变。
+
+3. 确认 Tailscale tailnet 中已有能访问校园网的 subnet router，并在 Tailscale 管理端批准对应 route。
+
+4. 启动：
+
+```powershell
+docker compose up -d --build
+```
+
+5. 健康检查：
+
+```powershell
+Invoke-WebRequest http://127.0.0.1:3000/api/v1/health
+```
+
+## GitHub Actions 预构建并上传 R2
+
+`main` 分支每次 push 后，GitHub Actions 会先执行 `npm run typecheck`、`npm test`、`npm run build`，然后构建生产 Docker 镜像，将镜像 tar 包、release compose 文件和 manifest 上传到 Cloudflare R2：
+
+```text
+https://cloud.way2api.fun/NJAU/latest/manifest.json
+https://cloud.way2api.fun/NJAU/latest/docker-compose.yml
+https://cloud.way2api.fun/NJAU/latest/env.example
+https://cloud.way2api.fun/NJAU/latest/njau-libyy-app-<commit>.tar.gz
+```
+
+同时会保留一个按 commit 区分的版本目录：
+
+```text
+https://cloud.way2api.fun/NJAU/<commit>/
+```
+
+需要在 GitHub 仓库 Settings -> Secrets and variables -> Actions 中配置：
+
+| Secret | 说明 |
+| --- | --- |
+| `CLOUDFLARE_R2_ACCOUNT_ID` | Cloudflare Account ID |
+| `CLOUDFLARE_R2_ACCESS_KEY_ID` | R2 API Token 的 Access Key ID |
+| `CLOUDFLARE_R2_SECRET_ACCESS_KEY` | R2 API Token 的 Secret Access Key |
+| `CLOUDFLARE_R2_BUCKET` | R2 bucket 名称；不填时工作流默认使用 `cloud.way2api.fun` |
+
+R2 token 需要具备目标 bucket 的对象读写权限。`cloud.way2api.fun` 需要在 Cloudflare R2 中绑定为该 bucket 的公开访问域名，否则服务器无法通过 HTTPS 直接下载。
+
+## 服务器从 R2 产物自动更新
+
+服务器不需要重新编译项目。首次准备目录：
+
+```bash
+mkdir -p /opt/NJAU-Libyy/scripts
+cd /opt/NJAU-Libyy
+curl -fsSL https://cloud.way2api.fun/NJAU/latest/env.example -o .env.example
+cp .env.example .env
+nano .env
+```
+
+至少配置 `TS_AUTHKEY`、`APP_BASE_URL`、`LIBYY_APP_SECRET`、`SMTP_PASSWORD` 等生产变量。
+
+下载更新脚本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/<你的用户名>/<你的仓库>/main/scripts/server-r2-update.sh -o /opt/NJAU-Libyy/scripts/server-r2-update.sh
+chmod +x /opt/NJAU-Libyy/scripts/server-r2-update.sh
+```
+
+手动更新一次：
+
+```bash
+APP_DIR=/opt/NJAU-Libyy \
+R2_PUBLIC_BASE_URL=https://cloud.way2api.fun/NJAU \
+/opt/NJAU-Libyy/scripts/server-r2-update.sh
+```
+
+脚本会：
+
+- 下载 `latest/manifest.json`
+- 下载预构建 Docker 镜像 tar.gz
+- 下载 release 版 `docker-compose.yml`
+- 备份当前 SQLite 到 `/opt/NJAU-Libyy/backups`
+- 执行 `docker load`
+- 使用新镜像执行 `docker compose up -d`
+- 检查 `/api/v1/health`
+
+### systemd 定时自动更新
+
+创建 service：
+
+```bash
+cat >/etc/systemd/system/njau-libyy-update.service <<'EOF'
+[Unit]
+Description=Update NJAU Libyy from R2 release artifact
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=APP_DIR=/opt/NJAU-Libyy
+Environment=R2_PUBLIC_BASE_URL=https://cloud.way2api.fun/NJAU
+ExecStart=/opt/NJAU-Libyy/scripts/server-r2-update.sh
+EOF
+```
+
+创建 timer，每 3 分钟检查一次 R2 的 latest 产物：
+
+```bash
+cat >/etc/systemd/system/njau-libyy-update.timer <<'EOF'
+[Unit]
+Description=Poll NJAU Libyy R2 release artifact
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=3min
+Unit=njau-libyy-update.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+systemctl daemon-reload
+systemctl enable --now njau-libyy-update.timer
+```
+
+查看自动更新日志：
+
+```bash
+journalctl -u njau-libyy-update.service -f
+```
+
+## 关键环境变量
+
+| 变量 | 说明 |
+| --- | --- |
+| `OFFICIAL_NETWORK_MODE` | 默认 `tailscale-direct`，官方接口从容器直连并走 Tailscale 路由 |
+| `TS_EXTRA_ARGS` | Tailscale 启动参数，默认使用 exit node `100.87.36.34` |
+| `LIBYY_API_BASE_URL` | 官方图书馆接口地址，默认 `https://libyy.njau.edu.cn` |
+| `SIGN_ROOM_SYSTEM_MAC_MAP` | 房间 id 到签到设备 `systemMac` 的 JSON 映射 |
+| `SQLITE_PATH` | 容器内 SQLite 文件路径，Compose 默认 `/data/njau-libyy.sqlite` |
+| `WEB_DIST_DIR` | React 构建产物目录，Compose 默认 `/app/apps/web/dist` |
+
+如果需要回退到旧 HTTP 代理模式，将 `OFFICIAL_NETWORK_MODE=http-proxy`，并配置 `NJAU_PROXY_ENDPOINT` 与 `NJAU_PROXY_TOKEN`。
 
 ## 校验
+
+```powershell
+npm run typecheck
+npm test
+npm run build
+```
+
+或一次执行：
 
 ```powershell
 npm run check
 ```
 
-## 部署准备
+## 数据迁移
 
-项目只保留生产发布环境：
+旧 Cloudflare D1 数据需要先导出为 SQLite 可导入 SQL，再导入 Compose volume 中的数据库文件。迁移时保持相同的 `TOKEN_ENCRYPTION_KEY`，否则已加密的官方凭证、手机号和邮件 outbox payload 无法解密。
 
-| 环境 | Worker | D1 | URL |
-| --- | --- | --- | --- |
-| production | `njau-libyy-production` | `njau-libyy-production` | `https://libyy.way2api.fun` |
+建议流程：
 
-GitHub Actions 会在 `main` 更新后自动执行 production D1 迁移并部署到 Cloudflare。`main` 可以直接修改并 push，不再要求通过 PR 发布。首次启用前，在仓库中设置：
+1. 停止旧服务写入。
+2. 导出 D1 数据。
+3. 在服务器上启动一次 Compose，让 migrations 创建完整 schema。
+4. 停止 Compose。
+5. 将导出的业务表数据导入 `/data/njau-libyy.sqlite`。
+6. 重新启动 Compose。
 
-- Repository variable：`CLOUDFLARE_ACCOUNT_ID`
-- Repository secret：`CLOUDFLARE_API_TOKEN`
-- production Environment secrets：`LIBYY_APP_SECRET`、`NJAU_PROXY_TOKEN`、`TOKEN_ENCRYPTION_KEY`、`SESSION_SECRET`、`PASSWORD_HASH_SECRET`、`SMTP_PASSWORD`
-- 签到房间映射变量：`SIGN_ROOM_SYSTEM_MAC_MAP`，当前默认包含 `{"2":"JWJA211231039"}`；补齐其他房间后可扩大自动签到覆盖范围。
-- 可选兼容签到入口 secrets：`AUTHORIZED_SIGN_SYSTEM_MAC`、`AUTHORIZED_SIGN_ROOM_ID`
+## 前端设计
 
-敏感值只允许通过 GitHub Settings 或 `wrangler secret put` 交互式写入，不得加入仓库、命令历史或日志。
-
-官方 Libyy HTTP 请求统一经 `NJAU_PROXY_ENDPOINT` 指向的校园网代理转发。代理令牌必须保存为 `NJAU_PROXY_TOKEN` secret。SMTP 使用独立 TCP 通道，不经过该 HTTP 代理。
-
-也可以在本机运行交互式引导脚本。输入内容不会回显：
-
-```powershell
-.\scripts\configure-secrets.ps1
-```
-
-单独更新校园网代理令牌：
-
-```powershell
-.\scripts\update-njau-proxy-token.ps1
-```
-
-Cloudflare Token 被意外粘贴为带 BOM 或首尾空白的文本时，可以单独重新录入：
-
-```powershell
-.\scripts\update-cloudflare-api-token.ps1
-```
-
-阿里企业邮返回 `526 Authentication failure` 时，请先在邮箱后台启用三方客户端登录并生成三方客户端安全密码，再单独更新 SMTP Secret。脚本会同时更新两个 Worker、GitHub Environment Secret 和 Repository Secret，并将 outbox 重置为下一轮 Cron 立即重试：
-
-```powershell
-.\scripts\update-smtp-password.ps1
-```
-
-管理员邮箱完成正常注册后，执行：
-
-```powershell
-.\scripts\promote-admin.ps1 -Environment production -Email <ADMIN_EMAIL>
-```
-
-production 已默认开启官方预约、多人预约、签到入口、自动签到和自动签退。当前自动签到只承诺 room 2；未配置当前预约房间映射时，系统不会使用其他房间设备兜底，以避免生成错误房间的签到链接或 key。
+前端实现以 `DESIGN.md` 为最高视觉规范：白色画布、近黑主操作、浅灰卡片、pill 导航、8px 输入/按钮、12px 卡片和真实产品 UI 片段。首屏是登录与工作台入口，不做营销落地页。
 
 `data/` 和 `dirsearch/` 仅用于本地接口分析，已从版本库忽略。不要将任何明文 token 或密钥加入提交。

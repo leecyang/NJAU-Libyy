@@ -1,0 +1,14 @@
+.git
+.github
+.wrangler
+.wrangler-dry-run-production
+.wrangler-dry-run-refresh-production
+.wrangler-dry-run-refresh-staging
+node_modules
+apps/web/dist
+dist
+data
+dirsearch
+.env
+.dev.vars
+npm-debug.log*

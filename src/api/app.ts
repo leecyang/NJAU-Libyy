@@ -81,6 +81,36 @@ function publicRoomWithRanges(room: Room, date: string): Room & { reservable: bo
   return { ...publicRoom(room), availableRanges: availableTimeRanges(room, date) };
 }
 
+function previewRoomRanges(dateIndex: number): Array<Array<{ startTime: string; endTime: string }>> {
+  return [
+    [
+      [{ startTime: "09:00", endTime: "11:00" }, { startTime: "14:00", endTime: "16:00" }],
+      [{ startTime: "10:00", endTime: "12:00" }, { startTime: "16:30", endTime: "18:30" }],
+      [{ startTime: "08:30", endTime: "10:30" }, { startTime: "13:00", endTime: "15:00" }],
+    ],
+    [
+      [{ startTime: "08:00", endTime: "10:00" }, { startTime: "15:00", endTime: "17:00" }],
+      [{ startTime: "09:30", endTime: "11:30" }, { startTime: "14:30", endTime: "16:30" }],
+      [{ startTime: "11:00", endTime: "13:00" }, { startTime: "18:00", endTime: "20:00" }],
+    ],
+    [
+      [{ startTime: "10:00", endTime: "12:00" }, { startTime: "16:00", endTime: "18:00" }],
+      [{ startTime: "08:30", endTime: "09:30" }, { startTime: "13:30", endTime: "15:30" }],
+      [{ startTime: "09:00", endTime: "11:00" }, { startTime: "15:30", endTime: "17:30" }],
+    ],
+  ][dateIndex] ?? [];
+}
+
+function previewRoomsForDate(date: string): Array<Room & { reservable: boolean; availableRanges: Array<{ startTime: string; endTime: string }> }> {
+  const dateIndex = threeDayWindow().findIndex((item) => item.date === date);
+  const rangeSets = previewRoomRanges(dateIndex < 0 ? 0 : dateIndex);
+  return [
+    { id: 2, name: "7E08", roomLocation: "七楼东区", minReservationNum: 1, maxNum: 6, status: 0, availableRanges: rangeSets[0] ?? [], reservable: true },
+    { id: 3, name: "7E10", roomLocation: "七楼东区", minReservationNum: 1, maxNum: 8, status: 0, availableRanges: rangeSets[1] ?? [], reservable: true },
+    { id: 4, name: "8A03", roomLocation: "八楼 A 区", minReservationNum: 2, maxNum: 10, status: 0, availableRanges: rangeSets[2] ?? [], reservable: true },
+  ];
+}
+
 function shanghaiDate(offset = 0, now = new Date()): string {
   const base = new Date(now.valueOf());
   base.setUTCDate(base.getUTCDate() + offset);
@@ -275,9 +305,26 @@ export async function getCredentialStatus(env: AppEnv, request: Request): Promis
 }
 
 export async function rooms(env: AppEnv, request: Request): Promise<Response> {
-  const user = await requireBoundUser(env, request);
   const requestedDate = new URL(request.url).searchParams.get("date");
   const date = requestedDate ? requireString(requestedDate, "date", 10) : null;
+  if (flag(env, "PREVIEW_DEMO_ROOMS")) {
+    if (date) {
+      assertThreeDayWindow(date);
+      return ok({ date, rooms: previewRoomsForDate(date) });
+    }
+    const dates = threeDayWindow();
+    return ok({
+      dates,
+      rooms: previewRoomsForDate(dates[0]!.date).map((room, roomIndex) => ({
+        ...room,
+        dailyAvailability: dates.map((item, dateIndex) => ({
+          ...item,
+          availableRanges: previewRoomRanges(dateIndex)[roomIndex] ?? [],
+        })),
+      })),
+    });
+  }
+  const user = await requireBoundUser(env, request);
   const token = await getAccessToken(env, user.id);
   if (!date) {
     const dates = threeDayWindow();

@@ -1,4 +1,4 @@
-import { connect } from "cloudflare:sockets";
+import tls from "node:tls";
 import type { AppEnv } from "../config";
 import { base64Utf8, createMimeMessage, dotStuff } from "./mail-content";
 
@@ -57,14 +57,41 @@ function timeout<T>(promise: Promise<T>, milliseconds = TIMEOUT_MS): Promise<T> 
   return Promise.race([promise, rejected]).finally(() => clearTimeout(handle));
 }
 
+function once<T>(socket: tls.TLSSocket, event: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      socket.off(event, onEvent);
+      socket.off("error", onError);
+      socket.off("close", onClose);
+    };
+    const onEvent = (value: T) => {
+      cleanup();
+      resolve(value);
+    };
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const onClose = () => {
+      cleanup();
+      reject(new Error("SMTP connection closed"));
+    };
+    socket.once(event, onEvent);
+    socket.once("error", onError);
+    socket.once("close", onClose);
+  });
+}
+
 class SmtpConnection {
   private buffer = "";
-  private readonly reader: ReadableStreamDefaultReader<Uint8Array>;
-  private readonly writer: WritableStreamDefaultWriter<Uint8Array>;
+  private waiters: Array<() => void> = [];
 
-  constructor(private readonly socket: Socket) {
-    this.reader = socket.readable.getReader();
-    this.writer = socket.writable.getWriter();
+  constructor(private readonly socket: tls.TLSSocket) {
+    socket.on("data", (chunk: Buffer) => {
+      this.buffer += decoder.decode(chunk);
+      const waiters = this.waiters.splice(0);
+      for (const waiter of waiters) waiter();
+    });
   }
 
   async response(expectedCode: number): Promise<void> {
@@ -80,26 +107,26 @@ class SmtpConnection {
         }
       }
       if (this.buffer.length > RESPONSE_LIMIT) throw new Error("SMTP response too large");
-      const chunk = await timeout(this.reader.read());
-      if (chunk.done) throw new Error("SMTP connection closed");
-      this.buffer += decoder.decode(chunk.value, { stream: true });
+      await timeout(new Promise<void>((resolve) => this.waiters.push(resolve)));
     }
   }
 
   async command(command: string, expectedCode: number): Promise<void> {
-    await timeout(this.writer.write(encoder.encode(`${command}\r\n`)));
+    await timeout(new Promise<void>((resolve, reject) => {
+      this.socket.write(`${command}\r\n`, (error) => error ? reject(error) : resolve());
+    }));
     await this.response(expectedCode);
   }
 
   async data(message: string): Promise<void> {
-    await timeout(this.writer.write(encoder.encode(`${dotStuff(message)}.\r\n`)));
+    await timeout(new Promise<void>((resolve, reject) => {
+      this.socket.write(encoder.encode(`${dotStuff(message)}.\r\n`), (error) => error ? reject(error) : resolve());
+    }));
     await this.response(250);
   }
 
   close(): void {
-    this.writer.releaseLock();
-    this.reader.releaseLock();
-    this.socket.close();
+    this.socket.end();
   }
 }
 
@@ -107,20 +134,21 @@ export async function sendSmtpMail(
   env: AppEnv,
   input: { recipientEmail: string; subject: string; html: string },
 ): Promise<void> {
-  if (!env.SMTP_PASSWORD) throw new SmtpDeliveryError("SMTP_CONFIG_PASSWORD_MISSING");
+  const smtpPassword = env.SMTP_PASSWORD;
+  if (!smtpPassword) throw new SmtpDeliveryError("SMTP_CONFIG_PASSWORD_MISSING");
   if (String(env.SMTP_SECURE).toLowerCase() !== "true") throw new SmtpDeliveryError("SMTP_CONFIG_DIRECT_TLS_REQUIRED");
   const port = Number(env.SMTP_PORT);
   if (!Number.isInteger(port) || port <= 0 || port === 25) throw new SmtpDeliveryError("SMTP_CONFIG_INVALID_PORT");
 
-  const socket = connect({ hostname: env.SMTP_HOST, port }, { secureTransport: "on", allowHalfOpen: false });
+  const socket = tls.connect({ host: env.SMTP_HOST, port, servername: env.SMTP_HOST });
   const smtp = new SmtpConnection(socket);
   try {
-    await smtpStep("CONNECT", () => timeout(socket.opened));
+    await smtpStep("CONNECT", () => timeout(once(socket, "secureConnect")));
     await smtpStep("GREETING", () => smtp.response(220));
-    await smtpStep("EHLO", () => smtp.command("EHLO libyy.way2api.fun", 250));
+    await smtpStep("EHLO", () => smtp.command("EHLO libyy.local", 250));
     await smtpStep("AUTH", () => smtp.command("AUTH LOGIN", 334));
     await smtpStep("AUTH_USERNAME", () => smtp.command(base64Utf8(env.SMTP_USERNAME), 334));
-    await smtpStep("AUTH_PASSWORD", () => smtp.command(base64Utf8(env.SMTP_PASSWORD), 235));
+    await smtpStep("AUTH_PASSWORD", () => smtp.command(base64Utf8(smtpPassword), 235));
     await smtpStep("MAIL_FROM", () => smtp.command(`MAIL FROM:<${env.SMTP_FROM_ADDRESS}>`, 250));
     await smtpStep("RCPT_TO", () => smtp.command(`RCPT TO:<${input.recipientEmail}>`, 250));
     await smtpStep("DATA", () => smtp.command("DATA", 354));

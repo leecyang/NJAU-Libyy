@@ -1,4 +1,5 @@
 import type { AppEnv } from "../config";
+import type { AppPreparedStatement } from "../db/types";
 import { getAccessToken, getOfficialReservationProfile } from "./credentials";
 import { HttpError } from "./http";
 import { fetchOfficialReservationHistory, type OfficialReservationRecord } from "./official";
@@ -128,7 +129,7 @@ export async function officialMemberSnapshot(env: AppEnv, record: OfficialReserv
 export async function ensureReservationTasks(env: AppEnv, reservationId: string, record: OfficialReservationRecord): Promise<void> {
   const signout = await env.DB.prepare("SELECT id FROM signout_tasks WHERE reservation_id = ?").bind(reservationId).first();
   const sign = await env.DB.prepare("SELECT id FROM sign_tasks WHERE reservation_id = ?").bind(reservationId).first();
-  const statements: D1PreparedStatement[] = [];
+  const statements: AppPreparedStatement[] = [];
   if (!signout && (record.reservationStatus === 21 || record.reservationStatus === 31)) {
     statements.push(env.DB.prepare(
       `INSERT INTO signout_tasks (id, reservation_id, official_reservation_id, scheduled_at, status, attempt_count)

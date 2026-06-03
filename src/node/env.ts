@@ -1,0 +1,86 @@
+import { config as loadDotenv } from "dotenv";
+import type { AppEnv } from "../config";
+import type { AppDatabase } from "../db/types";
+
+const defaults = {
+  LIBYY_APP_ID: "41043f17-3c17-4f2e-894c-5d615f992db9",
+  LIBYY_API_BASE_URL: "https://libyy.njau.edu.cn",
+  OFFICIAL_NETWORK_MODE: "tailscale-direct",
+  APP_BASE_URL: "http://localhost:3000",
+  ENVIRONMENT: "production",
+  APP_VERSION: "docker",
+  ALLOWED_EMAIL_DOMAINS: "qq.com,163.com,126.com,yeah.net,sina.com,outlook.com",
+  VERIFICATION_CODE_TTL_SECONDS: "600",
+  INVITATION_TTL_SECONDS: "86400",
+  TEAM_INVITATION_TTL_SECONDS: "604800",
+  SMTP_HOST: "smtp.qiye.aliyun.com",
+  SMTP_PORT: "465",
+  SMTP_SECURE: "true",
+  SMTP_USERNAME: "noreply@mail.letsapi.store",
+  SMTP_FROM_ADDRESS: "noreply@mail.letsapi.store",
+  SMTP_FROM_NAME: "NJAU Libyy",
+  EMAIL_DELIVERY_ENABLED: "true",
+  ENABLE_OFFICIAL_RESERVATION_SUBMISSION: "true",
+  ENABLE_SINGLE_RESERVATION_SUBMISSION: "true",
+  ENABLE_MULTIMEMBER_RESERVATION_SUBMISSION: "true",
+  ENABLE_SIGN_LINK_GENERATION: "true",
+  ENABLE_AUTO_SIGN_SUBMISSION: "true",
+  ENABLE_SIGNOUT_SUBMISSION: "true",
+  ENABLE_SIGN_PARAMETER_INGEST: "false",
+  SIGN_ROOM_SYSTEM_MAC_MAP: "{\"2\":\"JWJA211231039\"}",
+  SIGN_LINK_BASE_URL: "https://libyy.njau.edu.cn/mStudent/codeSignIn/",
+  DEV_EXPOSE_VERIFICATION_CODES: "false",
+  SCHEDULER_MAX_RUNTIME_MS: "18000",
+  SCHEDULER_REFRESH_LIMIT: "3",
+  SCHEDULER_PREPARE_LIMIT: "5",
+  SCHEDULER_RESERVATION_SUBMIT_LIMIT: "2",
+  SCHEDULER_SYNC_LIMIT: "3",
+  SCHEDULER_SIGN_LIMIT: "5",
+  SCHEDULER_SIGNOUT_LIMIT: "5",
+  SCHEDULER_MAIL_LIMIT: "2",
+} satisfies Partial<AppEnv>;
+
+const fallbackSecrets = {
+  TOKEN_ENCRYPTION_KEY: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+  SESSION_SECRET: "self-hosted-session-secret",
+  PASSWORD_HASH_SECRET: "self-hosted-password-pepper",
+} satisfies Pick<AppEnv, "TOKEN_ENCRYPTION_KEY" | "SESSION_SECRET" | "PASSWORD_HASH_SECRET">;
+
+function usableSecret(value: string | undefined): boolean {
+  if (!value) return false;
+  return ![
+    "replace-me",
+    "replace-with-base64url-encoded-32-byte-key",
+    "replace-with-base64-encoded-32-byte-key",
+    "生成的32字节base64url密钥",
+    "生成的随机长密钥",
+  ].includes(value);
+}
+
+function loadFallbackSecrets(): Pick<AppEnv, "TOKEN_ENCRYPTION_KEY" | "SESSION_SECRET" | "PASSWORD_HASH_SECRET"> {
+  const secrets = { ...fallbackSecrets };
+  for (const name of Object.keys(secrets) as Array<keyof typeof secrets>) {
+    if (usableSecret(process.env[name])) secrets[name] = process.env[name]!;
+  }
+  const fallbackNames = (Object.keys(secrets) as Array<keyof typeof secrets>).filter((name) => secrets[name] === fallbackSecrets[name]);
+  if (fallbackNames.length) {
+    console.warn(`[config] Using built-in fallback secret values for ${fallbackNames.join(", ")}. Set stable random values in .env for production.`);
+  }
+  return secrets;
+}
+
+export function loadNodeEnv(db: AppDatabase): AppEnv {
+  loadDotenv();
+  return {
+    DB: db,
+    ...defaults,
+    ...process.env,
+    ...loadFallbackSecrets(),
+  } as AppEnv;
+}
+
+export function nodePort(): number {
+  const value = Number(process.env.PORT ?? "3000");
+  if (!Number.isInteger(value) || value <= 0) throw new Error("PORT must be a positive integer");
+  return value;
+}

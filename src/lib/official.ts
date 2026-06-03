@@ -105,6 +105,11 @@ function proxyEndpoint(env: AppEnv): URL {
   return url;
 }
 
+function officialNetworkMode(env: AppEnv): "tailscale-direct" | "http-proxy" {
+  if (env.OFFICIAL_NETWORK_MODE) return env.OFFICIAL_NETWORK_MODE;
+  return env.NJAU_PROXY_ENDPOINT && env.NJAU_PROXY_TOKEN ? "http-proxy" : "tailscale-direct";
+}
+
 function officialHeaders(authorization: string, accept = "application/json"): Record<string, string> {
   return { ...OFFICIAL_BROWSER_HEADERS, authorization, accept };
 }
@@ -235,6 +240,16 @@ async function officialFetch(
 ): Promise<Response> {
   if (init.body !== undefined && typeof init.body !== "string") {
     throw new Error("Official proxy only supports string request bodies");
+  }
+
+  if (officialNetworkMode(env) === "tailscale-direct") {
+    try {
+      const signal = AbortSignal.timeout(OFFICIAL_PROXY_TIMEOUT_MS);
+      return await fetch(url, { ...init, signal });
+    } catch (error) {
+      const code = error instanceof Error && error.name === "TimeoutError" ? "OFFICIAL_API_TIMEOUT" : "OFFICIAL_API_UNAVAILABLE";
+      throw new HttpError(502, code, code === "OFFICIAL_API_TIMEOUT" ? "官方接口请求超时" : "官方接口暂时不可用");
+    }
   }
 
   let response: Response;
