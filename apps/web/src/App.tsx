@@ -23,6 +23,7 @@ type Route = {
   roomId?: number;
   taskMode?: "list" | "new";
   teamMode?: "list" | "new";
+  teamInviteId?: string;
   adminCollection?: string;
 };
 type Session = {
@@ -87,6 +88,15 @@ type Team = {
   leader_user_id?: string;
   is_leader?: boolean | number;
   members?: TeamMember[] | string | null;
+};
+type TeamInvitation = {
+  id: string;
+  team_id: string;
+  status: string;
+  expires_at: number;
+  created_at: number;
+  team_name: string;
+  inviter_name?: string;
 };
 type InvitableUser = {
   id: string;
@@ -170,6 +180,10 @@ function memberName(member: TeamMember): string {
   return member.realName ?? member.real_name ?? member.email ?? member.id;
 }
 
+function isTeamLeader(team: Team): boolean {
+  return team.is_leader === true || team.is_leader === 1;
+}
+
 function contactName(contact: RecentContact): string {
   return contact.realName ?? contact.real_name ?? contact.studentId ?? contact.student_id ?? contact.id;
 }
@@ -230,9 +244,11 @@ function routeFromPath(pathname: string): Route {
   const normalized = pathname.replace(/\/+$/, "") || "/";
   const roomMatch = normalized.match(/^\/rooms\/(\d+)$/);
   const adminMatch = normalized.match(/^\/admin\/([a-z-]+)$/);
+  const teamInviteMatch = normalized.match(/^\/teams\/([^/]+)\/invite$/);
   if (roomMatch) return { page: "rooms", roomId: Number(roomMatch[1]) };
   if (normalized === "/tasks/new") return { page: "tasks", taskMode: "new" };
   if (normalized === "/tasks") return { page: "tasks" };
+  if (teamInviteMatch?.[1]) return { page: "teams", teamInviteId: decodeURIComponent(teamInviteMatch[1]) };
   if (normalized === "/teams/new") return { page: "teams", teamMode: "new" };
   if (normalized === "/teams") return { page: "teams" };
   if (normalized === "/history") return { page: "history" };
@@ -684,8 +700,10 @@ function Shell({
             <button key={item.id} className={page === item.id ? "active" : ""} onClick={() => navigate(pagePath(item.id))}>{item.icon}{item.label}</button>
           ))}
         </nav>
-        <div className="user-chip"><CircleUserRound size={18} /><span>{session.user.realName ?? session.user.email}</span></div>
-        <button className="icon-button" onClick={onLogout} aria-label="退出登录"><LogOut size={18} /></button>
+        <div className="top-actions">
+          <div className="user-chip"><CircleUserRound size={18} /><span>{session.user.realName ?? session.user.email}</span></div>
+          <button className="icon-button" onClick={onLogout} aria-label="退出登录"><LogOut size={18} /></button>
+        </div>
       </header>
       {children}
     </div>
@@ -762,7 +780,7 @@ function RoomsPage({ toast, navigate }: { toast: (message: string, error?: boole
 
   return (
     <div className="room-list-page">
-      <Card title="房间时间片" icon={<CalendarClock size={20} />}>
+      <Card title="研讨间列表" icon={<CalendarClock size={20} />}>
         <div className="three-day-head">
           <div>
             <span className="eyebrow">三天可用日期</span>
@@ -1044,21 +1062,25 @@ function TeamsPage({
   toast,
   navigate,
   mode = "list",
+  inviteTeamId,
 }: {
   toast: (message: string, error?: boolean) => void;
   navigate: (path: string) => void;
   mode?: "list" | "new";
+  inviteTeamId?: string;
 }) {
   const [teams, setTeams] = useState<Team[]>([]);
   const [users, setUsers] = useState<InvitableUser[]>([]);
+  const [invitations, setInvitations] = useState<TeamInvitation[]>([]);
 
   async function load() {
     try {
       const [teamData, invitable] = await Promise.all([
-        api<{ teams: Team[] }>("/api/v1/teams/mine"),
+        api<{ teams: Team[]; invitations?: TeamInvitation[] }>("/api/v1/teams/mine"),
         api<InvitableUser[]>("/api/v1/users/invitable").catch(() => []),
       ]);
       setTeams(teamData.teams);
+      setInvitations(teamData.invitations ?? []);
       setUsers(invitable);
     } catch (error) {
       toast(error instanceof Error ? error.message : "加载失败", true);
@@ -1090,7 +1112,32 @@ function TeamsPage({
     }
   }
 
+  async function respond(invitationId: string, action: "accept" | "reject") {
+    try {
+      await api(`/api/v1/team-invitations/${invitationId}/respond`, { method: "POST", body: JSON.stringify({ action }) });
+      toast(action === "accept" ? "已加入小队" : "已拒绝邀请");
+      await load();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "处理失败", true);
+    }
+  }
+
+  const leaderTeams = teams.filter(isTeamLeader);
+  const canCreateTeam = leaderTeams.length === 0;
+
   if (mode === "new") {
+    if (!canCreateTeam && teams.length) {
+      return (
+        <div className="compact-page">
+          <button className="back-button" type="button" onClick={() => navigate("/teams")}>
+            <ChevronLeft size={18} />返回小队
+          </button>
+          <Card title="小队" icon={<UsersRound size={20} />}>
+            <Empty>你已经创建过小队。每个账号只能创建一个小队，但可以加入多个其他小队。</Empty>
+          </Card>
+        </div>
+      );
+    }
     return (
       <div className="compact-page">
         <button className="back-button" type="button" onClick={() => navigate("/teams")}>
@@ -1107,21 +1154,73 @@ function TeamsPage({
     );
   }
 
+  if (inviteTeamId) {
+    const team = teams.find((item) => item.id === inviteTeamId);
+    const memberIds = new Set(team ? parseTeamMembers(team.members).map((member) => member.id) : []);
+    const inviteUsers = users.filter((user) => !memberIds.has(user.id));
+    return (
+      <div className="compact-page">
+        <button className="back-button" type="button" onClick={() => navigate("/teams")}>
+          <ChevronLeft size={18} />返回小队
+        </button>
+        <Card title={team ? `邀请加入 ${team.name}` : "邀请成员"} icon={<Mail size={20} />}>
+          {!team ? <Empty>未找到这个小队</Empty> : null}
+          {team && !isTeamLeader(team) ? <Empty>只有小队创建者可以邀请成员。</Empty> : null}
+          {team && isTeamLeader(team) ? (
+            <div className="invite-user-grid">
+              {inviteUsers.map((user) => (
+                <article className="invite-user-card" key={user.id}>
+                  <div className="invite-user-avatar"><CircleUserRound size={18} /></div>
+                  <div>
+                    <strong>{user.real_name ?? user.email}</strong>
+                    <span>{user.student_id ? `${user.student_id} · ${user.email}` : user.email}</span>
+                  </div>
+                  <Button type="button" variant="secondary" onClick={() => invite(team.id, user.id)}>发送邀请</Button>
+                </article>
+              ))}
+              {!inviteUsers.length ? <Empty>暂无可邀请的站内用户</Empty> : null}
+            </div>
+          ) : null}
+        </Card>
+      </div>
+    );
+  }
+
+  const pendingInvitations = invitations.filter((invitation) => invitation.status === "PENDING");
+
   return (
     <div className="compact-page">
       <Card title="成员邀请" icon={<Mail size={20} />}>
         <div className="toolbar page-toolbar">
-          <Button type="button" onClick={() => navigate("/teams/new")}><UsersRound size={16} />新建小队</Button>
+          <Button type="button" disabled={!canCreateTeam} onClick={() => navigate("/teams/new")}><UsersRound size={16} />{canCreateTeam ? "新建小队" : "已创建小队"}</Button>
           <Button type="button" variant="secondary" onClick={load}><RefreshCw size={16} />刷新</Button>
         </div>
+        {pendingInvitations.length ? (
+          <div className="list team-invitation-list">
+            {pendingInvitations.map((invitation) => (
+              <article className="list-row" key={invitation.id}>
+                <div>
+                  <strong>{invitation.team_name}</strong>
+                  <span>{invitation.inviter_name ?? "成员"} 邀请你加入</span>
+                </div>
+                <div className="row-actions">
+                  <Button type="button" variant="secondary" onClick={() => respond(invitation.id, "reject")}>拒绝</Button>
+                  <Button type="button" onClick={() => respond(invitation.id, "accept")}>接受</Button>
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : null}
         <div className="list">
           {teams.map((team) => (
             <article className="list-row" key={team.id}>
-              <div><strong>{team.name}</strong><span>{team.description || "无描述"}</span></div>
-              <select onChange={(event) => event.target.value && invite(team.id, event.target.value)} defaultValue="">
-                <option value="">邀请成员</option>
-                {users.map((user) => <option key={user.id} value={user.id}>{user.real_name ?? user.email}</option>)}
-              </select>
+              <div>
+                <strong>{team.name}</strong>
+                <span>{team.description || "无描述"} · {parseTeamMembers(team.members).length} 人 · {isTeamLeader(team) ? "我创建的" : "已加入"}</span>
+              </div>
+              {isTeamLeader(team) ? (
+                <Button type="button" variant="secondary" onClick={() => navigate(`/teams/${encodeURIComponent(team.id)}/invite`)}>邀请成员</Button>
+              ) : null}
             </article>
           ))}
           {!teams.length ? <Empty>暂无小队</Empty> : null}
@@ -1274,22 +1373,13 @@ export function App() {
     );
   }
 
-  const pageTitle =
-    route.page === "rooms" && route.roomId ? "选择预约时间"
-    : route.page === "tasks" && route.taskMode === "new" ? "新建自动任务"
-    : route.page === "teams" && route.teamMode === "new" ? "创建小队"
-    : session.user.studentId ? "预约工作台" : "账号配置";
-
   return (
     <Shell session={session} page={route.page} navigate={navigate} onLogout={logout}>
       <main className="content">
-        <div className="page-head">
-          <div><span className="eyebrow">Workspace</span><h1>{pageTitle}</h1></div>
-        </div>
         {route.page === "rooms" && !route.roomId ? <RoomsPage toast={toast} navigate={navigate} /> : null}
         {route.page === "rooms" && route.roomId ? <RoomDetailPage roomId={route.roomId} toast={toast} navigate={navigate} /> : null}
         {route.page === "tasks" ? <TasksPage toast={toast} navigate={navigate} mode={route.taskMode ?? "list"} /> : null}
-        {route.page === "teams" ? <TeamsPage toast={toast} navigate={navigate} mode={route.teamMode ?? "list"} /> : null}
+        {route.page === "teams" ? <TeamsPage toast={toast} navigate={navigate} mode={route.teamMode ?? "list"} inviteTeamId={route.teamInviteId} /> : null}
         {route.page === "history" ? <HistoryPage toast={toast} /> : null}
         {route.page === "admin" ? <AdminPage toast={toast} navigate={navigate} collection={route.adminCollection ?? "users"} /> : null}
       </main>
