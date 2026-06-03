@@ -78,6 +78,47 @@ describe("reservation validation", () => {
     expect(() => assertReservation(detail, { date: "2026-06-02", startTime: "08:00", endTime: "09:00", memberCount: 0 }, false)).toThrow(HttpError);
   });
 
+  it("clips available ranges to library hours and half-hour boundaries", () => {
+    const detail = {
+      ...room,
+      status: 0,
+      minReservationNum: 1,
+      dateTimeSlicesList: [[
+        { startTime: Date.parse("2026-06-01T23:50:00Z"), endTime: Date.parse("2026-06-02T00:00:00Z"), reservationStatus: 0 },
+        { startTime: Date.parse("2026-06-02T00:00:00Z"), endTime: Date.parse("2026-06-02T00:10:00Z"), reservationStatus: 0 },
+        { startTime: Date.parse("2026-06-02T00:10:00Z"), endTime: Date.parse("2026-06-02T00:20:00Z"), reservationStatus: 0 },
+        { startTime: Date.parse("2026-06-02T00:20:00Z"), endTime: Date.parse("2026-06-02T00:30:00Z"), reservationStatus: 0 },
+        { startTime: Date.parse("2026-06-02T13:50:00Z"), endTime: Date.parse("2026-06-02T14:00:00Z"), reservationStatus: 0 },
+        { startTime: Date.parse("2026-06-02T14:00:00Z"), endTime: Date.parse("2026-06-02T14:10:00Z"), reservationStatus: 0 },
+      ]],
+    };
+
+    expect(availableTimeRanges(detail, "2026-06-02")).toEqual([{ startTime: "08:00", endTime: "08:30" }]);
+  });
+
+  it("hides elapsed ranges for today's date", () => {
+    const detail = {
+      ...room,
+      status: 0,
+      minReservationNum: 1,
+      dateTimeSlicesList: [[
+        { startTime: Date.parse("2026-06-02T00:00:00Z"), endTime: Date.parse("2026-06-02T00:10:00Z"), reservationStatus: 0 },
+        { startTime: Date.parse("2026-06-02T00:10:00Z"), endTime: Date.parse("2026-06-02T00:20:00Z"), reservationStatus: 0 },
+        { startTime: Date.parse("2026-06-02T00:20:00Z"), endTime: Date.parse("2026-06-02T00:30:00Z"), reservationStatus: 0 },
+        { startTime: Date.parse("2026-06-02T00:30:00Z"), endTime: Date.parse("2026-06-02T00:40:00Z"), reservationStatus: 0 },
+        { startTime: Date.parse("2026-06-02T00:40:00Z"), endTime: Date.parse("2026-06-02T00:50:00Z"), reservationStatus: 0 },
+        { startTime: Date.parse("2026-06-02T00:50:00Z"), endTime: Date.parse("2026-06-02T01:00:00Z"), reservationStatus: 0 },
+      ]],
+    };
+
+    expect(availableTimeRanges(detail, "2026-06-02", new Date("2026-06-02T00:20:00Z"))).toEqual([{ startTime: "08:30", endTime: "09:00" }]);
+  });
+
+  it("requires manual reservations to use half-hour slots within opening hours", () => {
+    expect(() => assertReservation({ ...room, status: 0 }, { date: "2026-06-02", startTime: "08:15", endTime: "09:00", memberCount: 2 }, true)).toThrow(HttpError);
+    expect(() => assertReservation({ ...room, status: 0 }, { date: "2026-06-02", startTime: "07:30", endTime: "08:30", memberCount: 2 }, true)).toThrow(HttpError);
+  });
+
   it("blocks rooms disabled by the official status", () => {
     expect(() => assertReservation({ ...room, status: 2 }, { date: "2026-06-02", startTime: "08:00", endTime: "08:30", memberCount: 2 }, true)).toThrow(HttpError);
   });

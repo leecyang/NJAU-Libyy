@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../src/config";
-import { autoJoin, squareUsers } from "../src/api/app";
+import { createTask, invitableUsers } from "../src/api/app";
 
 vi.mock("../src/lib/auth", () => ({
   currentUser: vi.fn(),
@@ -34,12 +34,9 @@ vi.mock("../src/lib/mail", () => ({
 }));
 
 class FakeStatement {
-  private args: unknown[] = [];
-
   constructor(private readonly db: FakeDB, private readonly sql: string) {}
 
-  bind(...args: unknown[]): FakeStatement {
-    this.args = args;
+  bind(): FakeStatement {
     return this;
   }
 
@@ -53,14 +50,11 @@ class FakeStatement {
   }
 
   async run(): Promise<{ meta: { changes: number } }> {
-    this.db.updates.push({ sql: this.sql, args: this.args });
     return { meta: { changes: 1 } };
   }
 }
 
 class FakeDB {
-  readonly updates: Array<{ sql: string; args: unknown[] }> = [];
-
   prepare(sql: string): FakeStatement {
     return new FakeStatement(this, sql);
   }
@@ -69,10 +63,9 @@ class FakeDB {
     if (sql.includes("FROM users")) {
       return [
         {
-          id: "auto-user-id",
+          id: "invitee-user-id",
           student_id: "9233020309",
-          real_name: "Auto Join User",
-          allow_auto_join_reservation: 1,
+          real_name: "Invitee User",
         },
       ] as T[];
     }
@@ -92,33 +85,47 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-describe("auto join profile API", () => {
-  it("updates the user's auto-join authorization", async () => {
-    const db = new FakeDB();
-    const response = await autoJoin(env(db), new Request("https://app.test/api/v1/profile/auto-join", {
-      method: "PATCH",
-      body: JSON.stringify({ enabled: true }),
-    }));
-
-    await expect(json(response)).resolves.toMatchObject({
-      ok: true,
-      data: { allowAutoJoinReservation: true },
-    });
-    expect(db.updates.some((update) => update.sql.includes("UPDATE users SET allow_auto_join_reservation = ?") && update.args[0] === 1)).toBe(true);
-  });
-
-  it("returns masked square users with auto-join visibility", async () => {
-    const response = await squareUsers(env(), new Request("https://app.test/api/v1/square/users"));
+describe("invitable users API", () => {
+  it("returns only the fields needed by team invitations", async () => {
+    const response = await invitableUsers(env(), new Request("https://app.test/api/v1/users/invitable"));
     const body = await json(response);
 
     expect(body).toMatchObject({
       ok: true,
       data: [{
-        id: "auto-user-id",
-        realName: "Auto Join User",
+        id: "invitee-user-id",
+        realName: "Invitee User",
         studentIdMasked: "92****09",
-        allowAutoJoinReservation: true,
       }],
     });
+    expect(JSON.stringify(body)).not.toContain("allowAutoJoinReservation");
+  });
+});
+
+describe("automatic reservation members", () => {
+  it("rejects recent contacts for automatic reservation tasks", async () => {
+    await expect(createTask(env(), new Request("https://app.test/api/v1/reservation-tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        targetDate: "2026-06-04",
+        startTime: "08:00",
+        endTime: "09:00",
+        candidateRooms: [{ roomId: 1, roomName: "7E01" }],
+        contactIds: ["contact-id"],
+      }),
+    }))).rejects.toMatchObject({ code: "CONTACTS_NOT_ALLOWED" });
+  });
+
+  it("rejects removed auto-join members for automatic reservation tasks", async () => {
+    await expect(createTask(env(), new Request("https://app.test/api/v1/reservation-tasks", {
+      method: "POST",
+      body: JSON.stringify({
+        targetDate: "2026-06-04",
+        startTime: "08:00",
+        endTime: "09:00",
+        candidateRooms: [{ roomId: 1, roomName: "7E01" }],
+        autoJoinUserIds: ["user-id"],
+      }),
+    }))).rejects.toMatchObject({ code: "AUTO_JOIN_REMOVED" });
   });
 });

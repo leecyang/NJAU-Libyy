@@ -12,10 +12,8 @@ function Set-EnvironmentSecret {
     [Parameter(Mandatory = $true)][string]$Name,
     [Parameter(Mandatory = $true)][string]$Value
   )
-  foreach ($environment in @("staging", "production")) {
-    Set-GitHubSecret -Repository $Repository -Environment $environment -Name $Name -Value $Value
-    Set-WranglerSecret -Environment $environment -Name $Name -Value $Value
-  }
+  Set-GitHubSecret -Repository $Repository -Name $Name -Value $Value
+  Set-WranglerSecret -Environment "production" -Name $Name -Value $Value
 }
 
 $libyyAppSecret = Normalize-Secret (Read-PlainSecret "LIBYY_APP_SECRET")

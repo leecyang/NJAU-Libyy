@@ -73,6 +73,11 @@ export function assertReservation(room: Room, input: ReservationInput, enforceHa
   if ((enforceHalfHour || room.dateTimeSlicesList) && (!isHalfHour(input.startTime) || !isHalfHour(input.endTime))) {
     throw new HttpError(400, "INVALID_TASK_TIME", "预约时间必须位于整点或半点");
   }
+  const start = timeMinutes(input.startTime);
+  const end = timeMinutes(input.endTime);
+  if (start < 480 || end > 1320) {
+    throw new HttpError(400, "INVALID_TIME_WINDOW", "预约时间需位于 08:00 至 22:00");
+  }
   const duration = minutesBetween(input.startTime, input.endTime);
   if (duration <= 0 || duration > 120) {
     throw new HttpError(400, "INVALID_DURATION", "单次预约时长必须大于 0 且不超过 120 分钟");
@@ -110,6 +115,19 @@ function localMinutes(timestamp: number): number {
   return hour * 60 + minute;
 }
 
+function localDate(timestamp: number): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(new Date(timestamp));
+  const year = parts.find((part) => part.type === "year")?.value ?? "1970";
+  const month = parts.find((part) => part.type === "month")?.value ?? "01";
+  const day = parts.find((part) => part.type === "day")?.value ?? "01";
+  return `${year}-${month}-${day}`;
+}
+
 function timeMinutes(value: string): number {
   const [hour = 0, minute = 0] = value.split(":").map(Number);
   return hour * 60 + minute;
@@ -130,11 +148,25 @@ export function isRoomTimeAvailable(room: Room, startTime: string, endTime: stri
   return true;
 }
 
-export function availableTimeRanges(room: Room): Array<{ startTime: string; endTime: string }> {
+function ceilToHalfHour(minutes: number): number {
+  return Math.ceil(minutes / 30) * 30;
+}
+
+function floorToHalfHour(minutes: number): number {
+  return Math.floor(minutes / 30) * 30;
+}
+
+export function availableTimeRanges(room: Room, date?: string, now = new Date()): Array<{ startTime: string; endTime: string }> {
   if (!room.dateTimeSlicesList) return [];
+  const today = localDate(now.valueOf());
+  const minStart = date === today ? ceilToHalfHour(localMinutes(now.valueOf())) : 480;
   const available = room.dateTimeSlicesList.flat()
     .filter((slice) => slice.reservationStatus === 0)
-    .map((slice) => ({ start: localMinutes(slice.startTime), end: localMinutes(slice.endTime) }))
+    .map((slice) => ({
+      start: Math.max(localMinutes(slice.startTime), minStart, 480),
+      end: Math.min(localMinutes(slice.endTime), 1320),
+    }))
+    .filter((slice) => slice.end > slice.start)
     .sort((left, right) => left.start - right.start);
   const ranges: Array<{ start: number; end: number }> = [];
   for (const slice of available) {
@@ -143,7 +175,10 @@ export function availableTimeRanges(room: Room): Array<{ startTime: string; endT
     else ranges.push({ ...slice });
   }
   const format = (minutes: number): string => `${String(Math.floor(minutes / 60)).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
-  return ranges.map((range) => ({ startTime: format(range.start), endTime: format(range.end) }));
+  return ranges
+    .map((range) => ({ start: ceilToHalfHour(range.start), end: floorToHalfHour(range.end) }))
+    .filter((range) => range.end > range.start)
+    .map((range) => ({ startTime: format(range.start), endTime: format(range.end) }));
 }
 
 export function assertThreeDayWindow(dateText: string, now = new Date()): void {

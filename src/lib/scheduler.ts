@@ -132,7 +132,7 @@ async function authorizedMembers(env: AppEnv, taskId: string): Promise<Authorize
 async function autoAcceptTeamMembers(env: AppEnv, officialReservationId: string, members: AuthorizedMember[]): Promise<number> {
   let accepted = 0;
   for (const member of members) {
-    if (!["TEAM", "AUTO_JOIN"].includes(member.source) || !member.localUserId) continue;
+    if (member.source !== "TEAM" || !member.localUserId) continue;
     try {
       await acceptOfficialReservation(env, await getAccessToken(env, member.localUserId), officialReservationId);
       accepted += 1;

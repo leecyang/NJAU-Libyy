@@ -64,67 +64,6 @@
     ]
   },
   "env": {
-    "staging": {
-      "name": "njau-libyy-staging",
-      "workers_dev": true,
-      "preview_urls": false,
-      "routes": [
-        {
-          "pattern": "staging-libyy.way2api.fun",
-          "custom_domain": true
-        }
-      ],
-      "d1_databases": [
-        {
-          "binding": "DB",
-          "database_name": "njau-libyy-staging",
-          "database_id": "24269c79-335c-4f84-adfc-4534e22de6c5",
-          "migrations_dir": "migrations"
-        }
-      ],
-      "triggers": {
-        "crons": ["* * * * *"]
-      },
-      "vars": {
-        "LIBYY_APP_ID": "41043f17-3c17-4f2e-894c-5d615f992db9",
-        "LIBYY_API_BASE_URL": "https://libyy.njau.edu.cn",
-        "NJAU_PROXY_ENDPOINT": "https://njauproxy.christmas1314.xyz/proxy/fetch",
-        "APP_BASE_URL": "https://staging-libyy.way2api.fun",
-        "ENVIRONMENT": "staging",
-        "APP_VERSION": "dev",
-        "ALLOWED_EMAIL_DOMAINS": "qq.com,163.com,126.com,yeah.net,sina.com,outlook.com",
-        "VERIFICATION_CODE_TTL_SECONDS": "600",
-        "INVITATION_TTL_SECONDS": "86400",
-        "TEAM_INVITATION_TTL_SECONDS": "604800",
-        "SMTP_HOST": "smtp.qiye.aliyun.com",
-        "SMTP_PORT": "465",
-        "SMTP_SECURE": "true",
-        "SMTP_USERNAME": "noreply@mail.letsapi.store",
-        "SMTP_FROM_ADDRESS": "noreply@mail.letsapi.store",
-        "SMTP_FROM_NAME": "NJAU Libyy",
-        "EMAIL_DELIVERY_ENABLED": "true",
-        "ENABLE_OFFICIAL_RESERVATION_SUBMISSION": "true",
-        "ENABLE_SINGLE_RESERVATION_SUBMISSION": "true",
-        "ENABLE_MULTIMEMBER_RESERVATION_SUBMISSION": "true",
-        "ENABLE_SIGN_LINK_GENERATION": "true",
-        "ENABLE_AUTO_SIGN_SUBMISSION": "true",
-        "ENABLE_SIGNOUT_SUBMISSION": "true",
-        "ENABLE_SIGN_PARAMETER_INGEST": "false",
-        "SIGN_ROOM_SYSTEM_MAC_MAP": "{\"2\":\"JWJA211231039\"}",
-        "SIGN_LINK_BASE_URL": "https://libyy.njau.edu.cn/mStudent/codeSignIn/",
-        "DEV_EXPOSE_VERIFICATION_CODES": "false"
-      },
-      "secrets": {
-        "required": [
-          "LIBYY_APP_SECRET",
-          "NJAU_PROXY_TOKEN",
-          "TOKEN_ENCRYPTION_KEY",
-          "SESSION_SECRET",
-          "PASSWORD_HASH_SECRET",
-          "SMTP_PASSWORD"
-        ]
-      }
-    },
     "production": {
       "name": "njau-libyy-production",
       "workers_dev": true,

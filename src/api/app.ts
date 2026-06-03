@@ -39,15 +39,14 @@ import {
 
 type JsonObject = Record<string, unknown>;
 type ResolvedMember = OfficialMember & {
-  source: "TEAM" | "CONTACT" | "AUTO_JOIN";
+  source: "TEAM" | "CONTACT";
   localUserId?: string;
   contactId?: string;
 };
 
 const memberSourcePriority: Record<ResolvedMember["source"], number> = {
   CONTACT: 0,
-  AUTO_JOIN: 1,
-  TEAM: 2,
+  TEAM: 1,
 };
 
 function isObject(value: unknown): value is JsonObject {
@@ -72,6 +71,10 @@ function publicRoom(room: Room): Room & { reservable: boolean } {
   return { ...room, reservable: (room.status ?? 0) === 0 && room.maxNum !== 8 && room.maxNum !== 12 };
 }
 
+function publicRoomWithRanges(room: Room, date: string): Room & { reservable: boolean; availableRanges: Array<{ startTime: string; endTime: string }> } {
+  return { ...publicRoom(room), availableRanges: availableTimeRanges(room, date) };
+}
+
 async function requireBoundUser(env: AppEnv, request: Request): Promise<User> {
   const user = await requireUser(env, request);
   const credential = await credentialStatus(env, user.id);
@@ -87,11 +90,13 @@ function maskStudentId(value: string | null): string | null {
   return `${value.slice(0, 2)}****${value.slice(-2)}`;
 }
 
-async function resolveMembers(env: AppEnv, owner: User, teamMemberUserIds: unknown, contactIds: unknown, autoJoinUserIds: unknown): Promise<ResolvedMember[]> {
+async function resolveMembers(env: AppEnv, owner: User, teamMemberUserIds: unknown, contactIds: unknown, autoJoinUserIds: unknown, allowContacts: boolean): Promise<ResolvedMember[]> {
   const teamIds = [...new Set(requireArray(teamMemberUserIds ?? [], "teamMemberUserIds", 20).map((value) => requireString(value, "teamMemberUserIds", 80)))];
   const recentIds = [...new Set(requireArray(contactIds ?? [], "contactIds", 20).map((value) => requireString(value, "contactIds", 80)))];
   const autoJoinIds = [...new Set(requireArray(autoJoinUserIds ?? [], "autoJoinUserIds", 20).map((value) => requireString(value, "autoJoinUserIds", 80)))];
-  if ([...teamIds, ...autoJoinIds].includes(owner.id)) throw new HttpError(400, "INVALID_MEMBERS", "主预约人不能作为副预约人");
+  if (autoJoinIds.length) throw new HttpError(400, "AUTO_JOIN_REMOVED", "站内自动联约已停用，请使用小队成员");
+  if (!allowContacts && recentIds.length) throw new HttpError(400, "CONTACTS_NOT_ALLOWED", "自动预约只能选择小队成员");
+  if (teamIds.includes(owner.id)) throw new HttpError(400, "INVALID_MEMBERS", "主预约人不能作为副预约人");
   const members: ResolvedMember[] = [];
   if (teamIds.length) {
     const placeholders = teamIds.map(() => "?").join(",");
@@ -114,21 +119,6 @@ async function resolveMembers(env: AppEnv, owner: User, teamMemberUserIds: unkno
     if (rows.results.length !== recentIds.length) throw new HttpError(400, "INVALID_CONTACTS", "最近联系人不存在");
     members.push(...rows.results.map((row) => ({ userId: row.official_student_id, userName: row.official_real_name, source: "CONTACT" as const, contactId: row.id })));
   }
-  if (autoJoinIds.length) {
-    const placeholders = autoJoinIds.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
-      `SELECT id, student_id, real_name FROM users
-        WHERE id IN (${placeholders})
-          AND status = 'ACTIVE'
-          AND allow_auto_join_reservation = 1
-          AND student_id IS NOT NULL
-          AND real_name IS NOT NULL`,
-    ).bind(...autoJoinIds).all<{ id: string; student_id: string; real_name: string }>();
-    if (rows.results.length !== autoJoinIds.length) {
-      throw new HttpError(403, "AUTO_JOIN_NOT_AUTHORIZED", "只能自动联约已主动开启授权的站内用户");
-    }
-    members.push(...rows.results.map((row) => ({ userId: row.student_id, userName: row.real_name, source: "AUTO_JOIN" as const, localUserId: row.id })));
-  }
   const deduped = new Map<string, ResolvedMember>();
   for (const member of members) {
     const current = deduped.get(member.userId);
@@ -141,7 +131,7 @@ async function autoAcceptTeamMembers(env: AppEnv, officialReservationId: string,
   let accepted = 0;
   let failed = 0;
   for (const member of members) {
-    if (!["TEAM", "AUTO_JOIN"].includes(member.source) || !member.localUserId) continue;
+    if (member.source !== "TEAM" || !member.localUserId) continue;
     try {
       await acceptOfficialReservation(env, await getAccessToken(env, member.localUserId), officialReservationId);
       accepted += 1;
@@ -173,7 +163,6 @@ export async function me(env: AppEnv, request: Request): Promise<Response> {
       role: user.role,
       studentId: user.student_id,
       realName: user.real_name,
-      allowAutoJoinReservation: Boolean(user.allow_auto_join_reservation),
       squareVisibility: user.square_visibility,
     },
     credential: await credentialStatus(env, user.id),
@@ -253,7 +242,7 @@ export async function rooms(env: AppEnv, request: Request): Promise<Response> {
   const user = await requireBoundUser(env, request);
   const date = requireString(new URL(request.url).searchParams.get("date"), "date", 10);
   assertThreeDayWindow(date);
-  return ok({ date, rooms: (await activeRooms(env, user.id, date)).map(publicRoom) });
+  return ok({ date, rooms: (await activeRooms(env, user.id, date)).map((room) => publicRoomWithRanges(room, date)) });
 }
 
 export async function roomDetail(env: AppEnv, request: Request, roomIdText: string): Promise<Response> {
@@ -263,7 +252,7 @@ export async function roomDetail(env: AppEnv, request: Request, roomIdText: stri
   const roomId = Number(roomIdText);
   if (!Number.isInteger(roomId)) throw new HttpError(400, "INVALID_FIELD", "roomId 格式错误");
   const room = publicRoom(await fetchOfficialRoomDetail(env, await getAccessToken(env, user.id), roomId, date));
-  return ok({ ...room, availableRanges: availableTimeRanges(room) });
+  return ok({ ...room, availableRanges: availableTimeRanges(room, date) });
 }
 
 export async function manualReservation(env: AppEnv, request: Request): Promise<Response> {
@@ -274,14 +263,14 @@ export async function manualReservation(env: AppEnv, request: Request): Promise<
   const roomId = requireInteger(body.roomId, "roomId");
   const startTime = requireString(body.startTime, "startTime", 5);
   const endTime = requireString(body.endTime, "endTime", 5);
-  const members = await resolveMembers(env, user, body.teamMemberUserIds, body.contactIds, body.autoJoinUserIds);
+  const members = await resolveMembers(env, user, body.teamMemberUserIds, body.contactIds, body.autoJoinUserIds, true);
   if (members.length && !flag(env, "ENABLE_MULTIMEMBER_RESERVATION_SUBMISSION")) {
     throw new HttpError(503, "MULTIMEMBER_SUBMISSION_DISABLED", "多人官方提交尚未开放，请先使用单人预约");
   }
   const token = await getAccessToken(env, user.id);
   const profile = await getOfficialReservationProfile(env, user.id, token);
   const room = await fetchOfficialRoomDetail(env, token, roomId, date);
-  const duration = assertReservation(room, { date, startTime, endTime, memberCount: members.length }, false);
+  const duration = assertReservation(room, { date, startTime, endTime, memberCount: members.length }, true);
   await localReservationLimits(env, user.id, date, duration);
   if (!flag(env, "ENABLE_SINGLE_RESERVATION_SUBMISSION")) throw new HttpError(503, "RESERVATION_SUBMISSION_DISABLED", "单人预约提交当前保持关闭");
   if (!await verifyOfficialRoomPolicy(env, token, profile.studentId, roomId, members.map((member) => member.userId))) throw new HttpError(409, "ROOM_POLICY_REJECTED", "官方房间规则不允许本次预约");
@@ -328,7 +317,7 @@ export async function reservationHistory(env: AppEnv, request: Request): Promise
   const rows = await env.DB.prepare(
     `SELECT id, task_id, official_reservation_id, room_id, room_name_snapshot, date,
             start_time, end_time, member_snapshot_json, submission_type, status, official_status, created_at
-       FROM reservations WHERE owner_user_id = ? ORDER BY created_at DESC LIMIT 100`,
+       FROM reservations WHERE owner_user_id = ? ORDER BY date DESC, start_time DESC, created_at DESC LIMIT 100`,
   ).bind(user.id).all();
   return ok(rows.results);
 }
@@ -377,7 +366,7 @@ export async function createTask(env: AppEnv, request: Request): Promise<Respons
 
   const candidates = requireArray(body.candidateRooms, "candidateRooms", 12);
   if (candidates.length === 0) throw new HttpError(400, "CANDIDATE_ROOMS_REQUIRED", "请至少选择一个候选房间");
-  const members = await resolveMembers(env, user, body.teamMemberUserIds, body.contactIds, body.autoJoinUserIds);
+  const members = await resolveMembers(env, user, body.teamMemberUserIds, body.contactIds, body.autoJoinUserIds, false);
   const taskId = crypto.randomUUID();
   const now = Date.now();
   const statements = [
@@ -465,42 +454,21 @@ export async function changeTaskStatus(env: AppEnv, request: Request, taskId: st
   return ok({ id: taskId, status: nextStatus });
 }
 
-export async function squareUsers(env: AppEnv, request: Request): Promise<Response> {
+export async function invitableUsers(env: AppEnv, request: Request): Promise<Response> {
   const user = await requireBoundUser(env, request);
   const rows = await env.DB.prepare(
-    `SELECT id, student_id, real_name, allow_auto_join_reservation
+    `SELECT id, student_id, real_name
        FROM users
       WHERE status = 'ACTIVE' AND student_id IS NOT NULL AND real_name IS NOT NULL AND id <> ?
       ORDER BY created_at DESC LIMIT 100`,
-  ).bind(user.id).all<{ id: string; student_id: string | null; real_name: string; allow_auto_join_reservation: number }>();
+  ).bind(user.id).all<{ id: string; student_id: string | null; real_name: string }>();
   return ok(rows.results.map((row) => ({
     id: row.id,
     realName: row.real_name,
     real_name: row.real_name,
     studentIdMasked: maskStudentId(row.student_id),
     student_id_masked: maskStudentId(row.student_id),
-    allowAutoJoinReservation: Boolean(row.allow_auto_join_reservation),
-    allow_auto_join_reservation: Boolean(row.allow_auto_join_reservation),
   })));
-}
-
-export async function autoJoin(env: AppEnv, request: Request): Promise<Response> {
-  const user = await requireBoundUser(env, request);
-  const body = await readJsonBody<JsonObject>(request);
-  if (typeof body.enabled !== "boolean") throw new HttpError(400, "INVALID_FIELD", "enabled 格式错误");
-  await env.DB.prepare("UPDATE users SET allow_auto_join_reservation = ?, updated_at = ? WHERE id = ?")
-    .bind(body.enabled ? 1 : 0, Date.now(), user.id)
-    .run();
-  await audit(env.DB, {
-    actorUserId: user.id,
-    actorType: "USER",
-    action: "AUTO_JOIN_UPDATED",
-    targetType: "USER",
-    targetId: user.id,
-    result: "SUCCESS",
-    metadata: { enabled: body.enabled },
-  });
-  return ok({ allowAutoJoinReservation: body.enabled });
 }
 
 export async function officialUserSearch(env: AppEnv, request: Request): Promise<Response> {
