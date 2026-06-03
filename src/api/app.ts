@@ -242,7 +242,16 @@ export async function rooms(env: AppEnv, request: Request): Promise<Response> {
   const user = await requireBoundUser(env, request);
   const date = requireString(new URL(request.url).searchParams.get("date"), "date", 10);
   assertThreeDayWindow(date);
-  return ok({ date, rooms: (await activeRooms(env, user.id, date)).map((room) => publicRoomWithRanges(room, date)) });
+  const token = await getAccessToken(env, user.id);
+  const rooms = (await fetchOfficialRooms(env, token, date)).map(publicRoom).filter((room) => room.reservable);
+  const detailed = await Promise.all(rooms.map(async (room) => {
+    try {
+      return publicRoomWithRanges(await fetchOfficialRoomDetail(env, token, room.id, date), date);
+    } catch {
+      return { ...room, availableRanges: [] };
+    }
+  }));
+  return ok({ date, rooms: detailed.filter((room) => room.reservable) });
 }
 
 export async function roomDetail(env: AppEnv, request: Request, roomIdText: string): Promise<Response> {
