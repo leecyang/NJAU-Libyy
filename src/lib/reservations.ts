@@ -143,7 +143,7 @@ export async function ensureReservationTasks(env: AppEnv, reservationId: string,
     ).bind(
       crypto.randomUUID(),
       reservationId,
-      record.minSignTime ?? record.startTime - 15 * 60_000,
+      record.minSignTime ?? record.startTime - 14 * 60_000,
       record.reservationStatus === 31 ? "SUCCESS" : "PENDING",
       record.reservationStatus === 31 ? record.signInTime ?? Date.now() : null,
     ));

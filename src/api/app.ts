@@ -299,6 +299,21 @@ export async function bind(env: AppEnv, request: Request): Promise<Response> {
   return ok({ bound: true });
 }
 
+export async function clearCredential(env: AppEnv, request: Request): Promise<Response> {
+  const user = await requireUser(env, request);
+  await env.DB.prepare("DELETE FROM official_credentials WHERE user_id = ?").bind(user.id).run();
+  await audit(env.DB, {
+    actorUserId: user.id,
+    actorType: "USER",
+    action: "CREDENTIAL_CLEARED",
+    targetType: "CREDENTIAL",
+    targetId: user.id,
+    result: "SUCCESS",
+    metadata: { reason: "consecutive_official_400" },
+  });
+  return ok({ cleared: true });
+}
+
 export async function getCredentialStatus(env: AppEnv, request: Request): Promise<Response> {
   const user = await requireUser(env, request);
   return ok(await credentialStatus(env, user.id));

@@ -2,7 +2,6 @@ import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
 import {
   CalendarClock,
   ChevronLeft,
-  CheckCircle2,
   CircleUserRound,
   ClipboardList,
   DoorOpen,
@@ -18,7 +17,7 @@ import {
 } from "lucide-react";
 import { api, ApiError } from "./api";
 
-type Page = "rooms" | "credentials" | "tasks" | "teams" | "history" | "sign" | "admin";
+type Page = "rooms" | "tasks" | "teams" | "history" | "admin";
 type Route = {
   page: Page;
   roomId?: number;
@@ -104,7 +103,6 @@ type RecentContact = {
   lastUsedAt?: number;
   last_used_at?: number;
 };
-type QueueRow = Record<string, unknown> & { type: string };
 
 function today(): string {
   return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Shanghai" });
@@ -218,11 +216,9 @@ function Empty({ children }: { children: ReactNode }) {
 
 const pagePaths: Record<Page, string> = {
   rooms: "/rooms",
-  credentials: "/credentials",
   tasks: "/tasks",
   teams: "/teams",
   history: "/history",
-  sign: "/sign",
   admin: "/admin",
 };
 
@@ -235,13 +231,11 @@ function routeFromPath(pathname: string): Route {
   const roomMatch = normalized.match(/^\/rooms\/(\d+)$/);
   const adminMatch = normalized.match(/^\/admin\/([a-z-]+)$/);
   if (roomMatch) return { page: "rooms", roomId: Number(roomMatch[1]) };
-  if (normalized === "/credentials") return { page: "credentials" };
   if (normalized === "/tasks/new") return { page: "tasks", taskMode: "new" };
   if (normalized === "/tasks") return { page: "tasks" };
   if (normalized === "/teams/new") return { page: "teams", teamMode: "new" };
   if (normalized === "/teams") return { page: "teams" };
   if (normalized === "/history") return { page: "history" };
-  if (normalized === "/sign") return { page: "sign" };
   if (adminMatch) return { page: "admin", adminCollection: adminMatch[1] };
   if (normalized === "/admin") return { page: "admin" };
   return { page: "rooms" };
@@ -270,18 +264,65 @@ function rangeText(ranges: AvailabilityRange[]): string {
   return ranges.slice(0, 4).map((range) => `${range.startTime}-${range.endTime}`).join("、");
 }
 
-function roomRangeText(room: RoomWithDays, date: string): string {
-  if (room.reservable === false) return "当前不可预约";
-  return rangeText(room.days[date] ?? []);
-}
-
 const timeSlots = Array.from({ length: 28 }, (_, index) => minutesToTime(8 * 60 + index * 30));
-const hourStarts = Array.from({ length: 14 }, (_, index) => 8 + index);
+const availabilityHours = Array.from({ length: 14 }, (_, index) => 8 + index);
+const availabilityTicks = [8, 12, 16, 20, 22];
 
 function slotAvailable(ranges: AvailabilityRange[], slot: string): boolean {
   const start = timeToMinutes(slot);
   const end = start + 30;
   return ranges.some((range) => start >= timeToMinutes(range.startTime) && end <= timeToMinutes(range.endTime));
+}
+
+function rangeOverlapMinutes(ranges: AvailabilityRange[], start: number, end: number): number {
+  return ranges.reduce((total, range) => {
+    const overlap = Math.min(end, timeToMinutes(range.endTime)) - Math.max(start, timeToMinutes(range.startTime));
+    return total + Math.max(0, overlap);
+  }, 0);
+}
+
+function availabilityCellState(ranges: AvailabilityRange[], hour: number): "available" | "partial" | "empty" {
+  const overlap = rangeOverlapMinutes(ranges, hour * 60, (hour + 1) * 60);
+  if (overlap >= 60) return "available";
+  if (overlap > 0) return "partial";
+  return "empty";
+}
+
+function RoomAvailabilityHistory({ dates, room }: { dates: string[]; room: RoomWithDays }) {
+  return (
+    <div className="availability-history" aria-label={`${room.name} 三天可用时间状态`}>
+      <div className="availability-ticks" aria-hidden="true">
+        {availabilityTicks.map((hour) => <span key={hour}>{String(hour).padStart(2, "0")}</span>)}
+      </div>
+      <div className="availability-rows">
+        {dates.map((date) => {
+          const ranges = room.days[date] ?? [];
+          return (
+            <div className="availability-row" key={`${room.id}-${date}`}>
+              <span className="availability-day">{dayLabel(date)}</span>
+              <div className="availability-cells">
+                {availabilityHours.map((hour) => {
+                  const state = availabilityCellState(ranges, hour);
+                  return (
+                    <span
+                      key={`${date}-${hour}`}
+                      className={`availability-cell ${state}`}
+                      title={`${dayLabel(date)} ${String(hour).padStart(2, "0")}:00-${String(hour + 1).padStart(2, "0")}:00`}
+                    />
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      <div className="availability-legend" aria-hidden="true">
+        <span><i className="available" />可用</span>
+        <span><i className="partial" />部分</span>
+        <span><i className="empty" />已占用</span>
+      </div>
+    </div>
+  );
 }
 
 function selectionContains(selection: TimeSelection | null, date: string, index: number): boolean {
@@ -519,37 +560,24 @@ function AuthPanel({ onReady, toast }: { onReady: () => Promise<void>; toast: (m
       <section className="auth-copy">
         <div className="brand-mark">NJAU Libyy</div>
         <h1>研讨室预约工作台</h1>
-        <p>同源前端、容器后端和校园网 VPN 出口已经合并到一个部署形态。</p>
-        <div className="product-fragment auth-grid-preview">
+        <div className="product-fragment auth-grid-preview compact">
           <div className="fragment-bar">
             <span />
             <span />
             <span />
-            <strong>三天时间线</strong>
-          </div>
-          <div className="preview-head">
-            <div>
-              <strong>7E08</strong>
-              <span>可视化半小时粒度</span>
-            </div>
-            <small>最多 2 小时</small>
+            <strong>可用时间</strong>
           </div>
           <div className="preview-calendar-grid" aria-hidden="true">
-            {Array.from({ length: 45 }, (_, index) => (
+            {Array.from({ length: 42 }, (_, index) => (
               <span
                 key={index}
                 className={
-                  [4, 5, 6, 17, 18, 31].includes(index) ? "selected"
-                  : [0, 1, 2, 12, 13, 14, 20, 21, 29, 30, 32, 33, 34, 42].includes(index) ? "available"
+                  [4, 5, 6, 17, 18, 29].includes(index) ? "selected"
+                  : [0, 1, 2, 12, 13, 14, 20, 21, 30, 31, 32, 33, 34].includes(index) ? "available"
                   : ""
                 }
               />
             ))}
-          </div>
-          <div className="preview-foot">
-            <span>今天</span>
-            <b>09:00-10:30</b>
-            <span>连续选择</span>
           </div>
         </div>
       </section>
@@ -623,11 +651,9 @@ function Shell({
 }) {
   const items: Array<{ id: Page; label: string; icon: ReactNode; admin?: boolean }> = [
     { id: "rooms", label: "房间", icon: <DoorOpen size={18} /> },
-    { id: "credentials", label: "凭证", icon: <KeyRound size={18} /> },
     { id: "tasks", label: "任务", icon: <ClipboardList size={18} /> },
     { id: "teams", label: "小队", icon: <UsersRound size={18} /> },
     { id: "history", label: "历史", icon: <History size={18} /> },
-    { id: "sign", label: "签到", icon: <CheckCircle2 size={18} /> },
     { id: "admin", label: "管理", icon: <Shield size={18} />, admin: true },
   ];
   return (
@@ -647,7 +673,7 @@ function Shell({
   );
 }
 
-function CredentialsPage({
+function CredentialLockPage({
   session,
   refresh,
   toast,
@@ -660,11 +686,13 @@ function CredentialsPage({
 }) {
   const [busy, setBusy] = useState(false);
   return (
-    <div className="credential-page">
-      <Card title="重新绑定官方凭证" icon={<KeyRound size={20} />}>
+    <div className="credential-lock-page">
+      <section className="credential-lock-panel">
+        <div className="credential-lock-mark"><KeyRound size={22} /></div>
         <div className="credential-intro">
           <span className="status-pill">{session.credential.credential_status}</span>
-          <p>官方登录凭证未绑定或已经失效。请粘贴新的 reflushToken，完成后系统会重新同步身份并返回工作台。</p>
+          <h1>需要重新绑定官方凭证</h1>
+          <p>官方登录凭证未绑定或已经失效。当前工作台已锁定，请粘贴新的 reflushToken，完成后系统会重新同步身份并返回房间页面。</p>
         </div>
         <form className="credential-form" onSubmit={async (event) => {
           event.preventDefault();
@@ -684,9 +712,9 @@ function CredentialsPage({
           }
         }}>
           <Field label="reflushToken"><textarea name="reflushToken" required rows={8} autoFocus /></Field>
-          <Button busy={busy}>保存并返回工作台</Button>
+          <Button busy={busy}>保存并解锁工作台</Button>
         </form>
-      </Card>
+      </section>
     </div>
   );
 }
@@ -703,7 +731,7 @@ function RoomsPage({ toast, navigate }: { toast: (message: string, error?: boole
       const response = await api<RoomsResponse>("/api/v1/rooms");
       const normalized = normalizeRooms(response, fallbackDates);
       setDates(normalized.dates);
-      setRooms(normalized.rooms);
+      setRooms(normalized.rooms.filter((room) => room.reservable !== false));
     } catch (error) {
       toast(error instanceof Error ? error.message : "加载失败", true);
     } finally {
@@ -726,28 +754,16 @@ function RoomsPage({ toast, navigate }: { toast: (message: string, error?: boole
         <div className="room-grid">
           {rooms.map((room) => (
             <button
+              type="button"
               key={room.id}
-              className={`room-card ${room.reservable === false ? "room-card-muted" : ""}`}
+              className="room-card"
               onClick={() => navigate(`/rooms/${room.id}`)}
             >
               <div className="room-card-main">
-                <div className="room-card-titleline">
-                  <strong>{room.name}</strong>
-                  <span className={`room-state ${room.reservable === false ? "blocked" : "open"}`}>
-                    {room.reservable === false ? "暂不开放" : "可预约"}
-                  </span>
-                </div>
+                <strong>{room.name}</strong>
                 <span>{room.roomLocation ?? "研讨室"} · {room.minReservationNum}-{room.maxNum} 人</span>
               </div>
-              <div className="room-day-ranges">
-                {dates.map((date) => (
-                  <div className="room-day-range" key={`${room.id}-${date}`}>
-                    <b>{dayLabel(date)}</b>
-                    <small>{roomRangeText(room, date)}</small>
-                  </div>
-                ))}
-              </div>
-              <span className="room-card-action">{room.reservable === false ? "查看状态" : "进入时间选择"}</span>
+              <RoomAvailabilityHistory dates={dates} room={room} />
             </button>
           ))}
         </div>
@@ -799,8 +815,9 @@ function RoomDetailPage({
         api<RecentContact[]>("/api/v1/recent-contacts").catch(() => []),
       ]);
       const normalized = normalizeRooms(response, fallbackDates);
+      const availableRooms = normalized.rooms.filter((item) => item.reservable !== false);
       setDates(normalized.dates);
-      setRoom(normalized.rooms.find((item) => item.id === roomId) ?? null);
+      setRoom(availableRooms.find((item) => item.id === roomId) ?? null);
       setTeams(teamData.teams);
       setContacts(contactData);
       setSelection(null);
@@ -1107,7 +1124,7 @@ function HistoryPage({ toast }: { toast: (message: string, error?: boolean) => v
   }
   useEffect(() => { void load(); }, []);
 
-  async function action(id: string, actionName: "cancel" | "sign-link" | "signout") {
+  async function action(id: string, actionName: "cancel" | "signout") {
     try {
       const result = await api<{ url?: string }>(`/api/v1/reservations/${id}/${actionName}`, { method: "POST" });
       if (result.url) window.open(result.url, "_blank", "noopener,noreferrer");
@@ -1129,51 +1146,12 @@ function HistoryPage({ toast }: { toast: (message: string, error?: boolean) => v
               <span>{String(item.statusLabel ?? item.status_label ?? item.status)} · 官方订单 {String(item.official_reservation_id ?? "同步中")}</span>
             </div>
             <div className="row-actions">
-              {item.status === "SCHEDULED" ? <Button variant="secondary" onClick={() => action(String(item.id), "sign-link")}>签到入口</Button> : null}
               {item.status === "SIGNED_IN" ? <Button variant="secondary" onClick={() => action(String(item.id), "signout")}>签退</Button> : null}
               {item.canCancel || item.can_cancel ? <Button variant="ghost" onClick={() => action(String(item.id), "cancel")}>取消</Button> : null}
             </div>
           </article>
         ))}
         {!items.length ? <Empty>暂无预约记录</Empty> : null}
-      </div>
-    </Card>
-  );
-}
-
-function SignPage({ toast }: { toast: (message: string, error?: boolean) => void }) {
-  const [signs, setSigns] = useState<Record<string, unknown>[]>([]);
-  const [signouts, setSignouts] = useState<Record<string, unknown>[]>([]);
-
-  async function load() {
-    try {
-      const [signData, signoutData] = await Promise.all([
-        api<Record<string, unknown>[]>("/api/v1/sign-tasks"),
-        api<Record<string, unknown>[]>("/api/v1/signout-tasks"),
-      ]);
-      setSigns(signData);
-      setSignouts(signoutData);
-    } catch (error) {
-      toast(error instanceof Error ? error.message : "加载失败", true);
-    }
-  }
-  useEffect(() => { void load(); }, []);
-
-  const rows = useMemo<QueueRow[]>(
-    () => [...signs.map((row) => ({ ...row, type: "签到" })), ...signouts.map((row) => ({ ...row, type: "签退" }))],
-    [signs, signouts],
-  );
-  return (
-    <Card title="签到队列" icon={<CheckCircle2 size={20} />}>
-      <div className="toolbar"><Button type="button" onClick={load}><RefreshCw size={16} />刷新</Button></div>
-      <div className="list">
-        {rows.map((row) => (
-          <article className="list-row" key={`${row.type}-${String(row.id)}`}>
-            <div><strong>{String(row.type)} · {String(row.reservation_id)}</strong><span>{String(row.status)} · 尝试 {String(row.attempt_count ?? 0)} 次</span></div>
-            <small>{row.scheduled_at ? new Date(Number(row.scheduled_at)).toLocaleString() : ""}</small>
-          </article>
-        ))}
-        {!rows.length ? <Empty>暂无队列记录</Empty> : null}
       </div>
     </Card>
   );
@@ -1249,10 +1227,16 @@ export function App() {
   useEffect(() => { void refreshMe(); }, []);
 
   useEffect(() => {
-    if (session && session.credential.credential_status !== "ACTIVE" && route.page !== "credentials") {
-      navigate("/credentials");
+    if (!session) return;
+    const needsCredential = session.credential.credential_status !== "ACTIVE";
+    if (needsCredential && window.location.pathname !== "/credentials") {
+      window.history.replaceState(null, "", "/credentials");
+      setRoute(routeFromPath("/credentials"));
     }
-  }, [session, route.page]);
+    if (!needsCredential && window.location.pathname === "/credentials") {
+      navigate("/rooms");
+    }
+  }, [session, route]);
 
   async function logout() {
     await api("/api/v1/auth/logout", { method: "POST" }).catch(() => null);
@@ -1262,9 +1246,17 @@ export function App() {
 
   if (!session) return <><AuthPanel onReady={refreshMe} toast={toast} /><Toast message={message} error={isError} /></>;
 
+  if (session.credential.credential_status !== "ACTIVE") {
+    return (
+      <>
+        <CredentialLockPage session={session} refresh={refreshMe} toast={toast} navigate={navigate} />
+        <Toast message={message} error={isError} />
+      </>
+    );
+  }
+
   const pageTitle =
     route.page === "rooms" && route.roomId ? "选择预约时间"
-    : route.page === "credentials" ? "官方凭证"
     : route.page === "tasks" && route.taskMode === "new" ? "新建自动任务"
     : route.page === "teams" && route.teamMode === "new" ? "创建小队"
     : session.user.studentId ? "预约工作台" : "账号配置";
@@ -1274,15 +1266,12 @@ export function App() {
       <main className="content">
         <div className="page-head">
           <div><span className="eyebrow">Workspace</span><h1>{pageTitle}</h1></div>
-          <div className="status-pill">{session.credential.credential_status}</div>
         </div>
         {route.page === "rooms" && !route.roomId ? <RoomsPage toast={toast} navigate={navigate} /> : null}
         {route.page === "rooms" && route.roomId ? <RoomDetailPage roomId={route.roomId} toast={toast} navigate={navigate} /> : null}
-        {route.page === "credentials" ? <CredentialsPage session={session} refresh={refreshMe} toast={toast} navigate={navigate} /> : null}
         {route.page === "tasks" ? <TasksPage toast={toast} navigate={navigate} mode={route.taskMode ?? "list"} /> : null}
         {route.page === "teams" ? <TeamsPage toast={toast} navigate={navigate} mode={route.teamMode ?? "list"} /> : null}
         {route.page === "history" ? <HistoryPage toast={toast} /> : null}
-        {route.page === "sign" ? <SignPage toast={toast} /> : null}
         {route.page === "admin" ? <AdminPage toast={toast} navigate={navigate} collection={route.adminCollection ?? "users"} /> : null}
       </main>
       <footer className="footer"><strong>NJAU Libyy</strong><span>Docker Compose · Tailscale · SQLite</span></footer>
