@@ -72,6 +72,19 @@ type TimeSelection = {
 };
 type Reservation = Record<string, string | number | boolean | null>;
 type Task = Record<string, string | number | null>;
+type SignAutomationTask = {
+  id: string;
+  reservation_id: string;
+  scheduled_at: number;
+  status: string;
+  attempt_count?: number;
+  executed_at?: number | null;
+  official_reservation_id?: string | null;
+  room_name_snapshot?: string | null;
+  date?: string | null;
+  start_time?: string | null;
+  end_time?: string | null;
+};
 type TeamMember = {
   id: string;
   email?: string;
@@ -86,6 +99,7 @@ type Team = {
   name: string;
   description?: string;
   leader_user_id?: string;
+  leader_name?: string;
   is_leader?: boolean | number;
   members?: TeamMember[] | string | null;
 };
@@ -135,6 +149,53 @@ function dayLabel(date: string): string {
   return `${date.slice(5)} ${weekday}`;
 }
 
+function formatTimestamp(value: number | string | null | undefined): string {
+  const timestamp = typeof value === "string" ? Number(value) : value;
+  if (!timestamp || !Number.isFinite(timestamp)) return "待定";
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+    timeZone: "Asia/Shanghai",
+  }).format(new Date(timestamp));
+}
+
+function statusText(status: string | number | null | undefined): string {
+  const value = String(status ?? "UNKNOWN");
+  const labels: Record<string, string> = {
+    DRAFT: "草稿",
+    WAITING_WINDOW: "等待窗口",
+    WAITING_MEMBERS: "等待成员",
+    READY: "准备中",
+    SUBMITTING: "提交中",
+    SUCCESS: "成功",
+    FAILED: "失败",
+    CANCELLED: "已取消",
+    EXPIRED: "已过期",
+    PENDING: "待执行",
+    DISABLED: "已关闭",
+  };
+  return labels[value] ?? value;
+}
+
+function taskCandidateText(task: Task): string {
+  const raw = task.candidate_rooms;
+  if (typeof raw !== "string") return "候选房间待定";
+  try {
+    const rooms = JSON.parse(raw) as unknown;
+    if (!Array.isArray(rooms)) return "候选房间待定";
+    const names = rooms
+      .filter(isRecord)
+      .map((room) => String(room.roomName ?? room.room_id ?? room.roomId ?? ""))
+      .filter(Boolean);
+    return names.length ? names.join("、") : "候选房间待定";
+  } catch {
+    return raw || "候选房间待定";
+  }
+}
+
 function timeToMinutes(value: string): number {
   const [hour, minute] = value.split(":").map(Number);
   return (hour ?? 0) * 60 + (minute ?? 0);
@@ -182,6 +243,18 @@ function memberName(member: TeamMember): string {
 
 function isTeamLeader(team: Team): boolean {
   return team.is_leader === true || team.is_leader === 1;
+}
+
+function visibleTeamMembers(team: Team): Array<{ id: string; name: string; role: string }> {
+  const members = parseTeamMembers(team.members).map((member) => ({
+    id: member.id,
+    name: memberName(member),
+    role: "队友",
+  }));
+  return [
+    { id: team.leader_user_id ?? `${team.id}-leader`, name: team.leader_name ?? "队长", role: "队长" },
+    ...members,
+  ];
 }
 
 function contactName(contact: RecentContact): string {
@@ -281,11 +354,10 @@ function rangeText(ranges: AvailabilityRange[]): string {
 }
 
 const timeSlots = Array.from({ length: 28 }, (_, index) => minutesToTime(8 * 60 + index * 30));
-const availabilityHours = Array.from({ length: 14 }, (_, index) => 8 + index);
 const availabilityTicks = [8, 12, 16, 20, 22];
 type TrackerBlock = {
   key: string;
-  state: "available" | "partial" | "empty";
+  state: "available" | "empty";
   tooltip: string;
 };
 
@@ -293,20 +365,6 @@ function slotAvailable(ranges: AvailabilityRange[], slot: string): boolean {
   const start = timeToMinutes(slot);
   const end = start + 30;
   return ranges.some((range) => start >= timeToMinutes(range.startTime) && end <= timeToMinutes(range.endTime));
-}
-
-function rangeOverlapMinutes(ranges: AvailabilityRange[], start: number, end: number): number {
-  return ranges.reduce((total, range) => {
-    const overlap = Math.min(end, timeToMinutes(range.endTime)) - Math.max(start, timeToMinutes(range.startTime));
-    return total + Math.max(0, overlap);
-  }, 0);
-}
-
-function availabilityCellState(ranges: AvailabilityRange[], hour: number): "available" | "partial" | "empty" {
-  const overlap = rangeOverlapMinutes(ranges, hour * 60, (hour + 1) * 60);
-  if (overlap >= 60) return "available";
-  if (overlap > 0) return "partial";
-  return "empty";
 }
 
 function TremorTracker({ data, label }: { data: TrackerBlock[]; label: string }) {
@@ -335,15 +393,13 @@ function RoomAvailabilityHistory({ dates, room }: { dates: string[]; room: RoomW
               <span className="availability-day">{dayLabel(date)}</span>
               <TremorTracker
                 label={`${room.name} ${dayLabel(date)} 08:00 到 22:00 可用状态`}
-                data={availabilityHours.map((hour) => {
-                  const start = `${String(hour).padStart(2, "0")}:00`;
-                  const end = `${String(hour + 1).padStart(2, "0")}:00`;
-                  const state = availabilityCellState(ranges, hour);
-                  const stateText = state === "available" ? "整小时可用" : state === "partial" ? "部分可用" : "不可用";
+                data={timeSlots.map((slot) => {
+                  const end = minutesToTime(timeToMinutes(slot) + 30);
+                  const state = slotAvailable(ranges, slot) ? "available" : "empty";
                   return {
-                    key: `${date}-${hour}`,
+                    key: `${date}-${slot}`,
                     state,
-                    tooltip: `${dayLabel(date)} ${start}-${end} ${stateText}`,
+                    tooltip: `${dayLabel(date)} ${slot}-${end} ${state === "available" ? "可用" : "不可用"}`,
                   };
                 })}
               />
@@ -353,8 +409,7 @@ function RoomAvailabilityHistory({ dates, room }: { dates: string[]; room: RoomW
       </div>
       <div className="availability-legend" aria-hidden="true">
         <span><i className="available" />可用</span>
-        <span><i className="partial" />部分</span>
-        <span><i className="empty" />已占用</span>
+        <span><i className="occupied" />不可用</span>
       </div>
     </div>
   );
@@ -970,10 +1025,19 @@ function TasksPage({
   mode?: "list" | "new";
 }) {
   const [tasks, setTasks] = useState<Task[]>([]);
+  const [signTasks, setSignTasks] = useState<SignAutomationTask[]>([]);
+  const [signoutTasks, setSignoutTasks] = useState<SignAutomationTask[]>([]);
 
   async function load() {
     try {
-      setTasks(await api<Task[]>("/api/v1/reservation-tasks"));
+      const [reservationTasks, signInTasks, signOutTasks] = await Promise.all([
+        api<Task[]>("/api/v1/reservation-tasks"),
+        api<SignAutomationTask[]>("/api/v1/sign-tasks").catch(() => []),
+        api<SignAutomationTask[]>("/api/v1/signout-tasks").catch(() => []),
+      ]);
+      setTasks(reservationTasks);
+      setSignTasks(signInTasks);
+      setSignoutTasks(signOutTasks);
     } catch (error) {
       toast(error instanceof Error ? error.message : "加载失败", true);
     }
@@ -1041,17 +1105,39 @@ function TasksPage({
           <Button type="button" onClick={() => navigate("/tasks/new")}><ClipboardList size={16} />新建任务</Button>
           <Button type="button" variant="secondary" onClick={load}><RefreshCw size={16} />刷新</Button>
         </div>
-        <div className="list">
-          {tasks.map((task) => (
-            <article className="list-row" key={String(task.id)}>
-              <div><strong>{task.target_date} {task.start_time}-{task.end_time}</strong><span>{task.status}</span></div>
-              <div className="row-actions">
-                {task.status === "DRAFT" ? <Button variant="secondary" onClick={() => action(String(task.id), "enable")}>启用</Button> : null}
-                {["DRAFT", "WAITING_WINDOW", "WAITING_MEMBERS", "READY"].includes(String(task.status)) ? <Button variant="ghost" onClick={() => action(String(task.id), "cancel")}>取消</Button> : null}
-              </div>
-            </article>
-          ))}
-          {!tasks.length ? <Empty>暂无自动预约任务</Empty> : null}
+        <div className="task-sections">
+          <section className="task-section">
+            <div className="section-subtitle"><strong>自动预约</strong><span>{tasks.length} 项</span></div>
+            <div className="list">
+              {tasks.map((task) => (
+                <article className="list-row" key={String(task.id)}>
+                  <div><strong>{String(task.target_date)} {String(task.start_time)}-{String(task.end_time)}</strong><span>{statusText(task.status as string | number | null | undefined)} · {taskCandidateText(task)}</span></div>
+                  <div className="row-actions">
+                    {task.status === "DRAFT" ? <Button variant="secondary" onClick={() => action(String(task.id), "enable")}>启用</Button> : null}
+                    {["DRAFT", "WAITING_WINDOW", "WAITING_MEMBERS", "READY"].includes(String(task.status)) ? <Button variant="ghost" onClick={() => action(String(task.id), "cancel")}>取消</Button> : null}
+                  </div>
+                </article>
+              ))}
+              {!tasks.length ? <Empty>暂无自动预约任务</Empty> : null}
+            </div>
+          </section>
+          <section className="task-section">
+            <div className="section-subtitle"><strong>自动签到与签退</strong><span>{signTasks.length + signoutTasks.length} 项</span></div>
+            <div className="list">
+              {[
+                ...signTasks.map((task) => ({ ...task, kind: "自动签到" })),
+                ...signoutTasks.map((task) => ({ ...task, kind: "自动签退" })),
+              ].sort((left, right) => Number(right.scheduled_at ?? 0) - Number(left.scheduled_at ?? 0)).map((task) => (
+                <article className="list-row" key={`${task.kind}-${task.id}`}>
+                  <div>
+                    <strong>{task.kind} · {task.room_name_snapshot ?? "研讨间"} · {task.date ?? "日期待定"} {task.start_time ?? ""}-{task.end_time ?? ""}</strong>
+                    <span>{statusText(task.status)} · 计划 {formatTimestamp(task.scheduled_at)} · 执行 {formatTimestamp(task.executed_at)} · 尝试 {Number(task.attempt_count ?? 0)} 次</span>
+                  </div>
+                </article>
+              ))}
+              {!signTasks.length && !signoutTasks.length ? <Empty>暂无自动签到或签退任务</Empty> : null}
+            </div>
+          </section>
         </div>
       </Card>
     </div>
@@ -1216,7 +1302,14 @@ function TeamsPage({
             <article className="list-row" key={team.id}>
               <div>
                 <strong>{team.name}</strong>
-                <span>{team.description || "无描述"} · {parseTeamMembers(team.members).length} 人 · {isTeamLeader(team) ? "我创建的" : "已加入"}</span>
+                <span>{team.description || "无描述"} · {visibleTeamMembers(team).length} 人 · {isTeamLeader(team) ? "我创建的" : "已加入"}</span>
+                <div className="team-member-strip">
+                  {visibleTeamMembers(team).map((member) => (
+                    <span key={`${team.id}-${member.id}`} className={member.role === "队长" ? "leader" : ""}>
+                      {member.name}<small>{member.role}</small>
+                    </span>
+                  ))}
+                </div>
               </div>
               {isTeamLeader(team) ? (
                 <Button type="button" variant="secondary" onClick={() => navigate(`/teams/${encodeURIComponent(team.id)}/invite`)}>邀请成员</Button>
@@ -1232,15 +1325,22 @@ function TeamsPage({
 
 function HistoryPage({ toast }: { toast: (message: string, error?: boolean) => void }) {
   const [items, setItems] = useState<Reservation[]>([]);
+  const [page, setPage] = useState(1);
+  const pageSize = 8;
 
   async function load(sync = false) {
     try {
       setItems(await api<Reservation[]>(sync ? "/api/v1/reservations/sync" : "/api/v1/reservations/history", sync ? { method: "POST" } : {}));
+      setPage(1);
     } catch (error) {
       toast(error instanceof Error ? error.message : "加载失败", true);
     }
   }
   useEffect(() => { void load(); }, []);
+
+  const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const visibleItems = items.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
   async function action(id: string, actionName: "cancel" | "signout") {
     try {
@@ -1257,7 +1357,7 @@ function HistoryPage({ toast }: { toast: (message: string, error?: boolean) => v
     <Card title="预约历史" icon={<History size={20} />}>
       <div className="toolbar"><Button type="button" onClick={() => load(true)}><RefreshCw size={16} />同步</Button></div>
       <div className="list">
-        {items.map((item) => (
+        {visibleItems.map((item) => (
           <article className="list-row" key={String(item.id)}>
             <div>
               <strong>{item.room_name_snapshot} · {item.date} {item.start_time}-{item.end_time}</strong>
@@ -1271,6 +1371,13 @@ function HistoryPage({ toast }: { toast: (message: string, error?: boolean) => v
         ))}
         {!items.length ? <Empty>暂无预约记录</Empty> : null}
       </div>
+      {items.length > pageSize ? (
+        <div className="pagination">
+          <Button type="button" variant="secondary" disabled={currentPage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</Button>
+          <span>{currentPage} / {totalPages}</span>
+          <Button type="button" variant="secondary" disabled={currentPage >= totalPages} onClick={() => setPage((value) => Math.min(totalPages, value + 1))}>下一页</Button>
+        </div>
+      ) : null}
     </Card>
   );
 }
@@ -1342,6 +1449,15 @@ export function App() {
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
+  useEffect(() => {
+    const onCredentialInvalidated = () => {
+      setSession((current) => current ? { ...current, credential: { credential_status: "UNBOUND" } } : current);
+      setRoute(routeFromPath("/credentials"));
+    };
+    window.addEventListener("credential-invalidated", onCredentialInvalidated);
+    return () => window.removeEventListener("credential-invalidated", onCredentialInvalidated);
+  }, []);
+
   useEffect(() => { void refreshMe(); }, []);
 
   useEffect(() => {
@@ -1383,7 +1499,10 @@ export function App() {
         {route.page === "history" ? <HistoryPage toast={toast} /> : null}
         {route.page === "admin" ? <AdminPage toast={toast} navigate={navigate} collection={route.adminCollection ?? "users"} /> : null}
       </main>
-      <footer className="footer"><strong>NJAU Libyy</strong><span>Docker Compose · Tailscale · SQLite</span></footer>
+      <footer className="footer">
+        <strong>NJAU Libyy</strong>
+        <a href="https://github.com/leecyang" target="_blank" rel="noreferrer">github.com/leecyang</a>
+      </footer>
       <Toast message={message} error={isError} />
     </Shell>
   );

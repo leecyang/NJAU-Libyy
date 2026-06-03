@@ -29,12 +29,25 @@ const officialCredentialBadRequestCodes = new Set([
 let consecutiveOfficialCredential400 = 0;
 let clearingCredential = false;
 
-function redirectToCredentialPage(code: string, path: string) {
-  if (!credentialErrorCodes.has(code)) return;
-  if (path.startsWith("/api/v1/credentials/") || path === "/api/v1/me") return;
+function isCredentialControlPath(path: string): boolean {
+  return path.startsWith("/api/v1/credentials/") || path === "/api/v1/me";
+}
+
+function forceCredentialPage() {
   if (typeof window === "undefined" || window.location.pathname === "/credentials") return;
   window.history.replaceState(null, "", "/credentials");
   window.dispatchEvent(new PopStateEvent("popstate"));
+}
+
+function dispatchCredentialInvalidated() {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("credential-invalidated"));
+  forceCredentialPage();
+}
+
+function redirectToCredentialPage(code: string, path: string) {
+  if (!credentialErrorCodes.has(code) || isCredentialControlPath(path)) return;
+  dispatchCredentialInvalidated();
 }
 
 async function clearCredentialSilently() {
@@ -45,7 +58,7 @@ async function clearCredentialSilently() {
   } finally {
     consecutiveOfficialCredential400 = 0;
     clearingCredential = false;
-    redirectToCredentialPage("CREDENTIAL_NOT_ACTIVE", "/api/v1/rooms");
+    dispatchCredentialInvalidated();
   }
 }
 
@@ -55,6 +68,11 @@ function trackCredentialBadRequest(status: number, code: string, path: string) {
     && !path.startsWith("/api/v1/credentials/");
   consecutiveOfficialCredential400 = shouldCount ? consecutiveOfficialCredential400 + 1 : 0;
   if (consecutiveOfficialCredential400 >= 3) void clearCredentialSilently();
+}
+
+function clearExpiredCredential(code: string, path: string) {
+  if (isCredentialControlPath(path)) return;
+  if (code === "OFFICIAL_REAUTH_REQUIRED" || code === "CREDENTIAL_NOT_ACTIVE") void clearCredentialSilently();
 }
 
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -69,6 +87,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
   if (!response.ok || body?.ok === false) {
     const error = body && "error" in body ? body.error : { code: "REQUEST_FAILED", message: "请求失败" };
     trackCredentialBadRequest(response.status, error.code, path);
+    clearExpiredCredential(error.code, path);
     redirectToCredentialPage(error.code, path);
     throw new ApiError(error.code, error.message, response.status);
   }

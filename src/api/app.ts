@@ -309,7 +309,7 @@ export async function clearCredential(env: AppEnv, request: Request): Promise<Re
     targetType: "CREDENTIAL",
     targetId: user.id,
     result: "SUCCESS",
-    metadata: { reason: "consecutive_official_400" },
+    metadata: { reason: "official_credential_invalidated" },
   });
   return ok({ cleared: true });
 }
@@ -854,7 +854,8 @@ export async function respondInvitation(env: AppEnv, request: Request, invitatio
 export async function signTasks(env: AppEnv, request: Request): Promise<Response> {
   const user = await requireBoundUser(env, request);
   const rows = await env.DB.prepare(
-    `SELECT s.id, s.reservation_id, s.scheduled_at, s.status, s.attempt_count, s.executed_at, s.official_response_redacted
+    `SELECT s.id, s.reservation_id, s.scheduled_at, s.status, s.attempt_count, s.executed_at, s.official_response_redacted,
+            r.official_reservation_id, r.room_name_snapshot, r.date, r.start_time, r.end_time
        FROM sign_tasks s JOIN reservations r ON r.id = s.reservation_id
       WHERE r.owner_user_id = ? ORDER BY s.scheduled_at DESC`,
   ).bind(user.id).all();
@@ -910,7 +911,8 @@ export async function submitSignParameters(env: AppEnv, request: Request, taskId
 export async function signoutTasks(env: AppEnv, request: Request): Promise<Response> {
   const user = await requireBoundUser(env, request);
   const rows = await env.DB.prepare(
-    `SELECT s.id, s.reservation_id, s.scheduled_at, s.status, s.attempt_count, s.executed_at, s.official_response_redacted
+    `SELECT s.id, s.reservation_id, s.official_reservation_id, s.scheduled_at, s.status, s.attempt_count, s.executed_at, s.official_response_redacted,
+            r.room_name_snapshot, r.date, r.start_time, r.end_time
        FROM signout_tasks s JOIN reservations r ON r.id = s.reservation_id
       WHERE r.owner_user_id = ? ORDER BY s.scheduled_at DESC`,
   ).bind(user.id).all();

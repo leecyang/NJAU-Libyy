@@ -202,13 +202,17 @@ export async function refreshCredential(
     return true;
   } catch (error) {
     const reauth = error instanceof HttpError && error.code === "OFFICIAL_REAUTH_REQUIRED";
-    await env.DB.prepare(
-      `UPDATE official_credentials
-          SET credential_status = ?, refresh_lock_until = NULL,
-              refresh_failure_count = refresh_failure_count + 1,
-              last_error_code = ?, last_error_message = ?, updated_at = ?
-        WHERE user_id = ? AND refresh_lock_until = ?`,
-    ).bind(reauth ? "REAUTH_REQUIRED" : "REFRESH_FAILED", reauth ? 2003 : null, "凭证刷新失败", Date.now(), userId, lockUntil).run();
+    if (reauth) {
+      await env.DB.prepare("DELETE FROM official_credentials WHERE user_id = ? AND refresh_lock_until = ?").bind(userId, lockUntil).run();
+    } else {
+      await env.DB.prepare(
+        `UPDATE official_credentials
+            SET credential_status = 'REFRESH_FAILED', refresh_lock_until = NULL,
+                refresh_failure_count = refresh_failure_count + 1,
+                last_error_code = NULL, last_error_message = ?, updated_at = ?
+          WHERE user_id = ? AND refresh_lock_until = ?`,
+      ).bind("凭证刷新失败", Date.now(), userId, lockUntil).run();
+    }
     await audit(env.DB, {
       actorUserId: userId,
       actorType: source === "ADMIN" ? "ADMIN" : "SYSTEM",
