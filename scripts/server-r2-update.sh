@@ -53,7 +53,12 @@ download() {
   local url="$1"
   local output="$2"
   echo "[deploy] Downloading $url"
-  curl --fail --location --continue-at - --connect-timeout 15 --max-time 1800 --progress-bar "$url" -o "$output"
+  if ! curl --fail --location --continue-at - --connect-timeout 15 --max-time 1800 --progress-bar "$url" -o "$output"; then
+    echo
+    echo "[deploy] Resumable download failed. Retrying from scratch."
+    rm -f "$output"
+    curl --fail --location --connect-timeout 15 --max-time 1800 --progress-bar "$url" -o "$output"
+  fi
   echo
 }
 
