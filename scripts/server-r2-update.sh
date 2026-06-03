@@ -40,8 +40,8 @@ COMPOSE_PATH="$APP_DIR/docker-compose.yml"
 echo "[deploy] Version $VERSION"
 
 CURRENT_VERSION=""
-if [ -f "$APP_DIR/.release.env" ]; then
-  CURRENT_VERSION="$(sed -n 's/^APP_IMAGE_TAG=//p' "$APP_DIR/.release.env" | head -n 1)"
+if [ -f "$APP_DIR/.deployed-version" ]; then
+  CURRENT_VERSION="$(cat "$APP_DIR/.deployed-version" | head -n 1)"
 fi
 
 if [ "$CURRENT_VERSION" = "$VERSION" ] && curl -fsS --connect-timeout 5 --max-time 15 http://127.0.0.1:3000/api/v1/health >/dev/null 2>&1; then
@@ -75,8 +75,10 @@ export APP_IMAGE_TAG="$VERSION"
 printf 'APP_IMAGE_TAG=%s\n' "$VERSION" > "$APP_DIR/.release.env"
 
 echo "[deploy] Starting compose"
-docker compose --env-file .env --env-file .release.env up -d
+docker compose --env-file .env --env-file .release.env up -d tailscale
+docker compose --env-file .env --env-file .release.env up -d --no-deps --force-recreate app
 docker compose ps
 curl -fsS http://127.0.0.1:3000/api/v1/health
 echo
+printf '%s\n' "$VERSION" > "$APP_DIR/.deployed-version"
 echo "[deploy] Updated to $VERSION"

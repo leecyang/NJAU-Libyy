@@ -127,8 +127,9 @@ R2_PUBLIC_BASE_URL=https://cloud.way2api.fun/NJAU \
 - 下载 release 版 `docker-compose.yml`
 - 备份当前 SQLite 到 `/opt/NJAU-Libyy/backups`
 - 执行 `docker load`
-- 使用新镜像执行 `docker compose up -d`
+- 先启动/保持 `tailscale`，再使用新镜像强制重建 `app` 容器
 - 检查 `/api/v1/health`
+- 健康检查成功后写入 `.deployed-version`，后续同版本会跳过
 
 ### systemd 定时自动更新
 
