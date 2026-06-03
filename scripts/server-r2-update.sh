@@ -66,6 +66,10 @@ download "$R2_PUBLIC_BASE_URL/$CHANNEL/$IMAGE_OBJECT" "$IMAGE_PATH"
 download "$R2_PUBLIC_BASE_URL/$CHANNEL/$COMPOSE_OBJECT" "$COMPOSE_PATH"
 download "$R2_PUBLIC_BASE_URL/$CHANNEL/$ENV_EXAMPLE_OBJECT" "$APP_DIR/.env.example"
 
+printf 'APP_IMAGE_TAG=%s\n' "$VERSION" > "$APP_DIR/.release.env"
+echo "[deploy] Validating compose file"
+docker compose --env-file .env --env-file .release.env config >/dev/null
+
 if docker compose ps -q app >/dev/null 2>&1; then
   CONTAINER_ID="$(docker compose ps -q app || true)"
   if [ -n "$CONTAINER_ID" ]; then
@@ -77,7 +81,6 @@ echo "[deploy] Loading image"
 gzip -dc "$IMAGE_PATH" | docker load
 
 export APP_IMAGE_TAG="$VERSION"
-printf 'APP_IMAGE_TAG=%s\n' "$VERSION" > "$APP_DIR/.release.env"
 
 echo "[deploy] Starting compose"
 docker compose --env-file .env --env-file .release.env up -d tailscale

@@ -3,9 +3,9 @@ services:
     image: tailscale/tailscale:latest
     hostname: njau-libyy
     environment:
-      TS_AUTHKEY: ${TS_AUTHKEY:-}
+      TS_AUTHKEY: "${TS_AUTHKEY:-}"
       TS_STATE_DIR: /var/lib/tailscale
-      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS:---accept-routes --exit-node=100.87.36.34 --exit-node-allow-lan-access}
+      TS_EXTRA_ARGS: "${TS_EXTRA_ARGS:---accept-routes --exit-node=100.87.36.34 --exit-node-allow-lan-access}"
     volumes:
       - tailscale-state:/var/lib/tailscale
     devices:
@@ -18,13 +18,13 @@ services:
     restart: unless-stopped
 
   app:
-    image: njau-libyy-app:${APP_IMAGE_TAG:-latest}
+    image: "njau-libyy-app:${APP_IMAGE_TAG:-latest}"
     network_mode: "service:tailscale"
     env_file:
       - .env
     environment:
       PORT: "3000"
-      APP_VERSION: ${APP_IMAGE_TAG:-docker}
+      APP_VERSION: "${APP_IMAGE_TAG:-docker}"
       SQLITE_PATH: /data/njau-libyy.sqlite
       WEB_DIST_DIR: /app/apps/web/dist
       MIGRATIONS_DIR: /app/migrations
