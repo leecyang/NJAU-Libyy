@@ -2,9 +2,9 @@ import type { AppEnv } from "../config";
 import { flag, integerVar } from "../config";
 import { currentUser, requireAdmin, requireUser, revokeSession, type User } from "../lib/auth";
 import { audit } from "../lib/audit";
-import { bindCredential, credentialStatus, getAccessToken, getOfficialReservationProfile } from "../lib/credentials";
+import { credentialStatus, getAccessToken, getOfficialReservationProfile } from "../lib/credentials";
 import { sha256, randomToken } from "../lib/crypto";
-import { HttpError, ok, readJsonBody, requireString } from "../lib/http";
+import { HttpError, json, ok, readJsonBody, requireString } from "../lib/http";
 import { queueMail } from "../lib/mail";
 import {
   acceptOfficialReservation,
@@ -81,6 +81,13 @@ function publicRoomWithRanges(room: Room, date: string): Room & { reservable: bo
   return { ...publicRoom(room), availableRanges: availableTimeRanges(room, date) };
 }
 
+function requireSecret(value: unknown, field: string, maxLength: number): string {
+  if (typeof value !== "string" || value.length === 0 || value.length > maxLength) {
+    throw new HttpError(400, "INVALID_FIELD", `${field} 格式错误`);
+  }
+  return value;
+}
+
 function previewRoomRanges(dateIndex: number): Array<Array<{ startTime: string; endTime: string }>> {
   return [
     [
@@ -144,7 +151,7 @@ async function roomDailyAvailability(env: AppEnv, token: string, roomId: number,
 async function requireBoundUser(env: AppEnv, request: Request): Promise<User> {
   const user = await requireUser(env, request);
   const credential = await credentialStatus(env, user.id);
-  if (!user.student_id || !user.real_name || credential.credential_status !== "ACTIVE") {
+  if (!user.student_id || !user.real_name || credential.credential_status !== "ACTIVE" || credential.setup_required === true) {
     throw new HttpError(409, "SETUP_REQUIRED", "请先完成官方凭证配置");
   }
   return user;
@@ -258,7 +265,9 @@ export async function health(env: AppEnv): Promise<Response> {
     database: database?.value === 1 ? "ready" : "unavailable",
     config: {
       officialApiConfigured: Boolean(env.LIBYY_APP_SECRET),
+      officialNetworkMode: env.OFFICIAL_NETWORK_MODE ?? "tailscale-direct",
       officialProxyConfigured: Boolean(env.NJAU_PROXY_ENDPOINT && env.NJAU_PROXY_TOKEN),
+      tailscaleExitNodeConfigured: String(env.TS_EXTRA_ARGS ?? "").includes("--exit-node"),
       smtpConfigured: Boolean(env.SMTP_PASSWORD),
       emailDeliveryEnabled: flag(env, "EMAIL_DELIVERY_ENABLED"),
       reservationSubmissionEnabled: flag(env, "ENABLE_SINGLE_RESERVATION_SUBMISSION"),
@@ -276,10 +285,13 @@ export async function health(env: AppEnv): Promise<Response> {
 
 export async function deleteAccount(env: AppEnv, request: Request): Promise<Response> {
   const user = await requireUser(env, request);
+  await env.CAS_AUTOMATION?.removeUser(user.id);
   const now = Date.now();
   await env.DB.batch([
     env.DB.prepare("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL").bind(now, user.id),
     env.DB.prepare("DELETE FROM official_credentials WHERE user_id = ?").bind(user.id),
+    env.DB.prepare("DELETE FROM official_login_attempts WHERE user_id = ?").bind(user.id),
+    env.DB.prepare("DELETE FROM official_login_credentials WHERE user_id = ?").bind(user.id),
     env.DB.prepare("DELETE FROM teams WHERE leader_user_id = ?").bind(user.id),
     env.DB.prepare("DELETE FROM team_members WHERE user_id = ?").bind(user.id),
     env.DB.prepare("UPDATE team_invitations SET status = 'CANCELLED', responded_at = ? WHERE invitee_user_id = ? AND status = 'PENDING'").bind(now, user.id),
@@ -295,23 +307,21 @@ export async function deleteAccount(env: AppEnv, request: Request): Promise<Resp
 export async function bind(env: AppEnv, request: Request): Promise<Response> {
   const user = await requireUser(env, request);
   const body = await readJsonBody<JsonObject>(request);
-  await bindCredential(env, user, requireString(body.reflushToken, "reflushToken", 8192));
-  return ok({ bound: true });
+  if (!env.CAS_AUTOMATION) throw new HttpError(503, "CAS_AUTOMATION_UNAVAILABLE", "统一认证自动化服务未启用");
+  const studentId = requireString(body.studentId, "studentId", 32);
+  const password = requireSecret(body.password, "password", 128);
+  const purpose = new URL(request.url).pathname.endsWith("/rebind") ? "REBIND" : "INITIAL_BIND";
+  const attempt = await env.CAS_AUTOMATION.startAttempt(user.id, studentId, password, purpose);
+  return json({ ok: true, data: attempt }, 202);
 }
 
-export async function clearCredential(env: AppEnv, request: Request): Promise<Response> {
+export async function submitCredentialSms(env: AppEnv, request: Request): Promise<Response> {
   const user = await requireUser(env, request);
-  await env.DB.prepare("DELETE FROM official_credentials WHERE user_id = ?").bind(user.id).run();
-  await audit(env.DB, {
-    actorUserId: user.id,
-    actorType: "USER",
-    action: "CREDENTIAL_CLEARED",
-    targetType: "CREDENTIAL",
-    targetId: user.id,
-    result: "SUCCESS",
-    metadata: { reason: "official_credential_invalidated" },
-  });
-  return ok({ cleared: true });
+  const body = await readJsonBody<JsonObject>(request);
+  if (!env.CAS_AUTOMATION) throw new HttpError(503, "CAS_AUTOMATION_UNAVAILABLE", "统一认证自动化服务未启用");
+  const attemptId = requireString(body.attemptId, "attemptId", 80);
+  const code = requireString(body.code, "code", 6);
+  return ok(await env.CAS_AUTOMATION.submitSms(user.id, attemptId, code));
 }
 
 export async function getCredentialStatus(env: AppEnv, request: Request): Promise<Response> {

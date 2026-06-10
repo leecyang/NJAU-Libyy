@@ -19,7 +19,7 @@
         <div class="setup-intro">
           <p class="eyebrow">WELCOME TO NJAU LIBYY</p>
           <h1>三步完成预约助手配置</h1>
-          <p>本站不会保存或回显你粘贴的官方 Token。完成配置后，研讨室查询、预约和小队功能才会开放。</p>
+          <p>统一认证密码仅加密保存在服务端，不会回显。完成配置后，研讨室查询、预约和小队功能才会开放。</p>
         </div>
         <ol class="stepper" aria-label="配置步骤">
           <li data-step-indicator="1"><strong>01</strong><span>邮箱账号</span></li>
@@ -54,19 +54,15 @@
             <p class="step-complete hidden" data-step-complete="1">已登录本站账号</p>
           </article>
           <article class="card setup-card" data-step-card="2">
-            <p class="eyebrow">STEP 02</p><h2>从官方站点取得 Token</h2>
-            <p class="muted">登录官方研讨室系统后，按下方路径找到 <code>reflushToken</code>。请勿向其他人发送该值。</p>
-            <a class="button soft button-link" href="https://libyy.njau.edu.cn/" target="_blank" rel="noreferrer">打开官方站点</a>
-            <div class="devtools-demo" aria-label="开发者工具本地存储路径示意">
-              <div class="demo-tabs"><span>元素</span><span class="active">应用</span><span>网络</span></div>
-              <div class="demo-body"><div><strong>存储</strong><span>本地存储空间</span><span>https://libyy.njau.edu.cn</span></div><div><strong>键</strong><code>reflushToken</code><small>双击右侧值并复制</small></div></div>
-            </div>
+            <p class="eyebrow">STEP 02</p><h2>准备统一认证账号</h2>
+            <p class="muted">准备南京农业大学统一认证学号和密码。服务端会使用独立浏览器环境完成登录。</p>
           </article>
           <article class="card setup-card" data-step-card="3">
-            <p class="eyebrow">STEP 03</p><h2>安全绑定官方凭证</h2>
-            <p class="muted">粘贴后立即完成官方身份校验。页面不会保存或再次显示 Token。</p>
+            <p class="eyebrow">STEP 03</p><h2>连接图书馆系统</h2>
+            <p class="muted">首次登录可能需要输入发送到绑定手机的短信验证码。</p>
             <form id="setup-bind-form" class="form">
-              <label>reflushToken<textarea name="reflushToken" rows="7" autocomplete="off" required></textarea></label>
+              <label>学号<input name="studentId" autocomplete="username" required /></label>
+              <label>统一认证密码<input name="password" type="password" autocomplete="current-password" required /></label>
               <button class="button primary" type="submit">完成配置并进入主页</button>
             </form>
           </article>
@@ -96,7 +92,7 @@
         <section class="page" data-page-view="overview">
           <div class="intro-grid">
             <article class="card welcome-card"><p class="eyebrow">账号状态</p><h2 id="welcome-title">欢迎回来</h2><p id="credential-hint"></p><div id="account-detail"></div><button class="button primary" data-go="rooms" type="button">查看研讨室</button></article>
-            <article class="card"><h3>重新绑定官方凭证</h3><form id="bind-form" class="form compact-form"><label>reflushToken<textarea name="reflushToken" rows="4" autocomplete="off" required></textarea></label><div class="button-row"><button class="button soft" type="submit">绑定</button><button id="delete-account" class="button danger" type="button">注销账号</button></div></form></article>
+            <article class="card"><h3>更新统一认证账号</h3><form id="bind-form" class="form compact-form"><label>学号<input name="studentId" autocomplete="username" required /></label><label>统一认证密码<input name="password" type="password" autocomplete="current-password" required /></label><div class="button-row"><button class="button soft" type="submit">开始认证</button><button id="delete-account" class="button danger" type="button">注销账号</button></div></form></article>
           </div>
           <div class="quick-grid section-block"><button class="quick-card" data-go="rooms"><strong>查找房间</strong><span>查看连续空闲时段并预约</span></button><button class="quick-card" data-go="teams"><strong>我的小队</strong><span>邀请成员并管理固定队伍</span></button><button class="quick-card" data-go="reservations"><strong>预约历史</strong><span>自动同步订单、取消或签到签退</span></button></div>
           <div class="two-column section-block">

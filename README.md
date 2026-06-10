@@ -6,7 +6,7 @@
 
 - `app`：Node 22 服务，托管 `apps/web/dist` 静态前端和 `/api/v1/*` API。
 - `tailscale`：官方 `tailscale/tailscale` 镜像，接收 tailnet 中的校园网路由。
-- Tailscale 默认启动参数为 `--accept-routes --exit-node=100.87.36.34 --exit-node-allow-lan-access`，可通过 `.env` 中的 `TS_EXTRA_ARGS` 覆盖。
+- Tailscale 默认启动参数为 `--reset --accept-routes`，启动时清理旧 prefs 后只接收 tailnet 中已批准的校园网路由，避免把 app 全部出站流量强制导到某个 exit node。可通过 `.env` 中的 `TS_EXTRA_ARGS` 覆盖。
 - `SQLite`：默认数据文件 `/data/njau-libyy.sqlite`，由 Compose volume 持久化。
 - `scheduler`：Node 服务内每分钟执行自动预约、签到、签退、邮件 outbox 和清理任务。
 - `SMTP`：Node TLS 直连阿里企业邮。
@@ -45,11 +45,18 @@ Copy-Item .env.example .env
 - `TS_AUTHKEY`
 - `APP_BASE_URL`
 - `LIBYY_APP_SECRET`
+- `CAS_CREDENTIAL_ENCRYPTION_KEY`（独立的 32 字节 base64url 密钥）
 - `SMTP_PASSWORD`
 
 `TOKEN_ENCRYPTION_KEY`、`SESSION_SECRET`、`PASSWORD_HASH_SECRET` 可留空，Node 运行时会使用内置兜底值启动。生产环境仍建议设置为稳定随机值，并在后续升级和数据迁移时保持不变。
 
-3. 确认 Tailscale tailnet 中已有能访问校园网的 subnet router，并在 Tailscale 管理端批准对应 route。
+可用以下命令生成独立的 CAS 密码加密密钥：
+
+```powershell
+[Convert]::ToBase64String([Security.Cryptography.RandomNumberGenerator]::GetBytes(32)).TrimEnd('=').Replace('+','-').Replace('/','_')
+```
+
+3. 确认 Tailscale tailnet 中已有能访问校园网的 subnet router，并在 Tailscale 管理端批准对应 route。不要把普通路由器节点配置成 `--exit-node`，除非它已经确认能稳定转发容器的全部公网出站流量。
 
 4. 启动：
 
@@ -181,9 +188,12 @@ journalctl -u njau-libyy-update.service -f
 | 变量 | 说明 |
 | --- | --- |
 | `OFFICIAL_NETWORK_MODE` | 默认 `tailscale-direct`，官方接口从容器直连并走 Tailscale 路由 |
-| `TS_EXTRA_ARGS` | Tailscale 启动参数，默认使用 exit node `100.87.36.34` |
+| `TS_EXTRA_ARGS` | Tailscale 启动参数，默认 `--reset --accept-routes`；如需全流量出口才手动追加 `--exit-node=<节点 IP>` |
 | `APP_BIND_ADDR` | Compose 端口绑定地址，默认 `127.0.0.1`；公网直连 3000 时设为 `0.0.0.0` |
 | `LIBYY_API_BASE_URL` | 官方图书馆接口地址，默认 `https://libyy.njau.edu.cn` |
+| `CAS_CREDENTIAL_ENCRYPTION_KEY` | 加密统一认证密码的独立 32 字节 base64url 密钥，必须配置且不得与 token 密钥相同 |
+| `PLAYWRIGHT_PROFILE_DIR` | 每用户隔离的 Chromium profile 根目录，Compose 默认 `/data/playwright-profiles` |
+| `PLAYWRIGHT_MAX_CONCURRENCY` | 同时运行的统一认证浏览器数量，默认 `2` |
 | `SIGN_ROOM_SYSTEM_MAC_MAP` | 房间 id 到签到设备 `systemMac` 的 JSON 映射 |
 | `SQLITE_PATH` | 容器内 SQLite 文件路径，Compose 默认 `/data/njau-libyy.sqlite` |
 | `WEB_DIST_DIR` | React 构建产物目录，Compose 默认 `/app/apps/web/dist` |

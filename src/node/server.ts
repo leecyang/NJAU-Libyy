@@ -8,6 +8,7 @@ import { loadNodeEnv, nodePort } from "./env";
 import { applyMigrations } from "./migrations";
 import { openSqliteDatabase } from "./sqlite";
 import { serveStatic } from "./static";
+import { CasLoginManager } from "./cas-login";
 
 const root = process.cwd();
 const databasePath = process.env.SQLITE_PATH ?? "/data/njau-libyy.sqlite";
@@ -17,6 +18,9 @@ const migrationsDir = process.env.MIGRATIONS_DIR ?? path.join(root, "migrations"
 const db = openSqliteDatabase(databasePath);
 applyMigrations(db, migrationsDir);
 const env = loadNodeEnv(db);
+const casLoginManager = new CasLoginManager(env);
+env.CAS_AUTOMATION = casLoginManager;
+await casLoginManager.initialize();
 
 let schedulerRunning = false;
 
@@ -72,7 +76,7 @@ const server = http.createServer((request, reply) => {
         : await serveStatic(staticRoot, fetchRequest);
       await writeResponse(response, reply);
     } catch (error) {
-      await writeResponse(fail(error), reply);
+      await writeResponse(fail(error, { method: request.method, url: request.url }), reply);
     }
   })();
 });

@@ -1,12 +1,15 @@
 import type { AppDatabase } from "./db/types";
+import type { CasAutomationAdapter } from "./lib/cas-types";
 
 export type AppEnv = {
   DB: AppDatabase;
+  CAS_AUTOMATION?: CasAutomationAdapter;
   ASSETS?: { fetch(request: Request): Promise<Response> };
   LIBYY_APP_ID: string;
   LIBYY_API_BASE_URL: string;
   OFFICIAL_NETWORK_MODE?: "tailscale-direct" | "http-proxy";
   NJAU_PROXY_ENDPOINT?: string;
+  TS_EXTRA_ARGS?: string;
   APP_BASE_URL: string;
   ENVIRONMENT: string;
   APP_VERSION: string;
@@ -34,6 +37,7 @@ export type AppEnv = {
   LIBYY_APP_SECRET?: string;
   NJAU_PROXY_TOKEN?: string;
   TOKEN_ENCRYPTION_KEY: string;
+  CAS_CREDENTIAL_ENCRYPTION_KEY: string;
   SESSION_SECRET: string;
   PASSWORD_HASH_SECRET?: string;
   SMTP_PASSWORD?: string;
@@ -48,6 +52,9 @@ export type AppEnv = {
   SCHEDULER_SIGN_LIMIT?: string;
   SCHEDULER_SIGNOUT_LIMIT?: string;
   SCHEDULER_MAIL_LIMIT?: string;
+  PLAYWRIGHT_PROFILE_DIR?: string;
+  PLAYWRIGHT_MAX_CONCURRENCY?: string;
+  CAS_LOGIN_TIMEOUT_MS?: string;
 };
 
 export function flag(env: AppEnv, name: keyof AppEnv): boolean {

@@ -98,8 +98,8 @@ export function renderTemplate(template: string, payload: Record<string, unknown
       };
     case "OFFICIAL_REAUTH_REQUIRED":
       return {
-        subject: "NJAU Libyy 官方凭证需要重新绑定",
-        html: layout("凭证已失效", "<p>官方系统提示登录状态已经失效。请登录 NJAU Libyy，重新粘贴有效的 reflushToken。</p>"),
+        subject: "NJAU Libyy 统一认证需要确认",
+        html: layout("需要完成统一认证", "<p>系统正在自动恢复图书馆登录，但统一认证要求短信验证或更新密码。请登录 NJAU Libyy 完成验证。</p>"),
       };
     case "AUTO_RESERVATION_SUCCESS":
       return {

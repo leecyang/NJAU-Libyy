@@ -94,14 +94,15 @@ async function expireTeamInvitations(env: AppEnv, now: number): Promise<void> {
 async function refreshDueCredentials(env: AppEnv, now: number, limit = 3): Promise<void> {
   const cutoff = now - 90 * 60 * 1000;
   const rows = await env.DB.prepare(
-    `SELECT user_id FROM official_credentials
-      WHERE credential_status IN ('ACTIVE', 'REFRESH_FAILED')
-        AND COALESCE(last_refresh_success_at, 0) < ?
+    `SELECT user_id, credential_status FROM official_credentials
+      WHERE (credential_status IN ('ACTIVE', 'REFRESH_FAILED') AND COALESCE(last_refresh_success_at, 0) < ?)
+         OR credential_status = 'REAUTH_REQUIRED'
       LIMIT ${limit}`,
-  ).bind(cutoff).all<{ user_id: string }>();
+  ).bind(cutoff).all<{ user_id: string; credential_status: string }>();
   for (const row of rows.results) {
     try {
-      await refreshCredential(env, row.user_id, "SCHEDULED");
+      if (row.credential_status === "REAUTH_REQUIRED") await env.CAS_AUTOMATION?.startRecovery(row.user_id);
+      else await refreshCredential(env, row.user_id, "SCHEDULED");
     } catch (error) {
       console.error(JSON.stringify({ level: "error", event: "credential_refresh_failed", userId: row.user_id, code: error instanceof HttpError ? error.code : "CREDENTIAL_REFRESH_FAILED" }));
     }
@@ -283,6 +284,12 @@ async function submitReadyReservationTasks(env: AppEnv, now: number, limit = 2):
       if (owner) await queueMail(env, owner.email, "AUTO_RESERVATION_SUCCESS", { date: task.target_date, startTime: task.start_time, endTime: task.end_time, roomName: submitted.room.name });
     } catch (error) {
       const message = error instanceof HttpError ? error.message : "自动预约提交失败";
+      if (error instanceof HttpError && error.code === "CREDENTIAL_RECOVERY_IN_PROGRESS") {
+        await env.DB.prepare(
+          "UPDATE reservation_tasks SET status = 'READY', failure_code = NULL, failure_message = NULL, updated_at = ? WHERE id = ? AND status = 'SUBMITTING'",
+        ).bind(Date.now(), task.id).run();
+        continue;
+      }
       await env.DB.prepare(
         "UPDATE reservation_tasks SET status = 'FAILED', failure_code = ?, failure_message = ?, updated_at = ? WHERE id = ? AND status = 'SUBMITTING'",
       ).bind(error instanceof HttpError ? error.code : "AUTO_SUBMISSION_FAILED", message, Date.now(), task.id).run();

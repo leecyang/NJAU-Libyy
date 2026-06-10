@@ -57,6 +57,15 @@ function usableSecret(value: string | undefined): boolean {
   ].includes(value);
 }
 
+function validEncryptionKey(value: string | undefined): value is string {
+  if (!value || !usableSecret(value)) return false;
+  try {
+    return Buffer.from(value, "base64url").byteLength === 32;
+  } catch {
+    return false;
+  }
+}
+
 function loadFallbackSecrets(): Pick<AppEnv, "TOKEN_ENCRYPTION_KEY" | "SESSION_SECRET" | "PASSWORD_HASH_SECRET"> {
   const secrets = { ...fallbackSecrets };
   for (const name of Object.keys(secrets) as Array<keyof typeof secrets>) {
@@ -71,11 +80,19 @@ function loadFallbackSecrets(): Pick<AppEnv, "TOKEN_ENCRYPTION_KEY" | "SESSION_S
 
 export function loadNodeEnv(db: AppDatabase): AppEnv {
   loadDotenv();
+  const secrets = loadFallbackSecrets();
+  if (!validEncryptionKey(process.env.CAS_CREDENTIAL_ENCRYPTION_KEY)) {
+    throw new Error("CAS_CREDENTIAL_ENCRYPTION_KEY must be configured with a base64url-encoded 32-byte key");
+  }
+  if (process.env.CAS_CREDENTIAL_ENCRYPTION_KEY === secrets.TOKEN_ENCRYPTION_KEY) {
+    throw new Error("CAS_CREDENTIAL_ENCRYPTION_KEY must be different from TOKEN_ENCRYPTION_KEY");
+  }
   return {
     DB: db,
     ...defaults,
     ...process.env,
-    ...loadFallbackSecrets(),
+    ...secrets,
+    CAS_CREDENTIAL_ENCRYPTION_KEY: process.env.CAS_CREDENTIAL_ENCRYPTION_KEY,
   } as AppEnv;
 }
 

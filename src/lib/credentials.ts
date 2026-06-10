@@ -60,7 +60,12 @@ async function persistTokens(
   ).bind(crypto.randomUUID(), userId, accessCiphertext, reflushCiphertext, expires, now, now, now, now, now).run();
 }
 
-export async function bindCredential(env: AppEnv, user: User, submittedReflushToken: string): Promise<void> {
+export async function bindCredentialFromToken(
+  env: AppEnv,
+  user: User,
+  submittedReflushToken: string,
+  expectedStudentId: string,
+): Promise<void> {
   const now = Date.now();
   const refreshed = await refreshOfficialToken(env, submittedReflushToken);
   const identity = await fetchOfficialIdentity(env, refreshed.accessToken);
@@ -81,6 +86,9 @@ export async function bindCredential(env: AppEnv, user: User, submittedReflushTo
       metadata: { studentIdConflict: true },
     });
     throw new HttpError(409, "STUDENT_ID_ALREADY_BOUND", "该官方身份已绑定其他账号，新凭证已安全归还原绑定账号");
+  }
+  if (identity.userId !== expectedStudentId) {
+    throw new HttpError(409, "CAS_IDENTITY_MISMATCH", "统一认证账号与官方身份不一致");
   }
 
   await env.DB.batch([
@@ -145,7 +153,29 @@ export async function credentialStatus(env: AppEnv, userId: string): Promise<Rec
             last_error_code, last_error_message
        FROM official_credentials WHERE user_id = ?`,
   ).bind(userId).first<Record<string, unknown>>();
-  return credential ?? { credential_status: "UNBOUND" };
+  const loginCredential = await env.DB.prepare(
+    "SELECT student_id, last_login_at FROM official_login_credentials WHERE user_id = ?",
+  ).bind(userId).first<{ student_id: string; last_login_at: number | null }>();
+  const attempt = await env.DB.prepare(
+    `SELECT id, purpose, status, progress, sms_expires_at, error_code, error_message
+       FROM official_login_attempts WHERE user_id = ?
+      ORDER BY created_at DESC LIMIT 1`,
+  ).bind(userId).first<Record<string, unknown>>();
+  return {
+    ...(credential ?? { credential_status: "UNBOUND" }),
+    setup_required: !loginCredential,
+    login_student_id: loginCredential?.student_id ?? null,
+    last_cas_login_at: loginCredential?.last_login_at ?? null,
+    login_attempt: attempt ? {
+      attemptId: attempt.id,
+      purpose: attempt.purpose,
+      status: attempt.status,
+      progress: attempt.progress,
+      smsExpiresAt: attempt.sms_expires_at,
+      errorCode: attempt.error_code,
+      errorMessage: attempt.error_message,
+    } : null,
+  };
 }
 
 export async function getAccessToken(env: AppEnv, userId: string): Promise<string> {
@@ -155,12 +185,17 @@ export async function getAccessToken(env: AppEnv, userId: string): Promise<strin
             credential_status, refresh_lock_until
        FROM official_credentials WHERE user_id = ?`,
   ).bind(userId).first<Credential>();
-  if (!credential) throw new HttpError(409, "CREDENTIAL_UNBOUND", "请先绑定官方凭证");
-  if (credential.credential_status !== "ACTIVE") throw new HttpError(409, "CREDENTIAL_NOT_ACTIVE", "官方凭证当前不可用，请重新绑定");
+  if (!credential) throw new HttpError(409, "CREDENTIAL_UNBOUND", "请先保存学号和统一认证密码");
+  if (credential.credential_status === "REAUTH_REQUIRED") {
+    await env.CAS_AUTOMATION?.startRecovery(userId);
+    throw new HttpError(409, "CREDENTIAL_RECOVERY_IN_PROGRESS", "官方登录正在自动恢复");
+  }
+  if (credential.credential_status !== "ACTIVE") throw new HttpError(409, "CREDENTIAL_NOT_ACTIVE", "官方凭证当前不可用");
 
   const expiresAt = credential.access_token_obtained_at + credential.access_token_expires_seconds * 1000;
   if (expiresAt - Date.now() < 15 * 60 * 1000) {
-    await refreshCredential(env, userId, "BUSINESS_PRECHECK");
+    const refreshed = await refreshCredential(env, userId, "BUSINESS_PRECHECK");
+    if (!refreshed) throw new HttpError(409, "CREDENTIAL_RECOVERY_IN_PROGRESS", "官方登录正在自动恢复");
     return getAccessToken(env, userId);
   }
   return decryptSecret(credential.access_token_ciphertext, env.TOKEN_ENCRYPTION_KEY);
@@ -203,7 +238,13 @@ export async function refreshCredential(
   } catch (error) {
     const reauth = error instanceof HttpError && error.code === "OFFICIAL_REAUTH_REQUIRED";
     if (reauth) {
-      await env.DB.prepare("DELETE FROM official_credentials WHERE user_id = ? AND refresh_lock_until = ?").bind(userId, lockUntil).run();
+      await env.DB.prepare(
+        `UPDATE official_credentials
+            SET credential_status = 'REAUTH_REQUIRED', refresh_lock_until = NULL,
+                refresh_failure_count = refresh_failure_count + 1,
+                last_error_code = 2003, last_error_message = ?, updated_at = ?
+          WHERE user_id = ? AND refresh_lock_until = ?`,
+      ).bind("官方登录已失效，正在自动恢复", Date.now(), userId, lockUntil).run();
     } else {
       await env.DB.prepare(
         `UPDATE official_credentials
@@ -224,7 +265,8 @@ export async function refreshCredential(
     });
     if (reauth) {
       const user = await env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(userId).first<{ email: string }>();
-      if (user) await queueMail(env, user.email, "OFFICIAL_REAUTH_REQUIRED", {});
+      const attempt = await env.CAS_AUTOMATION?.startRecovery(userId);
+      if (!attempt && user) await queueMail(env, user.email, "OFFICIAL_REAUTH_REQUIRED", {});
     }
     return false;
   }

@@ -21,12 +21,19 @@ export function ok(data: unknown = {}): Response {
   return json({ ok: true, data });
 }
 
-export function fail(error: unknown): Response {
+export function fail(error: unknown, context: Record<string, unknown> = {}): Response {
   if (error instanceof HttpError) {
     return json({ ok: false, error: { code: error.code, message: error.message } }, error.status);
   }
 
-  console.error(JSON.stringify({ level: "error", event: "unhandled_error", message: "Internal error" }));
+  console.error(JSON.stringify({
+    level: "error",
+    event: "unhandled_error",
+    message: error instanceof Error ? error.message : "Internal error",
+    name: error instanceof Error ? error.name : typeof error,
+    stack: error instanceof Error ? error.stack : undefined,
+    ...context,
+  }));
   return json({ ok: false, error: { code: "INTERNAL_ERROR", message: "服务暂时不可用" } }, 500);
 }
 

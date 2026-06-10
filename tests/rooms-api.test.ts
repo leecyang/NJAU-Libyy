@@ -20,7 +20,7 @@ vi.mock("../src/lib/auth", () => ({
 }));
 
 vi.mock("../src/lib/credentials", () => ({
-  bindCredential: vi.fn(),
+  bindCredentialFromToken: vi.fn(),
   credentialStatus: vi.fn(async () => ({ credential_status: "ACTIVE" })),
   getAccessToken: vi.fn(async () => "access-token"),
   getOfficialReservationProfile: vi.fn(),

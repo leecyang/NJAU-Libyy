@@ -36,6 +36,17 @@ type Session = {
   };
   credential: {
     credential_status: string;
+    setup_required?: boolean;
+    login_student_id?: string | null;
+    login_attempt?: {
+      attemptId: string;
+      purpose: "INITIAL_BIND" | "REBIND" | "AUTO_RECOVERY";
+      status: "QUEUED" | "RUNNING" | "SMS_REQUIRED" | "SUCCEEDED" | "FAILED" | "EXPIRED";
+      progress: string;
+      smsExpiresAt: number | null;
+      errorCode: string | null;
+      errorMessage: string | null;
+    } | null;
   };
 };
 type AvailabilityRange = { startTime: string; endTime: string };
@@ -779,6 +790,15 @@ function CredentialLockPage({
   onLogout: () => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const attempt = session.credential.login_attempt;
+  const waiting = attempt?.status === "QUEUED" || attempt?.status === "RUNNING" || attempt?.status === "SMS_REQUIRED";
+
+  useEffect(() => {
+    if (!waiting) return;
+    const timer = window.setInterval(() => void refresh(), 1500);
+    return () => window.clearInterval(timer);
+  }, [waiting, attempt?.attemptId, refresh]);
+
   return (
     <div className="credential-lock-page">
       <button className="icon-button credential-lock-logout" onClick={onLogout} aria-label="退出登录" type="button">
@@ -788,29 +808,50 @@ function CredentialLockPage({
         <div className="credential-lock-mark"><KeyRound size={22} /></div>
         <div className="credential-intro">
           <span className="status-pill">{session.credential.credential_status}</span>
-          <h1>需要重新绑定官方凭证</h1>
-          <p>官方登录凭证未绑定或已经失效。当前工作台已锁定，请粘贴新的 reflushToken，完成后系统会重新同步身份并返回房间页面。</p>
+          <h1>连接校园统一认证</h1>
+          <p>保存学号和统一认证密码后，服务端会在隔离的浏览器环境中登录图书馆系统，并在官方会话失效时自动恢复。</p>
         </div>
-        <form className="credential-form" onSubmit={async (event) => {
+        {attempt?.status === "SMS_REQUIRED" ? <form className="credential-form" onSubmit={async (event) => {
           event.preventDefault();
           const form = event.currentTarget;
           const data = formData(form);
           setBusy(true);
           try {
-            await api("/api/v1/credentials/bind", { method: "POST", body: JSON.stringify(data) });
-            toast("官方身份绑定成功");
+            await api("/api/v1/credentials/sms", { method: "POST", body: JSON.stringify({ attemptId: attempt.attemptId, code: data.code }) });
+            toast("验证码已提交");
             await refresh();
             form.reset();
-            navigate("/rooms");
           } catch (error) {
-            toast(error instanceof Error ? error.message : "绑定失败", true);
+            toast(error instanceof Error ? error.message : "验证码提交失败", true);
           } finally {
             setBusy(false);
           }
         }}>
-          <Field label="reflushToken"><textarea name="reflushToken" required rows={8} autoFocus /></Field>
-          <Button busy={busy}>保存并解锁工作台</Button>
-        </form>
+          <div className="credential-progress"><Loader2 className="spin" size={18} /><span>{attempt.progress}</span></div>
+          <Field label="短信验证码"><input name="code" required inputMode="numeric" pattern="[0-9]{6}" maxLength={6} autoComplete="one-time-code" autoFocus /></Field>
+          <Button busy={busy}>提交验证码</Button>
+        </form> : waiting ? <div className="credential-progress"><Loader2 className="spin" size={20} /><span>{attempt?.progress ?? "正在准备统一认证"}</span></div> : <form className="credential-form" onSubmit={async (event) => {
+          event.preventDefault();
+          const form = event.currentTarget;
+          const data = formData(form);
+          setBusy(true);
+          try {
+            const endpoint = session.credential.login_student_id ? "/api/v1/credentials/rebind" : "/api/v1/credentials/bind";
+            await api(endpoint, { method: "POST", body: JSON.stringify(data) });
+            toast("已启动统一认证");
+            await refresh();
+            form.reset();
+          } catch (error) {
+            toast(error instanceof Error ? error.message : "统一认证启动失败", true);
+          } finally {
+            setBusy(false);
+          }
+        }}>
+          {attempt?.errorMessage ? <div className="credential-error">{attempt.errorMessage}</div> : null}
+          <Field label="学号"><input name="studentId" required maxLength={32} defaultValue={session.credential.login_student_id ?? session.user.studentId ?? ""} autoComplete="username" autoFocus /></Field>
+          <Field label="统一认证密码"><input name="password" type="password" required maxLength={128} autoComplete="current-password" /></Field>
+          <Button busy={busy}>保存并登录图书馆系统</Button>
+        </form>}
       </section>
     </div>
   );
@@ -1456,7 +1497,7 @@ export function App() {
 
   useEffect(() => {
     const onCredentialInvalidated = () => {
-      setSession((current) => current ? { ...current, credential: { credential_status: "UNBOUND" } } : current);
+      setSession((current) => current ? { ...current, credential: { ...current.credential, credential_status: "REAUTH_REQUIRED" } } : current);
       setRoute(routeFromPath("/credentials"));
     };
     window.addEventListener("credential-invalidated", onCredentialInvalidated);
@@ -1467,7 +1508,7 @@ export function App() {
 
   useEffect(() => {
     if (!session) return;
-    const needsCredential = session.credential.credential_status !== "ACTIVE";
+    const needsCredential = session.credential.credential_status !== "ACTIVE" || session.credential.setup_required === true;
     if (needsCredential && window.location.pathname !== "/credentials") {
       window.history.replaceState(null, "", "/credentials");
       setRoute(routeFromPath("/credentials"));
@@ -1485,7 +1526,7 @@ export function App() {
 
   if (!session) return <><AuthPanel onReady={refreshMe} toast={toast} /><Toast message={message} error={isError} /></>;
 
-  if (session.credential.credential_status !== "ACTIVE") {
+  if (session.credential.credential_status !== "ACTIVE" || session.credential.setup_required === true) {
     return (
       <>
         <CredentialLockPage session={session} refresh={refreshMe} toast={toast} navigate={navigate} onLogout={logout} />

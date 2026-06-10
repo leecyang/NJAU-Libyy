@@ -5,7 +5,8 @@ services:
     environment:
       TS_AUTHKEY: "${TS_AUTHKEY:-}"
       TS_STATE_DIR: /var/lib/tailscale
-      TS_EXTRA_ARGS: "${TS_EXTRA_ARGS:---accept-routes --exit-node=100.87.36.34 --exit-node-allow-lan-access}"
+      TS_USERSPACE: "false"
+      TS_EXTRA_ARGS: "${TS_EXTRA_ARGS:---reset --accept-routes}"
     volumes:
       - tailscale-state:/var/lib/tailscale
     devices:
@@ -20,6 +21,8 @@ services:
   app:
     image: "njau-libyy-app:${APP_IMAGE_TAG:-latest}"
     network_mode: "service:tailscale"
+    init: true
+    shm_size: "1gb"
     env_file:
       - .env
     environment:
@@ -29,6 +32,7 @@ services:
       WEB_DIST_DIR: /app/apps/web/dist
       MIGRATIONS_DIR: /app/migrations
       OFFICIAL_NETWORK_MODE: tailscale-direct
+      PLAYWRIGHT_PROFILE_DIR: /data/playwright-profiles
     volumes:
       - app-data:/data
     depends_on:

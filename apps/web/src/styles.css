@@ -384,11 +384,17 @@ input:focus, textarea:focus, select:focus { border-color: var(--ink); }
   display: grid;
   gap: 16px;
 }
-.credential-form textarea {
-  min-height: 180px;
-  font-family: "JetBrains Mono", ui-monospace, monospace;
-  font-size: 13px;
-  line-height: 1.5;
+.credential-progress, .credential-error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--surface-card);
+}
+.credential-error {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, white);
 }
 .three-day-head {
   display: flex;
