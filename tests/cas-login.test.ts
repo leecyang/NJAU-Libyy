@@ -1,6 +1,6 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { casProfilePath } from "../src/node/cas-login";
+import { casProfilePath, isAbortedNavigation } from "../src/node/cas-login";
 
 describe("CAS browser profile isolation", () => {
   it("assigns a distinct persistent directory to each user", () => {
@@ -15,5 +15,17 @@ describe("CAS browser profile isolation", () => {
 
   it("rejects values that could escape the profile root", () => {
     expect(() => casProfilePath("data/playwright-profiles", "../../other-user")).toThrow("Invalid user id");
+  });
+});
+
+describe("CAS navigation handling", () => {
+  it("treats redirect-driven aborted navigations as recoverable", () => {
+    expect(isAbortedNavigation(new Error("page.goto: net::ERR_ABORTED at https://libyy.njau.edu.cn/student/studentIndex"))).toBe(true);
+    expect(isAbortedNavigation(new Error("Navigation interrupted by another one"))).toBe(true);
+  });
+
+  it("does not hide ordinary navigation failures", () => {
+    expect(isAbortedNavigation(new Error("page.goto: net::ERR_NAME_NOT_RESOLVED"))).toBe(false);
+    expect(isAbortedNavigation(new Error("page.goto: Timeout 60000ms exceeded"))).toBe(false);
   });
 });

@@ -30,10 +30,14 @@ type ActiveAttempt = {
   smsResolver?: (code: string) => void;
 };
 
+type CasEntryState = "PASSWORD" | "SMS" | "AUTHENTICATED";
+
 const ACTIVE_STATUSES = "('QUEUED', 'RUNNING', 'SMS_REQUIRED')";
 const ATTEMPT_TTL_MS = 10 * 60_000;
 const SMS_TTL_MS = 5 * 60_000;
 const SMS_INPUT_SELECTOR = '#dynamicCode, input[name="dynamicCode"], input[placeholder*="短信验证码"], #smsCode, #verifyCode, input[name="smsCode"]';
+const SMS_INPUT_TIMEOUT_MS = 15_000;
+const SMS_ACTION_TIMEOUT_MS = 5_000;
 
 class CasAutomationError extends Error {
   constructor(readonly code: string, message: string, readonly internalDetail?: string) {
@@ -67,6 +71,11 @@ export function casProfilePath(root: string, userId: string): string {
 
 async function visible(page: Page, selector: string): Promise<boolean> {
   return page.locator(selector).first().isVisible().catch(() => false);
+}
+
+export function isAbortedNavigation(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.includes("net::ERR_ABORTED") || message.includes("Navigation interrupted by another one");
 }
 
 export class CasLoginManager implements CasAutomationAdapter {
@@ -253,18 +262,27 @@ export class CasLoginManager implements CasAutomationAdapter {
       this.active.set(attemptId, { context });
       const page = context.pages()[0] ?? await context.newPage();
       stage = "CLEAR_LIBYY_STATE";
-      await this.clearLibyyState(context, page);
+      await this.clearLibyyState(context);
       await this.progress(attemptId, "RUNNING", "正在打开南京农业大学统一认证");
       stage = "OPEN_CAS";
-      await page.goto(new URL("/student/studentIndex", this.env.LIBYY_API_BASE_URL).toString(), {
-        waitUntil: "domcontentloaded",
-        timeout: this.loginTimeout(),
-      });
-      await this.waitForAuthserver(page);
-      stage = "SUBMIT_PASSWORD";
-      await this.submitPassword(page, attempt.student_id, password);
-      stage = "WAIT_AFTER_PASSWORD";
-      await this.waitAfterPassword(attempt, page);
+      try {
+        await page.goto(new URL("/student/studentIndex", this.env.LIBYY_API_BASE_URL).toString(), {
+          waitUntil: "domcontentloaded",
+          timeout: 60_000,
+        });
+      } catch (error) {
+        if (!isAbortedNavigation(error)) throw error;
+      }
+      const entryState = await this.waitForCasEntry(page);
+      if (entryState === "PASSWORD") {
+        stage = "SUBMIT_PASSWORD";
+        await this.submitPassword(page, attempt.student_id, password);
+        stage = "WAIT_AFTER_PASSWORD";
+        await this.waitAfterPassword(attempt, page);
+      } else if (entryState === "SMS") {
+        stage = "WAIT_AFTER_PASSWORD";
+        await this.handleSms(attempt, page);
+      }
       stage = "READ_TOKEN";
       const reflushToken = await this.waitForToken(page);
       const user = await this.env.DB.prepare(
@@ -317,22 +335,45 @@ export class CasLoginManager implements CasAutomationAdapter {
     }
   }
 
-  private async clearLibyyState(context: BrowserContext, page: Page): Promise<void> {
+  private async clearLibyyState(context: BrowserContext): Promise<void> {
     const cookies = await context.cookies();
     await context.clearCookies();
     const preserved = cookies.filter((cookie) => !cookie.domain.endsWith("libyy.njau.edu.cn"));
     if (preserved.length) await context.addCookies(preserved);
-    await page.goto(new URL("/", this.env.LIBYY_API_BASE_URL).toString(), { waitUntil: "domcontentloaded", timeout: 30_000 });
-    await page.evaluate(() => localStorage.clear());
+    const cleanupPage = await context.newPage();
+    try {
+      await cleanupPage.goto(new URL("/favicon.ico", this.env.LIBYY_API_BASE_URL).toString(), {
+        waitUntil: "domcontentloaded",
+        timeout: 15_000,
+      });
+      await cleanupPage.evaluate(() => {
+        localStorage.clear();
+        sessionStorage.clear();
+      });
+    } catch (error) {
+      throw new CasAutomationError(
+        "CAS_STORAGE_RESET_FAILED",
+        "清理图书馆旧登录状态失败，请稍后重试",
+        error instanceof Error ? error.message : String(error),
+      );
+    } finally {
+      await cleanupPage.close().catch(() => undefined);
+    }
   }
 
-  private async waitForAuthserver(page: Page): Promise<void> {
+  private async waitForCasEntry(page: Page): Promise<CasEntryState> {
     const deadline = Date.now() + 60_000;
     while (Date.now() < deadline) {
-      if (page.url().includes("authserver.njau.edu.cn") && await page.locator("#pwdEncryptSalt").count()) return;
-      await page.waitForTimeout(500);
+      const url = page.url();
+      if (url.includes("/student/studentIndex")) {
+        const token = await page.evaluate(() => localStorage.getItem("reflushToken")).catch(() => null);
+        if (token) return "AUTHENTICATED";
+      }
+      if (await visible(page, SMS_INPUT_SELECTOR)) return "SMS";
+      if (url.includes("authserver.njau.edu.cn") && await page.locator("#pwdEncryptSalt").count()) return "PASSWORD";
+      await page.waitForTimeout(200);
     }
-    throw new CasAutomationError("CAS_LOGIN_PAGE_NOT_FOUND", "未能进入统一认证登录页");
+    throw new CasAutomationError("CAS_LOGIN_PAGE_NOT_FOUND", "未能进入统一认证登录页或图书馆主页");
   }
 
   private async submitPassword(page: Page, studentId: string, password: string): Promise<void> {
@@ -357,11 +398,16 @@ export class CasLoginManager implements CasAutomationAdapter {
   }
 
   private async waitAfterPassword(attempt: AttemptRow, page: Page): Promise<void> {
-    const deadline = Date.now() + 45_000;
+    const deadline = Date.now() + 60_000;
     while (Date.now() < deadline) {
       const url = page.url();
       if (url.includes("/student/studentIndex")) return;
-      if (url.includes("reAuthCheck") || url.includes("reAuthLoginView") || await visible(page, SMS_INPUT_SELECTOR)) {
+      if (await visible(page, SMS_INPUT_SELECTOR)) {
+        await this.handleSms(attempt, page);
+        return;
+      }
+      if (url.includes("reAuthCheck") || url.includes("reAuthLoginView")) {
+        await this.waitForSmsInput(page);
         await this.handleSms(attempt, page);
         return;
       }
@@ -372,17 +418,35 @@ export class CasLoginManager implements CasAutomationAdapter {
         const errorText = (await page.locator("#showErrorTip").textContent().catch(() => ""))?.trim();
         if (errorText) throw new CasAutomationError("CAS_INVALID_CREDENTIALS", "学号或统一认证密码错误");
       }
-      await page.waitForTimeout(500);
+      await page.waitForTimeout(200);
     }
     throw new CasAutomationError("CAS_LOGIN_TIMEOUT", "统一认证登录超时");
   }
 
+  private async waitForSmsInput(page: Page): Promise<void> {
+    try {
+      await page.locator(SMS_INPUT_SELECTOR).filter({ visible: true }).first().waitFor({
+        state: "visible",
+        timeout: SMS_INPUT_TIMEOUT_MS,
+      });
+    } catch (error) {
+      throw new CasAutomationError(
+        "CAS_SMS_FORM_NOT_FOUND",
+        "统一认证已进入二次验证，但短信验证码输入框未加载，请稍后重试",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  private smsInput(page: Page) {
+    return page.locator(SMS_INPUT_SELECTOR).filter({ visible: true }).first();
+  }
+
   private async handleSms(attempt: AttemptRow, page: Page): Promise<void> {
-    const input = page.locator(SMS_INPUT_SELECTOR).first();
-    if (!await input.isVisible().catch(() => false)) throw new CasAutomationError("CAS_SMS_FORM_NOT_FOUND", "未找到短信验证码输入框");
+    await this.waitForSmsInput(page);
     const send = page.locator("#getDynamicCode");
     if (await send.isVisible().catch(() => false)) {
-      await send.click();
+      await send.click({ timeout: SMS_ACTION_TIMEOUT_MS });
       await page.waitForFunction(() => {
         const button = document.querySelector<HTMLButtonElement>("#getDynamicCode");
         const uuid = document.querySelector<HTMLInputElement>("#uuid");
@@ -390,6 +454,7 @@ export class CasLoginManager implements CasAutomationAdapter {
       }, undefined, { timeout: 15_000 }).catch(() => undefined);
     }
     const smsExpiresAt = Date.now() + SMS_TTL_MS;
+    let codePromise = this.waitForSmsCode(attempt.id, smsExpiresAt);
     await this.progress(attempt.id, "SMS_REQUIRED", "请输入发送到绑定手机的 6 位短信验证码", smsExpiresAt);
     if (attempt.purpose === "AUTO_RECOVERY") {
       const user = await this.env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(attempt.user_id).first<{ email: string }>();
@@ -397,20 +462,32 @@ export class CasLoginManager implements CasAutomationAdapter {
     }
 
     for (let index = 0; index < 3; index += 1) {
-      const code = await this.waitForSmsCode(attempt.id, smsExpiresAt);
-      await input.fill(code);
+      const code = await codePromise;
+      const input = this.smsInput(page);
+      try {
+        await input.fill(code, { timeout: SMS_ACTION_TIMEOUT_MS });
+      } catch (error) {
+        throw new CasAutomationError(
+          "CAS_SMS_INPUT_UNAVAILABLE",
+          "短信验证码输入框当前不可用，请重新发起认证",
+          error instanceof Error ? error.message : String(error),
+        );
+      }
       const submit = page.locator("button.auth_login_btn.submit_btn:visible").first();
-      if (await submit.isVisible().catch(() => false)) await submit.click();
-      else await input.press("Enter");
+      if (await submit.isVisible().catch(() => false)) await submit.click({ timeout: SMS_ACTION_TIMEOUT_MS });
+      else await input.press("Enter", { timeout: SMS_ACTION_TIMEOUT_MS });
       const responseDeadline = Date.now() + 10_000;
       while (Date.now() < responseDeadline) {
-        if (!page.url().includes("reAuthCheck") && !page.url().includes("reAuthLoginView") && !await input.isVisible().catch(() => false)) return;
+        if (!page.url().includes("reAuthCheck") && !page.url().includes("reAuthLoginView") && !await this.smsInput(page).isVisible().catch(() => false)) return;
         const currentError = (await page.locator("#showErrorTip, .error, .el-message").first().textContent().catch(() => ""))?.trim();
         if (currentError) break;
         await page.waitForTimeout(300);
       }
       const errorText = (await page.locator("#showErrorTip, .error, .el-message").first().textContent().catch(() => ""))?.trim();
-      if (index < 2) await this.progress(attempt.id, "SMS_REQUIRED", errorText || "短信验证码错误，请重新输入", smsExpiresAt);
+      if (index < 2) {
+        codePromise = this.waitForSmsCode(attempt.id, smsExpiresAt);
+        await this.progress(attempt.id, "SMS_REQUIRED", errorText || "短信验证码错误，请重新输入", smsExpiresAt);
+      }
     }
     throw new CasAutomationError("CAS_SMS_ATTEMPTS_EXCEEDED", "短信验证码尝试次数已用完");
   }
