@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError } from "../apps/web/src/api";
+import { api, ApiError, waitForGatewayJob } from "../apps/web/src/api";
 
 afterEach(() => {
   vi.restoreAllMocks();
@@ -38,5 +38,37 @@ describe("web api client", () => {
     await expect(api("/api/v1/rooms")).rejects.toMatchObject(new ApiError("OFFICIAL_TOKEN_INVALID", "凭证格式错误，请重新复制", 400));
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(fetchMock.mock.calls.some(([path]) => String(path).includes("credentials/clear"))).toBe(false);
+  });
+
+  it("polls gateway jobs until a result is available", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      ok: true,
+      data: {
+        jobId: "job-1",
+        kind: "ROOMS_REFRESH",
+        status: "SUCCEEDED",
+        result: { version: 2 },
+        error: null,
+        createdAt: 1,
+        startedAt: 2,
+        finishedAt: 3,
+        updatedAt: 3,
+      },
+    }))));
+    const pending = waitForGatewayJob<{ version: number }>({
+      jobId: "job-1",
+      kind: "ROOMS_REFRESH",
+      status: "QUEUED",
+      result: null,
+      error: null,
+      createdAt: 1,
+      startedAt: null,
+      finishedAt: null,
+      updatedAt: 1,
+    });
+    await vi.advanceTimersByTimeAsync(500);
+    await expect(pending).resolves.toEqual({ version: 2 });
+    vi.useRealTimers();
   });
 });

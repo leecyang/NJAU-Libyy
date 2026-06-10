@@ -15,7 +15,7 @@ import {
   Shield,
   UsersRound,
 } from "lucide-react";
-import { api, ApiError } from "./api";
+import { api, ApiError, type GatewayJob, waitForGatewayJob } from "./api";
 
 type Page = "rooms" | "tasks" | "teams" | "history" | "admin";
 type Route = {
@@ -33,6 +33,7 @@ type Session = {
     role: "USER" | "ADMIN";
     studentId: string | null;
     realName: string | null;
+    totalScore: number | null;
   };
   credential: {
     credential_status: string;
@@ -73,6 +74,13 @@ type RoomsResponse = {
   date?: string;
   dates?: Array<{ date: string; label?: string }>;
   rooms: Room[];
+  cache?: {
+    status: "FRESH" | "STALE" | "EXPIRED" | "MISS";
+    version: number;
+    refreshedAt: number | null;
+    refreshJobId: string | null;
+    error: { code: string; message: string | null } | null;
+  };
 };
 type TimeSelection = {
   date: string;
@@ -137,6 +145,7 @@ type RecentContact = {
   real_name?: string;
   lastUsedAt?: number;
   last_used_at?: number;
+  totalScore?: number;
 };
 
 function today(): string {
@@ -382,7 +391,7 @@ function TremorTracker({ data, label }: { data: TrackerBlock[]; label: string })
   return (
     <div className="tremor-tracker" role="img" aria-label={label}>
       {data.map((block) => (
-        <div className="tremor-tracker-block-shell" key={block.key} title={block.tooltip}>
+        <div className={`tremor-tracker-block-shell ${block.state}`} key={block.key} title={block.tooltip}>
           <div className={`tremor-tracker-block ${block.state}`} />
         </div>
       ))}
@@ -534,10 +543,12 @@ function ReservationGuestsPicker({
   selectedContactIds,
   contactQuery,
   contactBusy,
+  excludeSelf,
   onToggleTeamMember,
   onToggleContact,
   onContactQueryChange,
   onSearchContact,
+  onExcludeSelfChange,
 }: {
   teamMembers: TeamMember[];
   contacts: RecentContact[];
@@ -545,10 +556,12 @@ function ReservationGuestsPicker({
   selectedContactIds: string[];
   contactQuery: string;
   contactBusy: boolean;
+  excludeSelf: boolean;
   onToggleTeamMember: (id: string) => void;
   onToggleContact: (id: string) => void;
   onContactQueryChange: (value: string) => void;
   onSearchContact: () => Promise<void>;
+  onExcludeSelfChange: (value: boolean) => void;
 }) {
   return (
     <section className="guest-picker" aria-label="邀请同行成员">
@@ -559,6 +572,10 @@ function ReservationGuestsPicker({
         </div>
         <span>{selectedTeamMemberIds.length + selectedContactIds.length} 人</span>
       </div>
+      <label className="exclude-self-toggle">
+        <input type="checkbox" checked={excludeSelf} onChange={(e) => onExcludeSelfChange(e.target.checked)} />
+        <span>我不参加本次预约（仅帮队友预约）</span>
+      </label>
       <div className="guest-section">
         <div className="guest-section-title">
           <strong>小队成员</strong>
@@ -767,7 +784,7 @@ function Shell({
           ))}
         </nav>
         <div className="top-actions">
-          <div className="user-chip"><CircleUserRound size={18} /><span>{session.user.realName ?? session.user.email}</span></div>
+          <div className="user-chip"><CircleUserRound size={18} /><span>{session.user.realName ?? session.user.email}</span>{session.user.totalScore != null ? <span className={`score-badge${session.user.totalScore >= 4 ? ' full' : session.user.totalScore >= 2 ? ' mid' : ' low'}`}>{session.user.totalScore}</span> : null}</div>
           <button className="icon-button" onClick={onLogout} aria-label="退出登录"><LogOut size={18} /></button>
         </div>
       </header>
@@ -862,14 +879,20 @@ function RoomsPage({ toast, navigate }: { toast: (message: string, error?: boole
   const [dates, setDates] = useState<string[]>(fallbackDates);
   const [rooms, setRooms] = useState<RoomWithDays[]>([]);
   const [busy, setBusy] = useState(false);
+  const [cache, setCache] = useState<RoomsResponse["cache"]>();
 
-  async function loadRooms() {
+  async function loadRooms(refresh = false) {
     setBusy(true);
     try {
+      if (refresh) {
+        const job = await api<GatewayJob>("/api/v1/rooms/refresh", { method: "POST" });
+        await waitForGatewayJob(job);
+      }
       const response = await api<RoomsResponse>("/api/v1/rooms");
       const normalized = normalizeRooms(response, fallbackDates);
       setDates(normalized.dates);
       setRooms(normalized.rooms.filter((room) => room.reservable !== false));
+      setCache(response.cache);
     } catch (error) {
       toast(error instanceof Error ? error.message : "加载失败", true);
     } finally {
@@ -886,8 +909,12 @@ function RoomsPage({ toast, navigate }: { toast: (message: string, error?: boole
           <div>
             <span className="eyebrow">三天可用日期</span>
             <div className="date-strip">{dates.map((date) => <span key={date}>{dayLabel(date)}</span>)}</div>
+            <small className={`cache-status ${cache?.status?.toLowerCase() ?? "miss"}`}>
+              {cache?.status === "FRESH" ? "缓存已更新" : cache?.status === "STALE" ? "正在展示旧快照" : cache?.status === "EXPIRED" ? "快照已过期" : "尚无房间快照"}
+              {cache?.refreshedAt ? ` · ${formatTimestamp(cache.refreshedAt)}` : ""}
+            </small>
           </div>
-          <Button className="desktop-only-action" onClick={loadRooms} busy={busy} type="button"><RefreshCw size={16} />刷新</Button>
+          <Button className="desktop-only-action" onClick={() => loadRooms(true)} busy={busy} type="button"><RefreshCw size={16} />刷新</Button>
         </div>
         <div className="room-grid">
           {rooms.map((room) => (
@@ -913,10 +940,12 @@ function RoomsPage({ toast, navigate }: { toast: (message: string, error?: boole
 
 function RoomDetailPage({
   roomId,
+  session,
   toast,
   navigate,
 }: {
   roomId: number;
+  session: Session;
   toast: (message: string, error?: boolean) => void;
   navigate: (path: string) => void;
 }) {
@@ -928,6 +957,7 @@ function RoomDetailPage({
   const [contacts, setContacts] = useState<RecentContact[]>([]);
   const [selectedTeamMemberIds, setSelectedTeamMemberIds] = useState<string[]>([]);
   const [selectedContactIds, setSelectedContactIds] = useState<string[]>([]);
+  const [excludeSelf, setExcludeSelf] = useState(false);
   const [contactQuery, setContactQuery] = useState("");
   const [busy, setBusy] = useState(false);
   const [contactBusy, setContactBusy] = useState(false);
@@ -944,9 +974,13 @@ function RoomDetailPage({
     return [...members.values()];
   }, [teams]);
 
-  async function loadRoom() {
+  async function loadRoom(refresh = false) {
     setBusy(true);
     try {
+      if (refresh) {
+        const job = await api<GatewayJob>("/api/v1/rooms/refresh", { method: "POST" });
+        await waitForGatewayJob(job);
+      }
       const [response, teamData, contactData] = await Promise.all([
         api<RoomsResponse>("/api/v1/rooms"),
         api<{ teams: Team[] }>("/api/v1/teams/mine").catch(() => ({ teams: [] })),
@@ -973,7 +1007,8 @@ function RoomDetailPage({
     if (!query) return;
     setContactBusy(true);
     try {
-      const found = await api<RecentContact>(`/api/v1/official-users/search?q=${encodeURIComponent(query)}`);
+      const searchJob = await api<GatewayJob<RecentContact>>(`/api/v1/official-users/search?q=${encodeURIComponent(query)}`);
+      const found = await waitForGatewayJob(searchJob);
       const latest = await api<RecentContact[]>("/api/v1/recent-contacts");
       setContacts(latest);
       setSelectedContactIds((current) => current.includes(found.id) ? current : [...current, found.id]);
@@ -989,9 +1024,22 @@ function RoomDetailPage({
   async function reserve(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!room || !selection || room.reservable === false) return;
+    const totalGuests = selectedTeamMemberIds.length + selectedContactIds.length;
+    if (excludeSelf && totalGuests === 0) {
+      toast("请至少选择一位同行成员", true);
+      return;
+    }
+    if (excludeSelf && totalGuests < room.minReservationNum) {
+      toast(`该房间至少需要 ${room.minReservationNum} 人`, true);
+      return;
+    }
+    if (session.user.totalScore != null && session.user.totalScore < 2) {
+      toast("积分不足（需要至少 2 积分），请等待积分恢复", true);
+      return;
+    }
     setSubmitting(true);
     try {
-      await api("/api/v1/reservations/manual", {
+      const job = await api<GatewayJob>("/api/v1/reservations/manual", {
         method: "POST",
         body: JSON.stringify({
           date: selection.date,
@@ -1000,12 +1048,15 @@ function RoomDetailPage({
           endTime: selection.endTime,
           teamMemberUserIds: selectedTeamMemberIds,
           contactIds: selectedContactIds,
+          excludeSelf,
         }),
       });
+      await waitForGatewayJob(job);
       toast("预约已提交");
       setSelection(null);
       setSelectedTeamMemberIds([]);
       setSelectedContactIds([]);
+      setExcludeSelf(false);
       await loadRoom();
     } catch (error) {
       toast(error instanceof Error ? error.message : "预约失败", true);
@@ -1030,7 +1081,7 @@ function RoomDetailPage({
                 <h2>{room.name}</h2>
                 <p>{room.roomLocation ?? "研讨室"} · {room.minReservationNum}-{room.maxNum} 人 · {room.reservable === false ? "当前不可预约" : "可预约"}</p>
               </div>
-              <Button className="desktop-only-action" onClick={loadRoom} busy={busy} type="button" variant="secondary"><RefreshCw size={16} />刷新</Button>
+              <Button className="desktop-only-action" onClick={() => loadRoom(true)} busy={busy} type="button" variant="secondary"><RefreshCw size={16} />刷新</Button>
             </div>
             {room.reservable === false ? <div className="room-warning">该房间当前由官方标记为不可预约，时间线仅用于查看状态。</div> : null}
             <SquareTimeGridPicker dates={dates} room={room} selection={selection} onChange={setSelection} />
@@ -1045,14 +1096,17 @@ function RoomDetailPage({
               onToggleContact={(id) => setSelectedContactIds((current) => toggleValue(current, id))}
               onContactQueryChange={setContactQuery}
               onSearchContact={searchContact}
+              excludeSelf={excludeSelf}
+              onExcludeSelfChange={setExcludeSelf}
             />
             <div className="reservation-summary">
               <div>
                 <span className="eyebrow">Selected</span>
                 <strong>{selection ? `${dayLabel(selection.date)} ${selection.startTime}-${selection.endTime}` : "尚未选择时间段"}</strong>
-                <small>主预约人 + {selectedTeamMemberIds.length + selectedContactIds.length} 位同行成员</small>
+                <small>{excludeSelf ? "仅帮队友预约（本人不参加）" : `主预约人 + ${selectedTeamMemberIds.length + selectedContactIds.length} 位同行成员`}</small>
+                {session.user.totalScore != null ? <small className={session.user.totalScore < 2 ? "score-warning" : ""}>当前积分: {session.user.totalScore}（预约消耗 2 积分）</small> : null}
               </div>
-              <Button disabled={!selection || room.reservable === false} busy={submitting}>提交预约</Button>
+              <Button disabled={!selection || room.reservable === false || (session.user.totalScore != null && session.user.totalScore < 2)} busy={submitting}>提交预约</Button>
             </div>
           </form>
         ) : null}
@@ -1204,8 +1258,9 @@ function TeamsPage({
   const [teams, setTeams] = useState<Team[]>([]);
   const [users, setUsers] = useState<InvitableUser[]>([]);
   const [invitations, setInvitations] = useState<TeamInvitation[]>([]);
+  const [teamScores, setTeamScores] = useState<Record<string, Array<{ userId: string; realName: string; totalScore: number | null }>>>({});
 
-  async function load() {
+  async function load(refreshScores = false) {
     try {
       const [teamData, invitable] = await Promise.all([
         api<{ teams: Team[]; invitations?: TeamInvitation[] }>("/api/v1/teams/mine"),
@@ -1214,6 +1269,19 @@ function TeamsPage({
       setTeams(teamData.teams);
       setInvitations(teamData.invitations ?? []);
       setUsers(invitable);
+      const scores: Record<string, Array<{ userId: string; realName: string; totalScore: number | null }>> = {};
+      for (const team of teamData.teams) {
+        if (team.is_leader !== true && team.is_leader !== 1) continue;
+        try {
+          if (refreshScores) {
+            const job = await api<GatewayJob>(`/api/v1/teams/${encodeURIComponent(team.id)}/member-scores`, { method: "POST" });
+            await waitForGatewayJob(job);
+          }
+          const result = await api<{ members: Array<{ userId: string; realName: string; totalScore: number | null }> }>(`/api/v1/teams/${encodeURIComponent(team.id)}/member-scores`);
+          scores[team.id] = result.members;
+        } catch { scores[team.id] = []; }
+      }
+      setTeamScores(scores);
     } catch (error) {
       toast(error instanceof Error ? error.message : "加载失败", true);
     }
@@ -1325,7 +1393,7 @@ function TeamsPage({
       <Card title="成员邀请" icon={<Mail size={20} />}>
         <div className="toolbar page-toolbar">
           <Button type="button" disabled={!canCreateTeam} onClick={() => navigate("/teams/new")}><UsersRound size={16} />{canCreateTeam ? "新建小队" : "已创建小队"}</Button>
-          <Button className="desktop-only-action" type="button" variant="secondary" onClick={load}><RefreshCw size={16} />刷新</Button>
+          <Button className="desktop-only-action" type="button" variant="secondary" onClick={() => load(true)}><RefreshCw size={16} />刷新</Button>
         </div>
         {pendingInvitations.length ? (
           <div className="list team-invitation-list">
@@ -1350,11 +1418,15 @@ function TeamsPage({
                 <strong>{team.name}</strong>
                 <span>{team.description || "无描述"} · {visibleTeamMembers(team).length} 人 · {isTeamLeader(team) ? "我创建的" : "已加入"}</span>
                 <div className="team-member-strip">
-                  {visibleTeamMembers(team).map((member) => (
-                    <span key={`${team.id}-${member.id}`} className={member.role === "队长" ? "leader" : ""}>
-                      {member.name}<small>{member.role}</small>
-                    </span>
-                  ))}
+                  {visibleTeamMembers(team).map((member) => {
+                    const memberScore = teamScores[team.id]?.find((s) => s.realName === member.name);
+                    const scoreText = memberScore?.totalScore != null ? ` · ${memberScore.totalScore}分` : "";
+                    return (
+                      <span key={`${team.id}-${member.id}`} className={member.role === "队长" ? "leader" : ""}>
+                        {member.name}<small>{member.role}{scoreText}</small>
+                      </span>
+                    );
+                  })}
                 </div>
               </div>
               {isTeamLeader(team) ? (
@@ -1376,7 +1448,11 @@ function HistoryPage({ toast }: { toast: (message: string, error?: boolean) => v
 
   async function load(sync = false) {
     try {
-      setItems(await api<Reservation[]>(sync ? "/api/v1/reservations/sync" : "/api/v1/reservations/history", sync ? { method: "POST" } : {}));
+      if (sync) {
+        const job = await api<GatewayJob>("/api/v1/reservations/sync", { method: "POST" });
+        await waitForGatewayJob(job);
+      }
+      setItems(await api<Reservation[]>("/api/v1/reservations/history"));
       setPage(1);
     } catch (error) {
       toast(error instanceof Error ? error.message : "加载失败", true);
@@ -1390,7 +1466,8 @@ function HistoryPage({ toast }: { toast: (message: string, error?: boolean) => v
 
   async function action(id: string, actionName: "cancel" | "signout") {
     try {
-      const result = await api<{ url?: string }>(`/api/v1/reservations/${id}/${actionName}`, { method: "POST" });
+      const job = await api<GatewayJob<{ url?: string }>>(`/api/v1/reservations/${id}/${actionName}`, { method: "POST" });
+      const result = await waitForGatewayJob(job);
       if (result.url) window.open(result.url, "_blank", "noopener,noreferrer");
       toast("订单状态已更新");
       await load();
@@ -1438,7 +1515,7 @@ function AdminPage({
   collection?: string;
 }) {
   const [body, setBody] = useState<unknown>(null);
-  const collections = ["users", "credentials", "tasks", "reservations", "teams", "team-invitations", "sign-tasks", "signout-tasks", "emails", "audit-logs"];
+  const collections = ["users", "credentials", "tasks", "reservations", "teams", "team-invitations", "sign-tasks", "signout-tasks", "emails", "audit-logs", "gateway-jobs", "gateway-snapshots"];
 
   async function load(path = `/api/v1/admin/${collection}`) {
     try {
@@ -1539,7 +1616,7 @@ export function App() {
     <Shell session={session} page={route.page} navigate={navigate} onLogout={logout}>
       <main className="content">
         {route.page === "rooms" && !route.roomId ? <RoomsPage toast={toast} navigate={navigate} /> : null}
-        {route.page === "rooms" && route.roomId ? <RoomDetailPage roomId={route.roomId} toast={toast} navigate={navigate} /> : null}
+        {route.page === "rooms" && route.roomId ? <RoomDetailPage roomId={route.roomId} session={session} toast={toast} navigate={navigate} /> : null}
         {route.page === "tasks" ? <TasksPage toast={toast} navigate={navigate} mode={route.taskMode ?? "list"} /> : null}
         {route.page === "teams" ? <TeamsPage toast={toast} navigate={navigate} mode={route.teamMode ?? "list"} inviteTeamId={route.teamInviteId} /> : null}
         {route.page === "history" ? <HistoryPage toast={toast} /> : null}

@@ -72,6 +72,7 @@ function schedulerLimit(env: AppEnv, name: SchedulerLimitName, fallback: number,
 export async function runScheduler(env: AppEnv): Promise<void> {
   const now = Date.now();
   const budget = new SchedulerBudget(boundedInteger(env.SCHEDULER_MAX_RUNTIME_MS, 18_000, 5_000, 28_000));
+  await budget.run("refresh-official-snapshots", () => refreshOfficialSnapshots(env, now));
   await budget.run("expire-invitations", async () => {
     await Promise.all([expireInvitations(env, now), expireTeamInvitations(env, now)]);
   });
@@ -83,6 +84,61 @@ export async function runScheduler(env: AppEnv): Promise<void> {
   await budget.run("refresh-credentials", () => refreshDueCredentials(env, now, schedulerLimit(env, "SCHEDULER_REFRESH_LIMIT", 3, 20)), 4000);
   await budget.run("deliver-mail", () => deliverDueMail(env, now, schedulerLimit(env, "SCHEDULER_MAIL_LIMIT", 2, 10)), 4000);
   await budget.run("cleanup-sessions", () => cleanupSessions(env, now));
+}
+
+function shanghaiDate(now: number): string {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(now));
+}
+
+async function refreshOfficialSnapshots(env: AppEnv, now: number): Promise<void> {
+  if (!env.OFFICIAL_GATEWAY) return;
+  const roomKey = `global:rooms:${shanghaiDate(now)}`;
+  const roomSnapshot = await env.OFFICIAL_GATEWAY.readSnapshot(roomKey);
+  if (!roomSnapshot || roomSnapshot.freshUntil <= now) {
+    const user = await env.DB.prepare(
+      `SELECT u.id
+         FROM users u JOIN official_credentials c ON c.user_id = u.id
+        WHERE u.status = 'ACTIVE' AND c.credential_status = 'ACTIVE'
+        ORDER BY COALESCE(c.last_refresh_success_at, 0) DESC LIMIT 1`,
+    ).first<{ id: string }>();
+    if (user) {
+      const job = await env.OFFICIAL_GATEWAY.enqueue({
+        kind: "ROOMS_REFRESH",
+        lane: "READ",
+        ownerUserId: user.id,
+        dedupeKey: `refresh:${roomKey}`,
+        payload: { snapshotKey: roomKey },
+        priority: 80,
+      });
+      await env.OFFICIAL_GATEWAY.linkSnapshotRefresh(roomKey, job.id);
+    }
+  }
+
+  const staleScores = await env.DB.prepare(
+    `SELECT u.id
+       FROM users u JOIN official_credentials c ON c.user_id = u.id
+       LEFT JOIN official_gateway_snapshots s ON s.cache_key = 'user:' || u.id || ':score'
+      WHERE u.status = 'ACTIVE' AND u.student_id IS NOT NULL AND c.credential_status = 'ACTIVE'
+        AND (s.cache_key IS NULL OR s.fresh_until <= ?)
+      ORDER BY COALESCE(s.refreshed_at, 0) ASC LIMIT 3`,
+  ).bind(now).all<{ id: string }>();
+  for (const user of staleScores.results) {
+    const key = `user:${user.id}:score`;
+    const job = await env.OFFICIAL_GATEWAY.enqueue({
+      kind: "USER_SCORE_REFRESH",
+      lane: "READ",
+      ownerUserId: user.id,
+      dedupeKey: `refresh:${key}`,
+      payload: {},
+      priority: 90,
+    });
+    await env.OFFICIAL_GATEWAY.linkSnapshotRefresh(key, job.id);
+  }
 }
 
 async function expireTeamInvitations(env: AppEnv, now: number): Promise<void> {
@@ -118,6 +174,9 @@ async function expireInvitations(env: AppEnv, now: number): Promise<void> {
 async function cleanupSessions(env: AppEnv, now: number): Promise<void> {
   await env.DB.prepare("DELETE FROM sessions WHERE expires_at <= ? OR revoked_at IS NOT NULL").bind(now).run();
   await env.DB.prepare("DELETE FROM login_attempts WHERE created_at <= ?").bind(now - 24 * 60 * 60 * 1000).run();
+  await env.DB.prepare(
+    "DELETE FROM official_gateway_jobs WHERE status IN ('SUCCEEDED', 'FAILED', 'CANCELLED') AND finished_at <= ?",
+  ).bind(now - 7 * 24 * 60 * 60 * 1000).run();
 }
 
 async function prepareReservationTasks(env: AppEnv, now: number, limit = 5): Promise<void> {

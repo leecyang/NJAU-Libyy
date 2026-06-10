@@ -13,6 +13,13 @@ export type OfficialIdentity = {
   userId: string;
   realName: string;
   mobile?: string;
+  totalScore?: number;
+};
+
+export type OfficialUserScore = {
+  userId: string;
+  realName: string;
+  totalScore: number;
 };
 
 export type OfficialMember = {
@@ -65,7 +72,8 @@ type OfficialOperation =
   | "reservation-sign"
   | "reservation-signout"
   | "sign-key"
-  | "user-search";
+  | "user-search"
+  | "user-score";
 
 type OfficialResponseDiagnostic = {
   operation: OfficialOperation;
@@ -232,7 +240,37 @@ function headerRecord(init?: HeadersInit): Record<string, string> {
   return result;
 }
 
-async function officialFetch(
+const OFFICIAL_WRITE_OPERATIONS = new Set<OfficialOperation>([
+  "refresh-token",
+  "reservation",
+  "reservation-accept",
+  "reservation-cancel",
+  "reservation-sign",
+  "reservation-signout",
+  "sign-key",
+]);
+
+function requestFingerprint(value: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+function officialRequestKey(url: URL, operation: OfficialOperation, init: RequestInit): string {
+  const safeUrl = new URL(url);
+  safeUrl.searchParams.delete("accessToken");
+  safeUrl.searchParams.delete("appSecret");
+  safeUrl.searchParams.delete("reflushToken");
+  const headers = new Headers(init.headers);
+  const authorization = headers.get("authorization") ?? "";
+  const body = typeof init.body === "string" ? init.body : "";
+  return `${operation}:${init.method ?? "GET"}:${safeUrl.pathname}?${safeUrl.searchParams.toString()}:auth=${requestFingerprint(authorization)}:body=${requestFingerprint(body)}`;
+}
+
+async function rawOfficialFetch(
   env: AppEnv,
   url: URL,
   operation: OfficialOperation,
@@ -301,6 +339,21 @@ async function officialFetch(
     status: result.status,
     headers: proxyResponseHeaders(result),
   });
+}
+
+async function officialFetch(
+  env: AppEnv,
+  url: URL,
+  operation: OfficialOperation,
+  init: RequestInit = {},
+): Promise<Response> {
+  const execute = () => rawOfficialFetch(env, url, operation, init);
+  if (!env.OFFICIAL_GATEWAY) return execute();
+  return env.OFFICIAL_GATEWAY.runOfficialRequest(
+    officialRequestKey(url, operation, init),
+    OFFICIAL_WRITE_OPERATIONS.has(operation) ? "WRITE" : "READ",
+    execute,
+  );
 }
 
 async function officialJson(response: Response, operation: OfficialOperation): Promise<unknown> {
@@ -673,5 +726,27 @@ export async function searchOfficialUsers(env: AppEnv, accessToken: string, quer
     userId: user.userId,
     realName: user.realName,
     mobile: typeof user.mobile === "string" ? user.mobile : undefined,
+    totalScore: typeof (user as Record<string, unknown>).totalScore === "number" ? (user as Record<string, unknown>).totalScore as number : undefined,
+  };
+}
+
+export async function fetchOfficialUserScore(
+  env: AppEnv,
+  accessToken: string,
+  userId: string,
+): Promise<OfficialUserScore> {
+  const url = officialUrl(env, `/api/studyroom/v1/user/${encodeURIComponent(userId)}`);
+  const response = await officialFetch(env, url, "user-score", { headers: officialHeaders(accessToken, "application/json;charset=UTF-8") });
+  const body = await officialJson(response, "user-score");
+  if (!response.ok) throw officialFailure(response, body);
+  if (!body || typeof body !== "object") throw new HttpError(502, "OFFICIAL_INVALID_RESPONSE", "官方用户积分响应格式异常");
+  const data = body as Record<string, unknown>;
+  if (typeof data.totalScore !== "number" || typeof data.userId !== "string" || typeof data.realName !== "string") {
+    throw new HttpError(502, "OFFICIAL_INVALID_RESPONSE", "官方用户积分响应缺少必要字段");
+  }
+  return {
+    userId: data.userId as string,
+    realName: data.realName as string,
+    totalScore: data.totalScore as number,
   };
 }

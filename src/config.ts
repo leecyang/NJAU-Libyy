@@ -1,9 +1,11 @@
 import type { AppDatabase } from "./db/types";
 import type { CasAutomationAdapter } from "./lib/cas-types";
+import type { OfficialAccessGateway } from "./lib/official-gateway-types";
 
 export type AppEnv = {
   DB: AppDatabase;
   CAS_AUTOMATION?: CasAutomationAdapter;
+  OFFICIAL_GATEWAY?: OfficialAccessGateway;
   ASSETS?: { fetch(request: Request): Promise<Response> };
   LIBYY_APP_ID: string;
   LIBYY_API_BASE_URL: string;
@@ -55,6 +57,10 @@ export type AppEnv = {
   PLAYWRIGHT_PROFILE_DIR?: string;
   PLAYWRIGHT_MAX_CONCURRENCY?: string;
   CAS_LOGIN_TIMEOUT_MS?: string;
+  OFFICIAL_READ_CONCURRENCY?: string;
+  OFFICIAL_WRITE_CONCURRENCY?: string;
+  OFFICIAL_REQUEST_MIN_INTERVAL_MS?: string;
+  OFFICIAL_JOB_POLL_INTERVAL_MS?: string;
 };
 
 export function flag(env: AppEnv, name: keyof AppEnv): boolean {

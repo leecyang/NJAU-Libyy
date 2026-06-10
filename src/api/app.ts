@@ -6,6 +6,7 @@ import { credentialStatus, getAccessToken, getOfficialReservationProfile } from 
 import { sha256, randomToken } from "../lib/crypto";
 import { HttpError, json, ok, readJsonBody, requireString } from "../lib/http";
 import { queueMail } from "../lib/mail";
+import { publicGatewayJob, type OfficialGatewayJob } from "../lib/official-gateway-types";
 import {
   acceptOfficialReservation,
   cancelOfficialReservation,
@@ -19,6 +20,7 @@ import {
   signOutOfficialReservation,
   submitOfficialReservation,
   verifyOfficialRoomPolicy,
+  fetchOfficialUserScore,
   type OfficialMember,
 } from "../lib/official";
 import {
@@ -44,6 +46,10 @@ type DailyAvailability = {
   label: string;
   availableRanges: Array<{ startTime: string; endTime: string }>;
 };
+type RoomsSnapshot = {
+  dates: Array<{ date: string; label: string }>;
+  rooms: Array<Room & { reservable: boolean; dailyAvailability: DailyAvailability[] }>;
+};
 type ResolvedMember = OfficialMember & {
   source: "TEAM" | "CONTACT";
   localUserId?: string;
@@ -67,10 +73,6 @@ function requireInteger(value: unknown, field: string): number {
 function requireArray(value: unknown, field: string, max = 20): unknown[] {
   if (!Array.isArray(value) || value.length > max) throw new HttpError(400, "INVALID_FIELD", `${field} 格式错误`);
   return value;
-}
-
-async function activeRooms(env: AppEnv, userId: string, date: string): Promise<Room[]> {
-  return fetchOfficialRooms(env, await getAccessToken(env, userId), date);
 }
 
 function publicRoom(room: Room): Room & { reservable: boolean } {
@@ -137,6 +139,32 @@ function threeDayWindow(now = new Date()): Array<{ date: string; label: string }
   return ["今天", "明天", "后天"].map((label, index) => ({ date: shanghaiDate(index, now), label }));
 }
 
+function roomsSnapshotKey(now = new Date()): string {
+  return `global:rooms:${shanghaiDate(0, now)}`;
+}
+
+function userScoreSnapshotKey(userId: string): string {
+  return `user:${userId}:score`;
+}
+
+function userReservationsSnapshotKey(userId: string): string {
+  return `user:${userId}:reservations`;
+}
+
+function requireGateway(env: AppEnv) {
+  if (!env.OFFICIAL_GATEWAY) throw new HttpError(503, "OFFICIAL_GATEWAY_UNAVAILABLE", "官方访问网关尚未启动");
+  return env.OFFICIAL_GATEWAY;
+}
+
+async function userById(env: AppEnv, userId: string): Promise<User> {
+  const user = await env.DB.prepare(
+    `SELECT id, email, role, status, student_id, real_name, allow_auto_join_reservation, square_visibility
+       FROM users WHERE id = ?`,
+  ).bind(userId).first<User>();
+  if (!user || user.status !== "ACTIVE") throw new HttpError(404, "ACCOUNT_NOT_FOUND", "账号不存在");
+  return user;
+}
+
 async function roomDailyAvailability(env: AppEnv, token: string, roomId: number, dates = threeDayWindow()): Promise<DailyAvailability[]> {
   return Promise.all(dates.map(async ({ date, label }) => {
     try {
@@ -146,6 +174,90 @@ async function roomDailyAvailability(env: AppEnv, token: string, roomId: number,
       return { date, label, availableRanges: [] };
     }
   }));
+}
+
+async function buildRoomsSnapshot(env: AppEnv, userId: string): Promise<RoomsSnapshot> {
+  const token = await getAccessToken(env, userId);
+  const dates = threeDayWindow();
+  const dailyRooms = await Promise.all(dates.map(({ date }) => fetchOfficialRooms(env, token, date)));
+  const roomMap = new Map<number, Room & { reservable: boolean }>();
+  for (const room of dailyRooms.flat().map(publicRoom)) {
+    if (!roomMap.has(room.id)) roomMap.set(room.id, room);
+  }
+  const rooms = await Promise.all([...roomMap.values()].map(async (room) => ({
+    ...room,
+    dailyAvailability: await roomDailyAvailability(env, token, room.id, dates),
+  })));
+  return { dates, rooms };
+}
+
+async function executeRoomsRefresh(env: AppEnv, job: OfficialGatewayJob): Promise<Record<string, unknown>> {
+  const gateway = requireGateway(env);
+  const key = typeof job.payload.snapshotKey === "string" ? job.payload.snapshotKey : roomsSnapshotKey();
+  if (!job.ownerUserId) throw new HttpError(400, "GATEWAY_JOB_OWNER_REQUIRED", "房间刷新任务缺少执行账号");
+  try {
+    const value = await buildRoomsSnapshot(env, job.ownerUserId);
+    const snapshot = await gateway.writeSnapshot({
+      key,
+      scope: "GLOBAL",
+      kind: "ROOMS",
+      value,
+      freshForMs: 2 * 60_000,
+      staleForMs: 30 * 60_000,
+      refreshJobId: job.id,
+    });
+    return { snapshotKey: key, version: snapshot.version, refreshedAt: snapshot.refreshedAt };
+  } catch (error) {
+    await gateway.markSnapshotError(key, job.id, error instanceof HttpError ? error.code : "ROOMS_REFRESH_FAILED", error instanceof Error ? error.message : "房间状态刷新失败");
+    throw error;
+  }
+}
+
+async function executeUserScoreRefresh(env: AppEnv, job: OfficialGatewayJob): Promise<Record<string, unknown>> {
+  if (!job.ownerUserId) throw new HttpError(400, "GATEWAY_JOB_OWNER_REQUIRED", "积分刷新任务缺少用户");
+  const user = await userById(env, job.ownerUserId);
+  if (!user.student_id) throw new HttpError(409, "SETUP_REQUIRED", "请先完成官方凭证配置");
+  const score = await fetchOfficialUserScore(env, await getAccessToken(env, user.id), user.student_id);
+  const snapshot = await requireGateway(env).writeSnapshot({
+    key: userScoreSnapshotKey(user.id),
+    scope: "USER",
+    ownerUserId: user.id,
+    kind: "USER_SCORE",
+    value: score,
+    freshForMs: 10 * 60_000,
+    staleForMs: 6 * 60 * 60_000,
+    refreshJobId: job.id,
+  });
+  return { snapshotKey: snapshot.key, version: snapshot.version, totalScore: score.totalScore };
+}
+
+async function executeReservationsRefresh(env: AppEnv, job: OfficialGatewayJob): Promise<Record<string, unknown>> {
+  if (!job.ownerUserId) throw new HttpError(400, "GATEWAY_JOB_OWNER_REQUIRED", "预约同步任务缺少用户");
+  const user = await userById(env, job.ownerUserId);
+  const records = await syncOfficialReservationHistory(env, user);
+  const snapshot = await requireGateway(env).writeSnapshot({
+    key: userReservationsSnapshotKey(user.id),
+    scope: "USER",
+    ownerUserId: user.id,
+    kind: "RESERVATIONS",
+    value: { count: records.length },
+    freshForMs: 2 * 60_000,
+    staleForMs: 30 * 60_000,
+    refreshJobId: job.id,
+  });
+  return { snapshotKey: snapshot.key, version: snapshot.version, count: records.length };
+}
+
+export function registerOfficialGatewayHandlers(env: AppEnv): void {
+  const gateway = requireGateway(env);
+  gateway.registerHandler("ROOMS_REFRESH", (job) => executeRoomsRefresh(env, job));
+  gateway.registerHandler("USER_SCORE_REFRESH", (job) => executeUserScoreRefresh(env, job));
+  gateway.registerHandler("RESERVATIONS_REFRESH", (job) => executeReservationsRefresh(env, job));
+  gateway.registerHandler("MANUAL_RESERVATION", (job) => executeManualReservation(env, job));
+  gateway.registerHandler("CANCEL_RESERVATION", (job) => executeCancelReservation(env, job));
+  gateway.registerHandler("CREATE_SIGN_LINK", (job) => executeCreateSignLink(env, job));
+  gateway.registerHandler("SIGNOUT_RESERVATION", (job) => executeSignoutReservation(env, job));
+  gateway.registerHandler("OFFICIAL_USER_SEARCH", (job) => executeOfficialUserSearch(env, job));
 }
 
 async function requireBoundUser(env: AppEnv, request: Request): Promise<User> {
@@ -229,6 +341,20 @@ async function localReservationLimits(env: AppEnv, userId: string, date: string,
 
 export async function me(env: AppEnv, request: Request): Promise<Response> {
   const user = await requireUser(env, request);
+  const credential = await credentialStatus(env, user.id);
+  let totalScore: number | null = null;
+  if (env.OFFICIAL_GATEWAY) {
+    const snapshot = await env.OFFICIAL_GATEWAY.readSnapshot<{ totalScore: number }>(userScoreSnapshotKey(user.id));
+    totalScore = snapshot?.value.totalScore ?? null;
+  } else if (user.student_id && credential.credential_status === "ACTIVE") {
+    try {
+      const token = await getAccessToken(env, user.id);
+      const score = await fetchOfficialUserScore(env, token, user.student_id);
+      totalScore = score.totalScore;
+    } catch {
+      totalScore = null;
+    }
+  }
   return ok({
     user: {
       id: user.id,
@@ -237,8 +363,9 @@ export async function me(env: AppEnv, request: Request): Promise<Response> {
       studentId: user.student_id,
       realName: user.real_name,
       squareVisibility: user.square_visibility,
+      totalScore,
     },
-    credential: await credentialStatus(env, user.id),
+    credential,
   });
 }
 
@@ -265,6 +392,7 @@ export async function health(env: AppEnv): Promise<Response> {
     database: database?.value === 1 ? "ready" : "unavailable",
     config: {
       officialApiConfigured: Boolean(env.LIBYY_APP_SECRET),
+      officialGatewayEnabled: Boolean(env.OFFICIAL_GATEWAY),
       officialNetworkMode: env.OFFICIAL_NETWORK_MODE ?? "tailscale-direct",
       officialProxyConfigured: Boolean(env.NJAU_PROXY_ENDPOINT && env.NJAU_PROXY_TOKEN),
       tailscaleExitNodeConfigured: String(env.TS_EXTRA_ARGS ?? "").includes("--exit-node"),
@@ -315,6 +443,20 @@ export async function bind(env: AppEnv, request: Request): Promise<Response> {
   return json({ ok: true, data: attempt }, 202);
 }
 
+export async function refreshMe(env: AppEnv, request: Request): Promise<Response> {
+  const user = await requireBoundUser(env, request);
+  const job = await requireGateway(env).enqueue({
+    kind: "USER_SCORE_REFRESH",
+    lane: "READ",
+    ownerUserId: user.id,
+    dedupeKey: `refresh:${userScoreSnapshotKey(user.id)}`,
+    payload: {},
+    priority: 30,
+  });
+  await requireGateway(env).linkSnapshotRefresh(userScoreSnapshotKey(user.id), job.id);
+  return json({ ok: true, data: publicGatewayJob(job) }, 202);
+}
+
 export async function submitCredentialSms(env: AppEnv, request: Request): Promise<Response> {
   const user = await requireUser(env, request);
   const body = await readJsonBody<JsonObject>(request);
@@ -350,6 +492,30 @@ export async function rooms(env: AppEnv, request: Request): Promise<Response> {
     });
   }
   const user = await requireBoundUser(env, request);
+  if (env.OFFICIAL_GATEWAY) {
+    const snapshot = await env.OFFICIAL_GATEWAY.readSnapshot<RoomsSnapshot>(roomsSnapshotKey());
+    const value = snapshot?.value ?? { dates: threeDayWindow(), rooms: [] };
+    if (!date) {
+      return ok({
+        ...value,
+        cache: snapshot ? {
+          status: snapshot.freshness,
+          version: snapshot.version,
+          refreshedAt: snapshot.refreshedAt,
+          refreshJobId: snapshot.refreshJobId,
+          error: snapshot.lastErrorCode ? { code: snapshot.lastErrorCode, message: snapshot.lastErrorMessage } : null,
+        } : { status: "MISS", version: 0, refreshedAt: null, refreshJobId: null, error: null },
+      });
+    }
+    assertThreeDayWindow(date);
+    return ok({
+      date,
+      rooms: value.rooms.map((room) => ({
+        ...room,
+        availableRanges: room.dailyAvailability.find((item) => item.date === date)?.availableRanges ?? [],
+      })),
+    });
+  }
   const token = await getAccessToken(env, user.id);
   if (!date) {
     const dates = threeDayWindow();
@@ -376,6 +542,21 @@ export async function rooms(env: AppEnv, request: Request): Promise<Response> {
   return ok({ date, rooms: detailed });
 }
 
+export async function refreshRooms(env: AppEnv, request: Request): Promise<Response> {
+  const user = await requireBoundUser(env, request);
+  const key = roomsSnapshotKey();
+  const job = await requireGateway(env).enqueue({
+    kind: "ROOMS_REFRESH",
+    lane: "READ",
+    ownerUserId: user.id,
+    dedupeKey: `refresh:${key}`,
+    payload: { snapshotKey: key },
+    priority: 20,
+  });
+  await requireGateway(env).linkSnapshotRefresh(key, job.id);
+  return json({ ok: true, data: publicGatewayJob(job) }, 202);
+}
+
 function isReservationExpired(date: string, endTime: string, now = Date.now()): boolean {
   return new Date(`${date}T${endTime}:00+08:00`).valueOf() <= now;
 }
@@ -392,6 +573,17 @@ export async function roomDetail(env: AppEnv, request: Request, roomIdText: stri
   const date = requestedDate ? requireString(requestedDate, "date", 10) : null;
   const roomId = Number(roomIdText);
   if (!Number.isInteger(roomId)) throw new HttpError(400, "INVALID_FIELD", "roomId 格式错误");
+  if (env.OFFICIAL_GATEWAY) {
+    const snapshot = await env.OFFICIAL_GATEWAY.readSnapshot<RoomsSnapshot>(roomsSnapshotKey());
+    const room = snapshot?.value.rooms.find((item) => item.id === roomId);
+    if (!room) throw new HttpError(404, "ROOM_NOT_FOUND", "缓存中没有该研讨室，请先刷新房间状态");
+    if (!date) return ok(room);
+    assertThreeDayWindow(date);
+    return ok({
+      ...room,
+      availableRanges: room.dailyAvailability.find((item) => item.date === date)?.availableRanges ?? [],
+    });
+  }
   const token = await getAccessToken(env, user.id);
   if (!date) {
     const dates = threeDayWindow();
@@ -417,9 +609,15 @@ export async function roomDetail(env: AppEnv, request: Request, roomIdText: stri
   return ok({ ...room, availableRanges: availableTimeRanges(room, date) });
 }
 
-export async function manualReservation(env: AppEnv, request: Request): Promise<Response> {
-  const user = await requireBoundUser(env, request);
-  const body = await readJsonBody<JsonObject>(request);
+async function gatewayJobResponse(env: AppEnv, job: OfficialGatewayJob, waitMs: number): Promise<Response> {
+  const current = waitMs > 0 ? await requireGateway(env).waitForJob(job.id, waitMs) : job;
+  return json({ ok: true, data: publicGatewayJob(current) }, current.status === "QUEUED" || current.status === "RUNNING" ? 202 : 200);
+}
+
+async function executeManualReservation(env: AppEnv, job: OfficialGatewayJob): Promise<Record<string, unknown>> {
+  if (!job.ownerUserId) throw new HttpError(400, "GATEWAY_JOB_OWNER_REQUIRED", "预约任务缺少用户");
+  const user = await userById(env, job.ownerUserId);
+  const body = job.payload;
   const date = requireString(body.date, "date", 10);
   assertThreeDayWindow(date);
   const roomId = requireInteger(body.roomId, "roomId");
@@ -431,13 +629,16 @@ export async function manualReservation(env: AppEnv, request: Request): Promise<
   }
   const token = await getAccessToken(env, user.id);
   const profile = await getOfficialReservationProfile(env, user.id, token);
-  const room = await fetchOfficialRoomDetail(env, token, roomId, date);
+  const cachedRooms = await requireGateway(env).readSnapshot<RoomsSnapshot>(roomsSnapshotKey());
+  const room = cachedRooms?.value.rooms.find((item) => item.id === roomId)
+    ?? await fetchOfficialRoomDetail(env, token, roomId, date);
   const duration = assertReservation(room, { date, startTime, endTime, memberCount: members.length }, true);
   await localReservationLimits(env, user.id, date, duration);
   if (!flag(env, "ENABLE_SINGLE_RESERVATION_SUBMISSION")) throw new HttpError(503, "RESERVATION_SUBMISSION_DISABLED", "单人预约提交当前保持关闭");
-  if (!await verifyOfficialRoomPolicy(env, token, profile.studentId, roomId, members.map((member) => member.userId))) throw new HttpError(409, "ROOM_POLICY_REJECTED", "官方房间规则不允许本次预约");
+  if (!await verifyOfficialRoomPolicy(env, token, profile.studentId, roomId, members.map((member) => member.userId))) {
+    throw new HttpError(409, "ROOM_POLICY_REJECTED", "官方房间规则不允许本次预约");
+  }
   await judgeOfficialReservationUsers(env, token, profile.studentId, members.map((member) => member.userId), date, startTime);
-
   await submitOfficialReservation(env, token, {
     ownerStudentId: profile.studentId,
     mobile: profile.mobile,
@@ -464,18 +665,46 @@ export async function manualReservation(env: AppEnv, request: Request): Promise<
     "SELECT id, status FROM reservations WHERE owner_user_id = ? AND official_reservation_id = ?",
   ).bind(user.id, String(matched.id)).first<{ id: string; status: string }>();
   await audit(env.DB, { actorUserId: user.id, actorType: "USER", action: "MANUAL_RESERVATION_SUBMITTED", targetType: "RESERVATION", targetId: local?.id, result: "SUCCESS" });
-  return ok({
+  return {
     id: local?.id,
     officialReservationId: String(matched.id),
     status: local?.status ?? localReservationStatus(matched.reservationStatus),
     teamMembersAutoAccepted: acceptance.accepted,
     teamMembersPendingRetry: acceptance.failed,
+  };
+}
+
+export async function manualReservation(env: AppEnv, request: Request): Promise<Response> {
+  const user = await requireBoundUser(env, request);
+  const body = await readJsonBody<JsonObject>(request);
+  const date = requireString(body.date, "date", 10);
+  assertThreeDayWindow(date);
+  const roomId = requireInteger(body.roomId, "roomId");
+  const startTime = requireString(body.startTime, "startTime", 5);
+  const endTime = requireString(body.endTime, "endTime", 5);
+  if (!env.OFFICIAL_GATEWAY) {
+    return ok(await executeManualReservation(env, {
+      id: "direct", kind: "MANUAL_RESERVATION", lane: "WRITE", ownerUserId: user.id, dedupeKey: null,
+      payload: body, status: "RUNNING", priority: 0, attemptCount: 1, maxAttempts: 1,
+      availableAt: Date.now(), result: null, errorCode: null, errorMessage: null,
+      createdAt: Date.now(), startedAt: Date.now(), finishedAt: null, updatedAt: Date.now(),
+    }));
+  }
+  const job = await env.OFFICIAL_GATEWAY.enqueue({
+    kind: "MANUAL_RESERVATION",
+    lane: "WRITE",
+    ownerUserId: user.id,
+    dedupeKey: `manual:${user.id}:${date}:${roomId}:${startTime}:${endTime}`,
+    payload: body,
+    priority: 5,
+    maxAttempts: 1,
   });
+  return gatewayJobResponse(env, job, 2500);
 }
 
 export async function reservationHistory(env: AppEnv, request: Request): Promise<Response> {
   const user = await requireBoundUser(env, request);
-  if (new URL(request.url).searchParams.get("sync") === "true") await syncOfficialReservationHistory(env, user);
+  if (!env.OFFICIAL_GATEWAY && new URL(request.url).searchParams.get("sync") === "true") await syncOfficialReservationHistory(env, user);
   const rows = await env.DB.prepare(
     `SELECT id, task_id, official_reservation_id, room_id, room_name_snapshot, date,
             start_time, end_time, member_snapshot_json, submission_type, status, official_status, created_at
@@ -506,12 +735,35 @@ export async function reservationHistory(env: AppEnv, request: Request): Promise
 
 export async function syncReservationHistory(env: AppEnv, request: Request): Promise<Response> {
   const user = await requireBoundUser(env, request);
+  if (env.OFFICIAL_GATEWAY) {
+    const job = await env.OFFICIAL_GATEWAY.enqueue({
+      kind: "RESERVATIONS_REFRESH",
+      lane: "READ",
+      ownerUserId: user.id,
+      dedupeKey: `refresh:${userReservationsSnapshotKey(user.id)}`,
+      payload: {},
+      priority: 30,
+    });
+    await env.OFFICIAL_GATEWAY.linkSnapshotRefresh(userReservationsSnapshotKey(user.id), job.id);
+    return json({ ok: true, data: publicGatewayJob(job) }, 202);
+  }
   await syncOfficialReservationHistory(env, user);
   return reservationHistory(env, request);
 }
 
-export async function cancelReservation(env: AppEnv, request: Request, reservationId: string): Promise<Response> {
-  const user = await requireBoundUser(env, request);
+export async function gatewayJobStatus(env: AppEnv, request: Request, jobId: string): Promise<Response> {
+  const user = await requireUser(env, request);
+  const job = await requireGateway(env).getJob(jobId);
+  if (!job || (job.ownerUserId && job.ownerUserId !== user.id && user.role !== "ADMIN")) {
+    throw new HttpError(404, "GATEWAY_JOB_NOT_FOUND", "访问任务不存在");
+  }
+  return ok(publicGatewayJob(job));
+}
+
+async function executeCancelReservation(env: AppEnv, job: OfficialGatewayJob): Promise<Record<string, unknown>> {
+  if (!job.ownerUserId) throw new HttpError(400, "GATEWAY_JOB_OWNER_REQUIRED", "取消任务缺少用户");
+  const reservationId = requireString(job.payload.reservationId, "reservationId", 80);
+  const user = await userById(env, job.ownerUserId);
   const row = await env.DB.prepare(
     "SELECT official_reservation_id, date, end_time, status FROM reservations WHERE id = ? AND owner_user_id = ? AND status IN ('WAITING_MEMBER_CONFIRMATION', 'SCHEDULED', 'SUCCESS', 'SUBMITTED_UNVERIFIED')",
   ).bind(reservationId, user.id).first<{ official_reservation_id: string | null; date: string; end_time: string; status: string }>();
@@ -521,7 +773,29 @@ export async function cancelReservation(env: AppEnv, request: Request, reservati
   const updated = await env.DB.prepare("SELECT status FROM reservations WHERE id = ?").bind(reservationId).first<{ status: string }>();
   if (updated?.status !== "CANCELLED") throw new HttpError(502, "RESERVATION_SYNC_FAILED", "取消请求已提交，但官方状态尚未同步");
   await audit(env.DB, { actorUserId: user.id, actorType: "USER", action: "RESERVATION_CANCELLED", targetType: "RESERVATION", targetId: reservationId, result: "SUCCESS" });
-  return ok({ id: reservationId, status: "CANCELLED" });
+  return { id: reservationId, status: "CANCELLED" };
+}
+
+export async function cancelReservation(env: AppEnv, request: Request, reservationId: string): Promise<Response> {
+  const user = await requireBoundUser(env, request);
+  if (!env.OFFICIAL_GATEWAY) {
+    return ok(await executeCancelReservation(env, {
+      id: "direct", kind: "CANCEL_RESERVATION", lane: "WRITE", ownerUserId: user.id, dedupeKey: null,
+      payload: { reservationId }, status: "RUNNING", priority: 0, attemptCount: 1, maxAttempts: 1,
+      availableAt: Date.now(), result: null, errorCode: null, errorMessage: null,
+      createdAt: Date.now(), startedAt: Date.now(), finishedAt: null, updatedAt: Date.now(),
+    }));
+  }
+  const job = await env.OFFICIAL_GATEWAY.enqueue({
+    kind: "CANCEL_RESERVATION",
+    lane: "WRITE",
+    ownerUserId: user.id,
+    dedupeKey: `cancel:${user.id}:${reservationId}`,
+    payload: { reservationId },
+    priority: 4,
+    maxAttempts: 1,
+  });
+  return gatewayJobResponse(env, job, 2000);
 }
 
 export async function reservationDetail(env: AppEnv, request: Request, reservationId: string): Promise<Response> {
@@ -653,9 +927,10 @@ export async function invitableUsers(env: AppEnv, request: Request): Promise<Res
   })));
 }
 
-export async function officialUserSearch(env: AppEnv, request: Request): Promise<Response> {
-  const user = await requireBoundUser(env, request);
-  const query = requireString(new URL(request.url).searchParams.get("q"), "q", 80);
+async function executeOfficialUserSearch(env: AppEnv, job: OfficialGatewayJob): Promise<Record<string, unknown>> {
+  if (!job.ownerUserId) throw new HttpError(400, "GATEWAY_JOB_OWNER_REQUIRED", "联系人查询任务缺少用户");
+  const user = await userById(env, job.ownerUserId);
+  const query = requireString(job.payload.query, "q", 80);
   if (!/^[A-Za-z0-9_-]+$/.test(query)) throw new HttpError(400, "INVALID_FIELD", "请输入准确学号");
   const found = await searchOfficialUsers(env, await getAccessToken(env, user.id), query);
   if (found.userId === user.student_id) throw new HttpError(400, "INVALID_CONTACT", "不能将自己添加为联系人");
@@ -678,7 +953,29 @@ export async function officialUserSearch(env: AppEnv, request: Request): Promise
        SELECT id FROM recent_contacts WHERE owner_user_id = ? ORDER BY last_used_at DESC LIMIT 20
      )`,
   ).bind(user.id, user.id).run();
-  return ok({ id, studentId: found.userId, realName: found.realName });
+  return { id, studentId: found.userId, realName: found.realName, totalScore: found.totalScore };
+}
+
+export async function officialUserSearch(env: AppEnv, request: Request): Promise<Response> {
+  const user = await requireBoundUser(env, request);
+  const query = requireString(new URL(request.url).searchParams.get("q"), "q", 80);
+  if (!env.OFFICIAL_GATEWAY) {
+    return ok(await executeOfficialUserSearch(env, {
+      id: "direct", kind: "OFFICIAL_USER_SEARCH", lane: "READ", ownerUserId: user.id, dedupeKey: null,
+      payload: { query }, status: "RUNNING", priority: 0, attemptCount: 1, maxAttempts: 1,
+      availableAt: Date.now(), result: null, errorCode: null, errorMessage: null,
+      createdAt: Date.now(), startedAt: Date.now(), finishedAt: null, updatedAt: Date.now(),
+    }));
+  }
+  const job = await env.OFFICIAL_GATEWAY.enqueue({
+    kind: "OFFICIAL_USER_SEARCH",
+    lane: "READ",
+    ownerUserId: user.id,
+    dedupeKey: `user-search:${user.id}:${query}`,
+    payload: { query },
+    priority: 25,
+  });
+  return gatewayJobResponse(env, job, 1500);
 }
 
 export async function recentContacts(env: AppEnv, request: Request): Promise<Response> {
@@ -874,6 +1171,30 @@ export async function signTasks(env: AppEnv, request: Request): Promise<Response
 
 export async function createSignLink(env: AppEnv, request: Request, reservationId: string): Promise<Response> {
   const user = await requireBoundUser(env, request);
+  if (!env.OFFICIAL_GATEWAY) {
+    return ok(await executeCreateSignLink(env, {
+      id: "direct", kind: "CREATE_SIGN_LINK", lane: "WRITE", ownerUserId: user.id, dedupeKey: null,
+      payload: { reservationId }, status: "RUNNING", priority: 0, attemptCount: 1, maxAttempts: 1,
+      availableAt: Date.now(), result: null, errorCode: null, errorMessage: null,
+      createdAt: Date.now(), startedAt: Date.now(), finishedAt: null, updatedAt: Date.now(),
+    }));
+  }
+  const job = await env.OFFICIAL_GATEWAY.enqueue({
+    kind: "CREATE_SIGN_LINK",
+    lane: "WRITE",
+    ownerUserId: user.id,
+    dedupeKey: `sign-link:${user.id}:${reservationId}`,
+    payload: { reservationId },
+    priority: 1,
+    maxAttempts: 1,
+  });
+  return gatewayJobResponse(env, job, 3000);
+}
+
+async function executeCreateSignLink(env: AppEnv, job: OfficialGatewayJob): Promise<Record<string, unknown>> {
+  if (!job.ownerUserId) throw new HttpError(400, "GATEWAY_JOB_OWNER_REQUIRED", "签到任务缺少用户");
+  const reservationId = requireString(job.payload.reservationId, "reservationId", 80);
+  const user = await userById(env, job.ownerUserId);
   if (!flag(env, "ENABLE_SIGN_LINK_GENERATION")) throw new HttpError(503, "SIGN_LINK_DISABLED", "签到入口当前保持关闭");
   await syncOfficialReservationHistory(env, user);
   const reservation = await env.DB.prepare(
@@ -894,11 +1215,35 @@ export async function createSignLink(env: AppEnv, request: Request, reservationI
   url.searchParams.set("systemMac", device.systemMac);
   url.searchParams.set("roomId", device.roomId);
   url.searchParams.set("key", key);
-  return ok({ url: url.href, expiresAt: record.maxSignTime });
+  return { url: url.href, expiresAt: record.maxSignTime };
 }
 
 export async function signoutReservation(env: AppEnv, request: Request, reservationId: string): Promise<Response> {
   const user = await requireBoundUser(env, request);
+  if (!env.OFFICIAL_GATEWAY) {
+    return ok(await executeSignoutReservation(env, {
+      id: "direct", kind: "SIGNOUT_RESERVATION", lane: "WRITE", ownerUserId: user.id, dedupeKey: null,
+      payload: { reservationId }, status: "RUNNING", priority: 0, attemptCount: 1, maxAttempts: 1,
+      availableAt: Date.now(), result: null, errorCode: null, errorMessage: null,
+      createdAt: Date.now(), startedAt: Date.now(), finishedAt: null, updatedAt: Date.now(),
+    }));
+  }
+  const job = await env.OFFICIAL_GATEWAY.enqueue({
+    kind: "SIGNOUT_RESERVATION",
+    lane: "WRITE",
+    ownerUserId: user.id,
+    dedupeKey: `signout:${user.id}:${reservationId}`,
+    payload: { reservationId },
+    priority: 1,
+    maxAttempts: 1,
+  });
+  return gatewayJobResponse(env, job, 3000);
+}
+
+async function executeSignoutReservation(env: AppEnv, job: OfficialGatewayJob): Promise<Record<string, unknown>> {
+  if (!job.ownerUserId) throw new HttpError(400, "GATEWAY_JOB_OWNER_REQUIRED", "签退任务缺少用户");
+  const reservationId = requireString(job.payload.reservationId, "reservationId", 80);
+  const user = await userById(env, job.ownerUserId);
   const reservation = await env.DB.prepare(
     "SELECT official_reservation_id, room_id FROM reservations WHERE id = ? AND owner_user_id = ? AND status = 'SIGNED_IN'",
   ).bind(reservationId, user.id).first<{ official_reservation_id: string | null; room_id: number }>();
@@ -909,7 +1254,7 @@ export async function signoutReservation(env: AppEnv, request: Request, reservat
   await syncOfficialReservationHistory(env, user);
   const updated = await env.DB.prepare("SELECT status FROM reservations WHERE id = ?").bind(reservationId).first<{ status: string }>();
   if (updated?.status !== "SIGNED_OUT") throw new HttpError(502, "SIGNOUT_SYNC_FAILED", "签退请求已提交，但官方状态尚未同步");
-  return ok({ id: reservationId, status: "SIGNED_OUT" });
+  return { id: reservationId, status: "SIGNED_OUT" };
 }
 
 export async function submitSignParameters(env: AppEnv, request: Request, taskId: string): Promise<Response> {
@@ -967,6 +1312,8 @@ export async function adminCollection(env: AppEnv, request: Request, collection:
     "signout-tasks": "SELECT id, reservation_id, official_reservation_id, scheduled_at, status, attempt_count, executed_at FROM signout_tasks ORDER BY scheduled_at DESC LIMIT 200",
     emails: "SELECT id, recipient_email, template, status, attempt_count, next_attempt_at, last_error_message, created_at, sent_at FROM email_outbox ORDER BY created_at DESC LIMIT 200",
     "audit-logs": "SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 300",
+    "gateway-jobs": "SELECT id, kind, lane, owner_user_id, status, priority, attempt_count, max_attempts, error_code, error_message, created_at, started_at, finished_at FROM official_gateway_jobs ORDER BY created_at DESC LIMIT 300",
+    "gateway-snapshots": "SELECT cache_key, scope, owner_user_id, kind, version, fresh_until, stale_until, refreshed_at, refresh_job_id, last_error_code, last_error_message FROM official_gateway_snapshots ORDER BY updated_at DESC LIMIT 300",
   };
   const sql = queries[collection];
   if (!sql) throw new HttpError(404, "NOT_FOUND", "接口不存在");

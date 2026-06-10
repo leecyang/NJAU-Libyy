@@ -15,6 +15,7 @@ import {
   deleteAccount,
   deleteTeam,
   getCredentialStatus,
+  gatewayJobStatus,
   health,
   inviteTeamMember,
   invitableUsers,
@@ -23,12 +24,14 @@ import {
   listTasks,
   manualReservation,
   me,
+  refreshMe,
   officialUserSearch,
   receivedInvitations,
   recentContacts,
   removeTeamMember,
   reservationDetail,
   reservationHistory,
+  refreshRooms,
   respondInvitation,
   respondTeamInvitation,
   roomDetail,
@@ -43,6 +46,7 @@ import {
   teamInvitationPreview,
   updateTask,
 } from "./api/app";
+import { refreshTeamMemberScores, teamMemberScores } from "./api/team-scores";
 import { login, logout, register, resetPassword, sendRegisterCode, sendResetCode } from "./api/auth";
 import { json } from "./lib/http";
 
@@ -51,6 +55,7 @@ type Handler = (env: AppEnv, request: Request) => Promise<Response>;
 const routes = new Map<string, Handler>([
   ["GET /api/v1/health", health],
   ["GET /api/v1/me", me],
+  ["POST /api/v1/me/refresh", refreshMe],
   ["POST /api/v1/auth/send-register-code", sendRegisterCode],
   ["POST /api/v1/auth/register", register],
   ["POST /api/v1/auth/login", login],
@@ -63,6 +68,7 @@ const routes = new Map<string, Handler>([
   ["POST /api/v1/credentials/sms", submitCredentialSms],
   ["GET /api/v1/credentials/status", getCredentialStatus],
   ["GET /api/v1/rooms", rooms],
+  ["POST /api/v1/rooms/refresh", refreshRooms],
   ["POST /api/v1/reservations/manual", manualReservation],
   ["GET /api/v1/reservations/history", reservationHistory],
   ["POST /api/v1/reservations/sync", syncReservationHistory],
@@ -91,6 +97,9 @@ export async function routeApi(env: AppEnv, request: Request): Promise<Response>
   if (request.method === "POST" && taskAction?.[1] && (taskAction[2] === "enable" || taskAction[2] === "cancel")) {
     return changeTaskStatus(env, request, taskAction[1], taskAction[2]);
   }
+
+  const gatewayJobMatch = /^\/api\/v1\/official-jobs\/([^/]+)$/.exec(url.pathname);
+  if (request.method === "GET" && gatewayJobMatch?.[1]) return gatewayJobStatus(env, request, gatewayJobMatch[1]);
 
   const taskDetailMatch = /^\/api\/v1\/reservation-tasks\/([^/]+)$/.exec(url.pathname);
   if (taskDetailMatch?.[1] && request.method === "GET") return taskDetail(env, request, taskDetailMatch[1]);
@@ -122,6 +131,10 @@ export async function routeApi(env: AppEnv, request: Request): Promise<Response>
   const teamMemberMatch = /^\/api\/v1\/teams\/([^/]+)\/members\/([^/]+)$/.exec(url.pathname);
   if (request.method === "DELETE" && teamMemberMatch?.[1] && teamMemberMatch[2]) return removeTeamMember(env, request, teamMemberMatch[1], teamMemberMatch[2]);
 
+  const teamScoresMatch = /^\/api\/v1\/teams\/([^/]+)\/member-scores$/.exec(url.pathname);
+  if (request.method === "GET" && teamScoresMatch?.[1]) return teamMemberScores(env, request, teamScoresMatch[1]);
+  if (request.method === "POST" && teamScoresMatch?.[1]) return refreshTeamMemberScores(env, request, teamScoresMatch[1]);
+
   const invitationAction = /^\/api\/v1\/invitations\/([^/]+)\/(accept|reject)$/.exec(url.pathname);
   if (request.method === "POST" && invitationAction?.[1] && (invitationAction[2] === "accept" || invitationAction[2] === "reject")) {
     return respondInvitation(env, request, invitationAction[1], invitationAction[2]);
@@ -130,7 +143,7 @@ export async function routeApi(env: AppEnv, request: Request): Promise<Response>
   const signParameterMatch = /^\/api\/v1\/sign-tasks\/([^/]+)\/parameters$/.exec(url.pathname);
   if (request.method === "POST" && signParameterMatch?.[1]) return submitSignParameters(env, request, signParameterMatch[1]);
 
-  const adminList = /^\/api\/v1\/admin\/(users|credentials|tasks|reservations|invitations|teams|team-invitations|sign-tasks|signout-tasks|emails|audit-logs)$/.exec(url.pathname);
+  const adminList = /^\/api\/v1\/admin\/(users|credentials|tasks|reservations|invitations|teams|team-invitations|sign-tasks|signout-tasks|emails|audit-logs|gateway-jobs|gateway-snapshots)$/.exec(url.pathname);
   if (request.method === "GET" && adminList?.[1]) return adminCollection(env, request, adminList[1]);
 
   const adminStatus = /^\/api\/v1\/admin\/users\/([^/]+)\/status$/.exec(url.pathname);

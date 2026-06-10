@@ -100,6 +100,42 @@ afterEach(() => {
 });
 
 describe("rooms API availability windows", () => {
+  it("reads the shared snapshot without calling the official API when the gateway is enabled", async () => {
+    const gatewayEnv = {
+      OFFICIAL_GATEWAY: {
+        readSnapshot: vi.fn(async () => ({
+          key: "global:rooms:2026-06-02",
+          scope: "GLOBAL",
+          ownerUserId: null,
+          kind: "ROOMS",
+          value: {
+            dates: [{ date: "2026-06-02", label: "今天" }],
+            rooms: [{
+              ...baseRoom,
+              reservable: true,
+              dailyAvailability: [{ date: "2026-06-02", label: "今天", availableRanges: [{ startTime: "08:30", endTime: "10:00" }] }],
+            }],
+          },
+          version: 3,
+          freshUntil: Date.now() + 60_000,
+          staleUntil: Date.now() + 120_000,
+          refreshedAt: Date.now(),
+          refreshJobId: "job-1",
+          lastErrorCode: null,
+          lastErrorMessage: null,
+          freshness: "FRESH",
+        })),
+      },
+    } as unknown as AppEnv;
+
+    const response = await rooms(gatewayEnv, new Request("https://app.test/api/v1/rooms"));
+    const body = await responseJson(response);
+    expect(body.data.rooms[0].dailyAvailability[0].availableRanges).toEqual([{ startTime: "08:30", endTime: "10:00" }]);
+    expect(body.data.cache).toMatchObject({ status: "FRESH", version: 3, refreshJobId: "job-1" });
+    expect(fetchOfficialRooms).not.toHaveBeenCalled();
+    expect(fetchOfficialRoomDetail).not.toHaveBeenCalled();
+  });
+
   it("returns three daily availability rows when date is omitted", async () => {
     const response = await rooms(env(), new Request("https://app.test/api/v1/rooms"));
     const body = await responseJson(response);

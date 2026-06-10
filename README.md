@@ -9,10 +9,13 @@
 - Tailscale 默认启动参数为 `--reset --accept-routes=false --accept-dns=false`，启动时清理旧 prefs，且不接收 tailnet 路由或 DNS 配置。可通过 `.env` 中的 `TS_EXTRA_ARGS` 覆盖。
 - `app` 使用 Playwright 官方 Chromium 的非 root 沙箱；Compose 加载 `docker/playwright-seccomp.json` 以允许 Chromium 创建隔离的 user namespace。
 - `SQLite`：默认数据文件 `/data/njau-libyy.sqlite`，由 Compose volume 持久化。
+- `Official Access Gateway`：所有官方 HTTP 和 Playwright 自动化统一经过该层；SQLite 保存分层快照与持久化 job，进程内执行器提供 SingleFlight、分读写通道限流和短暂等待。
 - `scheduler`：Node 服务内每分钟执行自动预约、签到、签退、邮件 outbox 和清理任务。
 - `SMTP`：Node TLS 直连阿里企业邮。
 
 前端保持同源 API 访问，不需要跨域配置。你的反向代理只需要把公网域名转发到服务器本机 `127.0.0.1:3000`。
+
+页面首次加载只读取 SQLite 快照。房间快照按日期全站共享，积分、预约同步和队伍积分按用户隔离；用户点击刷新后 API 返回 `jobId`，前端轮询 `/api/v1/official-jobs/:jobId`，任务完成后再读取最新快照。预约、取消、签到链接和签退同样进入持久化写队列，关键操作允许短暂等待，但不会因客户端断开而丢失任务。
 
 默认 Compose 只监听 `127.0.0.1:3000`，适合 Nginx/Caddy 反向代理。如果确实要公网直接访问服务器 `3000` 端口，将 `.env` 中的 `APP_BIND_ADDR` 改为 `0.0.0.0` 后重新 `docker compose up -d`。
 
@@ -198,6 +201,10 @@ journalctl -u njau-libyy-update.service -f
 | `CAS_CREDENTIAL_ENCRYPTION_KEY` | 加密统一认证密码的独立 32 字节 base64url 密钥，必须配置且不得与 token 密钥相同 |
 | `PLAYWRIGHT_PROFILE_DIR` | 每用户隔离的 Chromium profile 根目录，Compose 默认 `/data/playwright-profiles` |
 | `PLAYWRIGHT_MAX_CONCURRENCY` | 同时运行的统一认证浏览器数量，默认 `2` |
+| `OFFICIAL_READ_CONCURRENCY` | 官方只读请求与刷新 job 最大并发，默认 `3` |
+| `OFFICIAL_WRITE_CONCURRENCY` | 官方写请求最大并发，默认 `1`，避免并发提交 |
+| `OFFICIAL_REQUEST_MIN_INTERVAL_MS` | 官方请求启动间隔，默认 `150ms` |
+| `OFFICIAL_JOB_POLL_INTERVAL_MS` | SQLite job 调度轮询间隔，默认 `250ms` |
 | `SIGN_ROOM_SYSTEM_MAC_MAP` | 房间 id 到签到设备 `systemMac` 的 JSON 映射 |
 | `SQLITE_PATH` | 容器内 SQLite 文件路径，Compose 默认 `/data/njau-libyy.sqlite` |
 | `WEB_DIST_DIR` | React 构建产物目录，Compose 默认 `/app/apps/web/dist` |

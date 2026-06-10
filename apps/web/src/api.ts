@@ -16,6 +16,18 @@ export class ApiError extends Error {
   }
 }
 
+export type GatewayJob<T = unknown> = {
+  jobId: string;
+  kind: string;
+  status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+  result: T | null;
+  error: { code: string; message: string | null } | null;
+  createdAt: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  updatedAt: number;
+};
+
 const credentialErrorCodes = new Set([
   "OFFICIAL_REAUTH_REQUIRED",
   "CREDENTIAL_UNBOUND",
@@ -60,4 +72,20 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
     throw new ApiError(error.code, error.message, response.status);
   }
   return (body && "data" in body ? body.data : body) as T;
+}
+
+export async function waitForGatewayJob<T>(initial: GatewayJob<T>, timeoutMs = 120_000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  let job = initial;
+  while (job.status === "QUEUED" || job.status === "RUNNING") {
+    if (Date.now() >= deadline) throw new ApiError("GATEWAY_JOB_TIMEOUT", "官方访问任务仍在处理中，请稍后查看", 408);
+    await new Promise((resolve) => globalThis.setTimeout(resolve, 500));
+    job = await api<GatewayJob<T>>(`/api/v1/official-jobs/${encodeURIComponent(job.jobId)}`);
+  }
+  if (job.status !== "SUCCEEDED") {
+    const code = job.error?.code ?? "GATEWAY_JOB_FAILED";
+    redirectToCredentialPage(code, `/api/v1/official-jobs/${encodeURIComponent(job.jobId)}`);
+    throw new ApiError(code, job.error?.message ?? "官方访问任务执行失败", 502);
+  }
+  return job.result as T;
 }

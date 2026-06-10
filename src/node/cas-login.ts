@@ -226,6 +226,13 @@ export class CasLoginManager implements CasAutomationAdapter {
   }
 
   private async run(attemptId: string): Promise<void> {
+    if (this.env.OFFICIAL_GATEWAY) {
+      return this.env.OFFICIAL_GATEWAY.runPlaywright(`cas:${attemptId}`, () => this.runAttempt(attemptId));
+    }
+    return this.runAttempt(attemptId);
+  }
+
+  private async runAttempt(attemptId: string): Promise<void> {
     let context: BrowserContext | null = null;
     let stage = "LOAD_ATTEMPT";
     try {

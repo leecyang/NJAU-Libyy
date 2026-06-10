@@ -116,7 +116,7 @@ function env(db: FakeDB, vars: Partial<AppEnv> = {}): AppEnv {
     DB: db,
     ENABLE_AUTO_SIGN_SUBMISSION: "true",
     ENABLE_SIGNOUT_SUBMISSION: "true",
-    SIGN_ROOM_SYSTEM_MAC_MAP: '{"2":"JWJA211231039"}',
+    SIGN_ROOM_SYSTEM_MAC_MAP: '{"2":"ZP2441000049"}',
     ...vars,
   } as unknown as AppEnv;
 }
@@ -160,7 +160,7 @@ describe("automatic sign scheduler", () => {
     await submitDueSignTasks(env(db), 1780375500000);
 
     expect(createOfficialQrSignCheckCode).toHaveBeenCalledOnce();
-    expect(createOfficialQrSignCheckCode).toHaveBeenCalledWith(expect.anything(), "token:owner-user-id", "2", "JWJA211231039");
+    expect(createOfficialQrSignCheckCode).toHaveBeenCalledWith(expect.anything(), "token:owner-user-id", "2", "ZP2441000049");
     expect(submitOfficialSign).toHaveBeenCalledOnce();
     expect(db.updates.some((update) => update.sql.includes("UPDATE reservations SET status = ?") && update.args.includes("SIGNED_IN"))).toBe(true);
   });
@@ -174,7 +174,7 @@ describe("automatic sign scheduler", () => {
     await submitDueSignTasks(env(db), 1780375500000);
 
     expect(submitOfficialSign).toHaveBeenCalledTimes(2);
-    expect(submitOfficialSign).toHaveBeenLastCalledWith(expect.anything(), "token:member-user-id", "2", "JWJA211231039", "short-lived-key");
+    expect(submitOfficialSign).toHaveBeenLastCalledWith(expect.anything(), "token:member-user-id", "2", "ZP2441000049", "short-lived-key");
     expect(db.updates.some((update) => update.sql.includes("UPDATE reservations SET status = ?") && update.args.includes("SIGNED_IN"))).toBe(true);
   });
 
