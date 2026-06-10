@@ -6,7 +6,8 @@
 
 - `app`：Node 22 服务，托管 `apps/web/dist` 静态前端和 `/api/v1/*` API。
 - `tailscale`：官方 `tailscale/tailscale` 镜像，接收 tailnet 中的校园网路由。
-- Tailscale 默认启动参数为 `--reset --accept-routes`，启动时清理旧 prefs 后只接收 tailnet 中已批准的校园网路由，避免把 app 全部出站流量强制导到某个 exit node。可通过 `.env` 中的 `TS_EXTRA_ARGS` 覆盖。
+- Tailscale 默认启动参数为 `--reset --accept-routes=false --accept-dns=false`，启动时清理旧 prefs，且不接收 tailnet 路由或 DNS 配置。可通过 `.env` 中的 `TS_EXTRA_ARGS` 覆盖。
+- `app` 使用 Playwright 官方 Chromium 的非 root 沙箱；Compose 加载 `docker/playwright-seccomp.json` 以允许 Chromium 创建隔离的 user namespace。
 - `SQLite`：默认数据文件 `/data/njau-libyy.sqlite`，由 Compose volume 持久化。
 - `scheduler`：Node 服务内每分钟执行自动预约、签到、签退、邮件 outbox 和清理任务。
 - `SMTP`：Node TLS 直连阿里企业邮。
@@ -188,7 +189,7 @@ journalctl -u njau-libyy-update.service -f
 | 变量 | 说明 |
 | --- | --- |
 | `OFFICIAL_NETWORK_MODE` | 默认 `tailscale-direct`，官方接口从容器直连并走 Tailscale 路由 |
-| `TS_EXTRA_ARGS` | Tailscale 启动参数，默认 `--reset --accept-routes`；如需全流量出口才手动追加 `--exit-node=<节点 IP>` |
+| `TS_EXTRA_ARGS` | Tailscale 启动参数，默认 `--reset --accept-routes=false --accept-dns=false`；需要接收 tailnet 路由时应显式覆盖 |
 | `APP_BIND_ADDR` | Compose 端口绑定地址，默认 `127.0.0.1`；公网直连 3000 时设为 `0.0.0.0` |
 | `LIBYY_API_BASE_URL` | 官方图书馆接口地址，默认 `https://libyy.njau.edu.cn` |
 | `CAS_CREDENTIAL_ENCRYPTION_KEY` | 加密统一认证密码的独立 32 字节 base64url 密钥，必须配置且不得与 token 密钥相同 |

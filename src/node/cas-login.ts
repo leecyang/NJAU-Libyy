@@ -33,9 +33,10 @@ type ActiveAttempt = {
 const ACTIVE_STATUSES = "('QUEUED', 'RUNNING', 'SMS_REQUIRED')";
 const ATTEMPT_TTL_MS = 10 * 60_000;
 const SMS_TTL_MS = 5 * 60_000;
+const SMS_INPUT_SELECTOR = '#dynamicCode, input[name="dynamicCode"], input[placeholder*="短信验证码"], #smsCode, #verifyCode, input[name="smsCode"]';
 
 class CasAutomationError extends Error {
-  constructor(readonly code: string, message: string) {
+  constructor(readonly code: string, message: string, readonly internalDetail?: string) {
     super(message);
   }
 }
@@ -217,6 +218,7 @@ export class CasLoginManager implements CasAutomationAdapter {
 
   private async run(attemptId: string): Promise<void> {
     let context: BrowserContext | null = null;
+    let stage = "LOAD_ATTEMPT";
     try {
       const attempt = await this.attempt(attemptId);
       if (!attempt?.pending_password_ciphertext || attempt.expires_at <= Date.now()) throw new CasAutomationError("CAS_ATTEMPT_EXPIRED", "认证任务已过期");
@@ -225,29 +227,44 @@ export class CasLoginManager implements CasAutomationAdapter {
       const profilePath = this.profilePath(attempt.user_id);
       await fs.mkdir(profilePath, { recursive: true, mode: 0o700 });
       await fs.chmod(profilePath, 0o700);
-      context = await chromium.launchPersistentContext(profilePath, {
-        headless: true,
-        chromiumSandbox: true,
-        viewport: { width: 1365, height: 768 },
-        userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-      });
+      stage = "LAUNCH_BROWSER";
+      try {
+        context = await chromium.launchPersistentContext(profilePath, {
+          headless: true,
+          chromiumSandbox: true,
+          viewport: { width: 1365, height: 768 },
+          userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        });
+      } catch (error) {
+        throw new CasAutomationError(
+          "CAS_BROWSER_START_FAILED",
+          "统一认证浏览器启动失败，请稍后重试",
+          error instanceof Error ? error.message : String(error),
+        );
+      }
       this.active.set(attemptId, { context });
       const page = context.pages()[0] ?? await context.newPage();
+      stage = "CLEAR_LIBYY_STATE";
       await this.clearLibyyState(context, page);
       await this.progress(attemptId, "RUNNING", "正在打开南京农业大学统一认证");
+      stage = "OPEN_CAS";
       await page.goto(new URL("/student/studentIndex", this.env.LIBYY_API_BASE_URL).toString(), {
         waitUntil: "domcontentloaded",
         timeout: this.loginTimeout(),
       });
       await this.waitForAuthserver(page);
+      stage = "SUBMIT_PASSWORD";
       await this.submitPassword(page, attempt.student_id, password);
+      stage = "WAIT_AFTER_PASSWORD";
       await this.waitAfterPassword(attempt, page);
+      stage = "READ_TOKEN";
       const reflushToken = await this.waitForToken(page);
       const user = await this.env.DB.prepare(
         `SELECT id, email, role, status, student_id, real_name, allow_auto_join_reservation, square_visibility
            FROM users WHERE id = ?`,
       ).bind(attempt.user_id).first<User>();
       if (!user) throw new CasAutomationError("ACCOUNT_NOT_FOUND", "账号不存在");
+      stage = "BIND_CREDENTIAL";
       await bindCredentialFromToken(this.env, user, reflushToken, attempt.student_id);
       const passwordCiphertext = await encryptSecret(password, this.env.CAS_CREDENTIAL_ENCRYPTION_KEY);
       const now = Date.now();
@@ -281,7 +298,11 @@ export class CasLoginManager implements CasAutomationAdapter {
         const user = await this.env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(failedAttempt.user_id).first<{ email: string }>();
         if (user) await queueMail(this.env, user.email, "OFFICIAL_REAUTH_REQUIRED", {});
       }
-      console.error(JSON.stringify({ level: "error", event: "cas_login_failed", attemptId, code }));
+      const detail = error instanceof CasAutomationError && error.internalDetail
+        ? error.internalDetail
+        : error instanceof Error ? error.message : String(error);
+      const stack = error instanceof Error ? error.stack : undefined;
+      console.error(JSON.stringify({ level: "error", event: "cas_login_failed", attemptId, stage, code, detail, stack }));
     } finally {
       this.active.delete(attemptId);
       await context?.close().catch(() => undefined);
@@ -332,7 +353,7 @@ export class CasLoginManager implements CasAutomationAdapter {
     while (Date.now() < deadline) {
       const url = page.url();
       if (url.includes("/student/studentIndex")) return;
-      if (url.includes("reAuthCheck") || url.includes("reAuthLoginView") || await visible(page, 'input[placeholder*="短信验证码"]')) {
+      if (url.includes("reAuthCheck") || url.includes("reAuthLoginView") || await visible(page, SMS_INPUT_SELECTOR)) {
         await this.handleSms(attempt, page);
         return;
       }
@@ -349,10 +370,17 @@ export class CasLoginManager implements CasAutomationAdapter {
   }
 
   private async handleSms(attempt: AttemptRow, page: Page): Promise<void> {
-    const input = page.locator('input[placeholder*="短信验证码"], #smsCode, #verifyCode, input[name="smsCode"]').first();
+    const input = page.locator(SMS_INPUT_SELECTOR).first();
     if (!await input.isVisible().catch(() => false)) throw new CasAutomationError("CAS_SMS_FORM_NOT_FOUND", "未找到短信验证码输入框");
-    const send = page.getByText("获取验证码", { exact: false }).first();
-    if (await send.isVisible().catch(() => false)) await send.click().catch(() => undefined);
+    const send = page.locator("#getDynamicCode");
+    if (await send.isVisible().catch(() => false)) {
+      await send.click();
+      await page.waitForFunction(() => {
+        const button = document.querySelector<HTMLButtonElement>("#getDynamicCode");
+        const uuid = document.querySelector<HTMLInputElement>("#uuid");
+        return Boolean(button?.disabled || uuid?.value || button?.textContent?.includes("秒"));
+      }, undefined, { timeout: 15_000 }).catch(() => undefined);
+    }
     const smsExpiresAt = Date.now() + SMS_TTL_MS;
     await this.progress(attempt.id, "SMS_REQUIRED", "请输入发送到绑定手机的 6 位短信验证码", smsExpiresAt);
     if (attempt.purpose === "AUTO_RECOVERY") {
@@ -363,7 +391,7 @@ export class CasLoginManager implements CasAutomationAdapter {
     for (let index = 0; index < 3; index += 1) {
       const code = await this.waitForSmsCode(attempt.id, smsExpiresAt);
       await input.fill(code);
-      const submit = page.getByText(/登录|确认|提交/).first();
+      const submit = page.locator("button.auth_login_btn.submit_btn:visible").first();
       if (await submit.isVisible().catch(() => false)) await submit.click();
       else await input.press("Enter");
       const responseDeadline = Date.now() + 10_000;
