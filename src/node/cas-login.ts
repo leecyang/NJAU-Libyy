@@ -236,10 +236,18 @@ export class CasLoginManager implements CasAutomationAdapter {
           userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
         });
       } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        if (detail.includes("Chromium sandboxing failed") || detail.includes("No usable sandbox")) {
+          throw new CasAutomationError(
+            "CAS_BROWSER_SANDBOX_UNAVAILABLE",
+            "服务器浏览器沙箱未正确配置，请联系管理员更新部署配置",
+            detail,
+          );
+        }
         throw new CasAutomationError(
           "CAS_BROWSER_START_FAILED",
           "统一认证浏览器启动失败，请稍后重试",
-          error instanceof Error ? error.message : String(error),
+          detail,
         );
       }
       this.active.set(attemptId, { context });

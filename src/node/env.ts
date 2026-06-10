@@ -79,7 +79,7 @@ function loadFallbackSecrets(): Pick<AppEnv, "TOKEN_ENCRYPTION_KEY" | "SESSION_S
 }
 
 export function loadNodeEnv(db: AppDatabase): AppEnv {
-  loadDotenv();
+  loadDotenv({ quiet: true });
   const secrets = loadFallbackSecrets();
   if (!validEncryptionKey(process.env.CAS_CREDENTIAL_ENCRYPTION_KEY)) {
     throw new Error("CAS_CREDENTIAL_ENCRYPTION_KEY must be configured with a base64url-encoded 32-byte key");

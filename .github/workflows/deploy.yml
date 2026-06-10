@@ -60,6 +60,7 @@ jobs:
           mkdir -p release
           docker save "njau-libyy-app:$version" "njau-libyy-app:latest" | gzip -9 > "release/njau-libyy-app-$version.tar.gz"
           cp docker-compose.release.yml release/docker-compose.yml
+          cp docker/playwright-seccomp.json release/playwright-seccomp.json
           cp .env.example release/env.example
           cat > release/manifest.json << EOF
           {
@@ -70,6 +71,7 @@ jobs:
             "files": {
               "image": "njau-libyy-app-$version.tar.gz",
               "compose": "docker-compose.yml",
+              "seccomp": "playwright-seccomp.json",
               "envExample": "env.example"
             }
           }

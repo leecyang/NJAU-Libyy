@@ -4,6 +4,14 @@ set -euo pipefail
 APP_DIR="${APP_DIR:-/opt/NJAU-Libyy}"
 R2_PUBLIC_BASE_URL="${R2_PUBLIC_BASE_URL:-https://cloud.way2api.fun/NJAU}"
 CHANNEL="${CHANNEL:-latest}"
+ARIA2_CONNECTIONS="${ARIA2_CONNECTIONS:-16}"
+
+for command in aria2c curl docker gzip; do
+  if ! command -v "$command" >/dev/null 2>&1; then
+    echo "[deploy] Missing required command: $command" >&2
+    exit 1
+  fi
+done
 
 mkdir -p "$APP_DIR/releases" "$APP_DIR/backups"
 cd "$APP_DIR"
@@ -17,7 +25,36 @@ MANIFEST_URL="$R2_PUBLIC_BASE_URL/$CHANNEL/manifest.json"
 MANIFEST_PATH="$APP_DIR/releases/manifest-$CHANNEL.json"
 
 echo "[deploy] Fetching $MANIFEST_URL"
-curl -fsSL "$MANIFEST_URL" -o "$MANIFEST_PATH"
+
+download() {
+  local url="$1"
+  local output="$2"
+  local output_dir
+  local output_name
+  output_dir="$(dirname "$output")"
+  output_name="$(basename "$output")"
+  mkdir -p "$output_dir"
+  echo "[deploy] Downloading $url"
+  aria2c \
+    --allow-overwrite=true \
+    --auto-file-renaming=false \
+    --check-certificate=true \
+    --continue=true \
+    --disable-ipv6=true \
+    --file-allocation=none \
+    --max-connection-per-server="$ARIA2_CONNECTIONS" \
+    --min-split-size=1M \
+    --retry-wait=3 \
+    --split="$ARIA2_CONNECTIONS" \
+    --timeout=60 \
+    --max-tries=5 \
+    --dir="$output_dir" \
+    --out="$output_name" \
+    "$url"
+}
+
+rm -f "$MANIFEST_PATH" "$MANIFEST_PATH.aria2"
+download "$MANIFEST_URL" "$MANIFEST_PATH"
 
 json_value() {
   local key="$1"
@@ -27,15 +64,17 @@ json_value() {
 VERSION="$(json_value version)"
 IMAGE_OBJECT="$(json_value image)"
 COMPOSE_OBJECT="$(json_value compose)"
+SECCOMP_OBJECT="$(json_value seccomp)"
 ENV_EXAMPLE_OBJECT="$(json_value envExample)"
 
-if [ -z "$VERSION" ] || [ -z "$IMAGE_OBJECT" ] || [ -z "$COMPOSE_OBJECT" ] || [ -z "$ENV_EXAMPLE_OBJECT" ]; then
+if [ -z "$VERSION" ] || [ -z "$IMAGE_OBJECT" ] || [ -z "$COMPOSE_OBJECT" ] || [ -z "$SECCOMP_OBJECT" ] || [ -z "$ENV_EXAMPLE_OBJECT" ]; then
   echo "[deploy] Invalid manifest: $MANIFEST_PATH" >&2
   exit 1
 fi
 
 IMAGE_PATH="$APP_DIR/releases/$IMAGE_OBJECT"
 COMPOSE_PATH="$APP_DIR/docker-compose.yml"
+SECCOMP_PATH="$APP_DIR/docker/playwright-seccomp.json"
 
 echo "[deploy] Version $VERSION"
 
@@ -44,31 +83,29 @@ if [ -f "$APP_DIR/.deployed-version" ]; then
   CURRENT_VERSION="$(cat "$APP_DIR/.deployed-version" | head -n 1)"
 fi
 
-if [ "$CURRENT_VERSION" = "$VERSION" ] && curl -fsS --connect-timeout 5 --max-time 15 http://127.0.0.1:3000/api/v1/health >/dev/null 2>&1; then
+if [ "$CURRENT_VERSION" = "$VERSION" ] && curl --http1.1 -4 -fsS --connect-timeout 5 --max-time 15 http://127.0.0.1:3000/api/v1/health >/dev/null 2>&1; then
   echo "[deploy] Already running $VERSION"
   exit 0
 fi
 
-download() {
-  local url="$1"
-  local output="$2"
-  echo "[deploy] Downloading $url"
-  if ! curl --fail --location --continue-at - --connect-timeout 15 --max-time 1800 --progress-bar "$url" -o "$output"; then
-    echo
-    echo "[deploy] Resumable download failed. Retrying from scratch."
-    rm -f "$output"
-    curl --fail --location --connect-timeout 15 --max-time 1800 --progress-bar "$url" -o "$output"
-  fi
-  echo
-}
-
 download "$R2_PUBLIC_BASE_URL/$CHANNEL/$IMAGE_OBJECT" "$IMAGE_PATH"
 download "$R2_PUBLIC_BASE_URL/$CHANNEL/$COMPOSE_OBJECT" "$COMPOSE_PATH"
+mkdir -p "$APP_DIR/docker"
+download "$R2_PUBLIC_BASE_URL/$CHANNEL/$SECCOMP_OBJECT" "$SECCOMP_PATH"
 download "$R2_PUBLIC_BASE_URL/$CHANNEL/$ENV_EXAMPLE_OBJECT" "$APP_DIR/.env.example"
+
+if [ ! -s "$SECCOMP_PATH" ]; then
+  echo "[deploy] Missing Playwright seccomp profile: $SECCOMP_PATH" >&2
+  exit 1
+fi
 
 printf 'APP_IMAGE_TAG=%s\n' "$VERSION" > "$APP_DIR/.release.env"
 echo "[deploy] Validating compose file"
 docker compose --env-file .env --env-file .release.env config >/dev/null
+if ! docker compose --env-file .env --env-file .release.env config | grep -q 'seccomp:./docker/playwright-seccomp.json'; then
+  echo "[deploy] Compose does not enable the Playwright seccomp profile" >&2
+  exit 1
+fi
 
 if docker compose ps -q app >/dev/null 2>&1; then
   CONTAINER_ID="$(docker compose ps -q app || true)"
@@ -86,7 +123,7 @@ echo "[deploy] Starting compose"
 docker compose --env-file .env --env-file .release.env up -d tailscale
 docker compose --env-file .env --env-file .release.env up -d --no-deps --force-recreate app
 docker compose ps
-curl -fsS http://127.0.0.1:3000/api/v1/health
+curl --http1.1 -4 -fsS http://127.0.0.1:3000/api/v1/health
 echo
 printf '%s\n' "$VERSION" > "$APP_DIR/.deployed-version"
 echo "[deploy] Updated to $VERSION"
