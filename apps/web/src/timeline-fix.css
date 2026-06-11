@@ -1,26 +1,77 @@
-/* Fix room timeline beans that accidentally inherit the global .empty placeholder style.
-   The unavailable state currently uses className="empty"; this resets it back to
-   the same no-content block sizing as available and selected beans. */
+/*
+ * Timeline bean isolation.
+ *
+ * The room availability timeline is rendered inside .room-card, whose broad text
+ * selector `.room-card span` affects the heartbeat <span> nodes. The unavailable
+ * state was also named `empty`, colliding with the global placeholder `.empty`
+ * component. These overrides intentionally isolate heartbeat nodes from both
+ * page-level text styles and the global empty-state styles.
+ */
 
-.uptime-kuma-heartbeat.empty {
-  display: block;
-  width: 100%;
-  height: 100%;
+.room-card .availability-history .uptime-kuma-ticks,
+.room-card .availability-history .uptime-kuma-timeline,
+.room-card .availability-history .uptime-kuma-segment,
+.room-card .availability-history .uptime-kuma-heartbeat,
+.slot-wall .uptime-kuma-ticks,
+.slot-wall .uptime-kuma-timeline,
+.slot-wall .uptime-kuma-segment,
+.slot-wall .uptime-kuma-heartbeat {
   min-width: 0;
-  min-height: 0;
   max-width: 100%;
-  padding: 0 !important;
-  margin: 0;
-  border: 1px solid var(--ink);
-  border-radius: 999px;
-  background: var(--ink);
-  box-shadow: none;
-  line-height: 0;
-  text-align: initial;
 }
 
-button.uptime-kuma-heartbeat.empty {
-  min-width: 0;
-  min-height: 0;
-  color: transparent;
+.room-card .availability-history .uptime-kuma-heartbeat,
+.slot-wall .uptime-kuma-heartbeat {
+  box-sizing: border-box !important;
+  display: block !important;
+  width: 100% !important;
+  height: 100% !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  max-width: 100% !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+  font-size: 0 !important;
+  line-height: 0 !important;
+  color: transparent !important;
+  text-align: initial !important;
+  white-space: normal !important;
+  vertical-align: initial !important;
+  appearance: none !important;
+}
+
+.room-card .availability-history span.uptime-kuma-heartbeat,
+.slot-wall span.uptime-kuma-heartbeat {
+  flex: initial !important;
+}
+
+.room-card .availability-history .uptime-kuma-heartbeat.available,
+.slot-wall .uptime-kuma-heartbeat.available {
+  border: 1px solid var(--hairline) !important;
+  border-radius: 999px !important;
+  background: var(--canvas) !important;
+  box-shadow: none !important;
+}
+
+.room-card .availability-history .uptime-kuma-heartbeat.empty,
+.slot-wall .uptime-kuma-heartbeat.empty,
+.room-card .availability-history .uptime-kuma-heartbeat[aria-disabled="true"] {
+  border: 1px solid var(--ink) !important;
+  border-radius: 999px !important;
+  background: var(--ink) !important;
+  box-shadow: none !important;
+}
+
+.room-card .availability-history .uptime-kuma-heartbeat.selected,
+.slot-wall .uptime-kuma-heartbeat.selected {
+  border: 1px solid var(--ink) !important;
+  border-radius: 999px !important;
+  background: var(--canvas) !important;
+  box-shadow: inset 0 0 0 2px var(--ink) !important;
+}
+
+.room-card .availability-history .uptime-kuma-timeline {
+  width: 100%;
+  overflow: hidden;
 }
