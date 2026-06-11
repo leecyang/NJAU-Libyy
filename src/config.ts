@@ -44,8 +44,6 @@ export type AppEnv = {
   PASSWORD_HASH_SECRET?: string;
   SMTP_PASSWORD?: string;
   SIGN_ROOM_SYSTEM_MAC_MAP?: string;
-  AUTHORIZED_SIGN_SYSTEM_MAC?: string;
-  AUTHORIZED_SIGN_ROOM_ID?: string;
   SCHEDULER_MAX_RUNTIME_MS?: string;
   SCHEDULER_REFRESH_LIMIT?: string;
   SCHEDULER_PREPARE_LIMIT?: string;

@@ -97,6 +97,9 @@ export function assertReservation(room: Room, input: ReservationInput, enforceHa
   if (input.memberCount + 1 < room.minReservationNum) {
     throw new HttpError(400, "MEMBERS_REQUIRED", `该房间至少需要 ${room.minReservationNum} 人`);
   }
+  if (room.maxNum > 0 && input.memberCount + 1 > room.maxNum) {
+    throw new HttpError(400, "ROOM_CAPACITY_EXCEEDED", `该房间最多允许 ${room.maxNum} 人`);
+  }
   if (room.dateTimeSlicesList && !isRoomTimeAvailable(room, input.startTime, input.endTime)) {
     throw new HttpError(409, "ROOM_TIME_UNAVAILABLE", "所选时间段已不可预约");
   }

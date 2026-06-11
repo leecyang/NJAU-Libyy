@@ -27,6 +27,7 @@ import {
   type MemberSnapshot,
 } from "./reservations";
 import { assertReservation, type Room } from "./validation";
+import { assertPrimaryReservationScore } from "./reservation-participants";
 
 type SchedulerLimitName =
   | "SCHEDULER_REFRESH_LIMIT"
@@ -78,9 +79,9 @@ export async function runScheduler(env: AppEnv): Promise<void> {
   });
   await budget.run("prepare-reservation-tasks", () => prepareReservationTasks(env, now, schedulerLimit(env, "SCHEDULER_PREPARE_LIMIT", 5, 20)));
   await budget.run("submit-reservation-tasks", () => submitReadyReservationTasks(env, now, schedulerLimit(env, "SCHEDULER_RESERVATION_SUBMIT_LIMIT", 2, 10)), 4000);
-  await budget.run("submit-sign-tasks", () => submitDueSignTasks(env, now, schedulerLimit(env, "SCHEDULER_SIGN_LIMIT", 5, 20)), 3000);
-  await budget.run("submit-signout-tasks", () => submitDueSignoutTasks(env, now, schedulerLimit(env, "SCHEDULER_SIGNOUT_LIMIT", 5, 20)), 3000);
   await budget.run("sync-official-reservations", () => syncPendingOfficialReservations(env, schedulerLimit(env, "SCHEDULER_SYNC_LIMIT", 3, 20)), 4000);
+  await budget.run("backfill-sign-workflows", () => backfillSignWorkflows(env, schedulerLimit(env, "SCHEDULER_SIGN_LIMIT", 5, 20)), 3500);
+  await budget.run("submit-sign-workflows", () => submitDueSignWorkflows(env, now, schedulerLimit(env, "SCHEDULER_SIGN_LIMIT", 5, 20)), 3000);
   await budget.run("refresh-credentials", () => refreshDueCredentials(env, now, schedulerLimit(env, "SCHEDULER_REFRESH_LIMIT", 3, 20)), 4000);
   await budget.run("deliver-mail", () => deliverDueMail(env, now, schedulerLimit(env, "SCHEDULER_MAIL_LIMIT", 2, 10)), 4000);
   await budget.run("cleanup-sessions", () => cleanupSessions(env, now));
@@ -202,6 +203,7 @@ async function prepareReservationTasks(env: AppEnv, now: number, limit = 5): Pro
 type ReadyTask = {
   id: string;
   owner_user_id: string;
+  requested_by_user_id: string;
   target_date: string;
   start_time: string;
   end_time: string;
@@ -231,7 +233,8 @@ type AuthorizedMember = OfficialMember & {
 
 async function authorizedMembers(env: AppEnv, taskId: string): Promise<AuthorizedMember[]> {
   const rows = await env.DB.prepare(
-    `SELECT source, member_user_id, official_student_id, official_real_name FROM reservation_task_members WHERE task_id = ?`,
+    `SELECT source, member_user_id, official_student_id, official_real_name
+       FROM reservation_task_members WHERE task_id = ? ORDER BY participant_order, created_at`,
   ).bind(taskId).all<{ source: "TEAM" | "CONTACT" | "AUTO_JOIN"; member_user_id: string | null; official_student_id: string; official_real_name: string }>();
   return rows.results.map((row) => ({ source: row.source, localUserId: row.member_user_id, userId: row.official_student_id, userName: row.official_real_name }));
 }
@@ -260,7 +263,9 @@ function redactedResponse(response: unknown): string {
 async function submitReadyReservationTasks(env: AppEnv, now: number, limit = 2): Promise<void> {
   if (!flag(env, "ENABLE_SINGLE_RESERVATION_SUBMISSION")) return;
   const tasks = await env.DB.prepare(
-    `SELECT id, owner_user_id, target_date, start_time, end_time FROM reservation_tasks WHERE status = 'READY' LIMIT ${limit}`,
+    `SELECT id, owner_user_id, COALESCE(requested_by_user_id, owner_user_id) AS requested_by_user_id,
+            target_date, start_time, end_time
+       FROM reservation_tasks WHERE status = 'READY' LIMIT ${limit}`,
   ).all<ReadyTask>();
 
   for (const task of tasks.results) {
@@ -272,6 +277,17 @@ async function submitReadyReservationTasks(env: AppEnv, now: number, limit = 2):
       const owner = await env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(task.owner_user_id).first<{ email: string }>();
       const token = await getAccessToken(env, task.owner_user_id);
       const profile = await getOfficialReservationProfile(env, task.owner_user_id, token);
+      const primary = await env.DB.prepare("SELECT id, email, student_id, real_name FROM users WHERE id = ?")
+        .bind(task.owner_user_id).first<{ id: string; email: string; student_id: string; real_name: string }>();
+      if (!primary?.student_id) throw new HttpError(409, "SETUP_REQUIRED", "主预约人尚未完成官方绑定");
+      await assertPrimaryReservationScore(env, {
+        id: primary.id,
+        email: primary.email,
+        studentId: primary.student_id,
+        realName: primary.real_name,
+        isCurrentUser: primary.id === task.requested_by_user_id,
+        teamName: null,
+      });
       const members = await authorizedMembers(env, task.id);
       if (members.length && !flag(env, "ENABLE_MULTIMEMBER_RESERVATION_SUBMISSION")) {
         throw new HttpError(503, "MULTIMEMBER_SUBMISSION_DISABLED", "多人自动预约尚未开放");
@@ -330,11 +346,11 @@ async function submitReadyReservationTasks(env: AppEnv, now: number, limit = 2):
       await env.DB.batch([
         env.DB.prepare(
           `INSERT INTO reservations
-            (id, task_id, owner_user_id, room_id, room_name_snapshot, date, start_time, end_time,
+            (id, task_id, owner_user_id, requested_by_user_id, room_id, room_name_snapshot, date, start_time, end_time,
              member_snapshot_json, submission_type, status, official_response_json_redacted, official_reservation_id,
              official_status, synced_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'AUTO', ?, ?, ?, ?, ?, ?, ?, ?)`,
-        ).bind(reservationId, task.id, task.owner_user_id, submitted.room.id, submitted.room.name, task.target_date, task.start_time, task.end_time,
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'AUTO', ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(reservationId, task.id, task.owner_user_id, task.requested_by_user_id, submitted.room.id, submitted.room.name, task.target_date, task.start_time, task.end_time,
           JSON.stringify(members), localReservationStatus(official.reservationStatus), redactedResponse(submitted.response), String(official.id), official.reservationStatus, createdAt, createdAt, createdAt),
         env.DB.prepare("UPDATE reservation_tasks SET status = 'SUCCESS', official_reservation_id = ?, updated_at = ? WHERE id = ? AND status = 'SUBMITTING'").bind(String(official.id), createdAt, task.id),
       ]);
@@ -374,6 +390,192 @@ export async function syncPendingOfficialReservations(env: AppEnv, limit = 3): P
       await syncOfficialReservationHistory(env, user);
     } catch {
       console.error(JSON.stringify({ level: "error", event: "official_reservation_sync_failed", userId: user.id }));
+    }
+  }
+}
+
+async function backfillSignWorkflows(env: AppEnv, limit = 20): Promise<void> {
+  const rows = await env.DB.prepare(
+    `SELECT r.id, r.owner_user_id, r.official_reservation_id
+       FROM reservations r
+       LEFT JOIN sign_workflows w ON w.reservation_id = r.id
+      WHERE w.id IS NULL AND r.official_reservation_id IS NOT NULL
+        AND r.status IN ('WAITING_MEMBER_CONFIRMATION', 'SCHEDULED', 'SIGNED_IN')
+      LIMIT ${limit}`,
+  ).all<{ id: string; owner_user_id: string; official_reservation_id: string }>();
+  for (const row of rows.results) {
+    try {
+      const { record } = await findOfficialRecord(env, row.owner_user_id, row.official_reservation_id);
+      if (record) await ensureReservationTasks(env, row.id, record);
+    } catch {
+      // Later scheduler passes retry the backfill after credentials or official access recover.
+    }
+  }
+}
+
+type SignWorkflowRow = {
+  id: string;
+  official_reservation_id: string;
+  room_id: number;
+  date: string;
+  start_time: string;
+  end_time: string;
+  sign_scheduled_at: number;
+  signout_scheduled_at: number;
+  signout_status: string;
+};
+
+type WorkflowParticipantRow = {
+  user_id: string;
+  participant_order: number;
+  sign_status: string;
+};
+
+function workflowRecordMatches(workflow: SignWorkflowRow, record: { roomId: number; startTime: number; endTime: number }): boolean {
+  if (record.roomId !== workflow.room_id) return false;
+  const start = shanghaiParts(record.startTime);
+  const end = shanghaiParts(record.endTime);
+  return start.date === workflow.date && start.time === workflow.start_time && end.time === workflow.end_time;
+}
+
+async function participantOfficialRecord(env: AppEnv, workflow: SignWorkflowRow, userId: string) {
+  const token = await getAccessToken(env, userId);
+  const profile = await getOfficialReservationProfile(env, userId, token);
+  const records = await fetchOfficialReservationHistory(env, token, profile.studentId);
+  const record = records.find((candidate) => String(candidate.id) === workflow.official_reservation_id)
+    ?? records.find((candidate) => workflowRecordMatches(workflow, candidate))
+    ?? null;
+  return { token, profile, record };
+}
+
+export async function submitDueSignWorkflows(env: AppEnv, now: number, limit = 20): Promise<void> {
+  const workflows = await env.DB.prepare(
+    `SELECT id, official_reservation_id, room_id, date, start_time, end_time,
+            sign_scheduled_at, signout_scheduled_at, signout_status
+       FROM sign_workflows
+      WHERE status = 'ACTIVE' AND (sign_scheduled_at <= ? OR signout_scheduled_at <= ?)
+      ORDER BY MIN(sign_scheduled_at, signout_scheduled_at) LIMIT ${limit}`,
+  ).bind(now, now).all<SignWorkflowRow>();
+
+  for (const workflow of workflows.results) {
+    const participants = await env.DB.prepare(
+      `SELECT user_id, participant_order, sign_status
+         FROM sign_workflow_participants WHERE workflow_id = ? ORDER BY participant_order`,
+    ).bind(workflow.id).all<WorkflowParticipantRow>();
+
+    if (flag(env, "ENABLE_AUTO_SIGN_SUBMISSION") && now >= workflow.sign_scheduled_at) {
+      for (const participant of participants.results) {
+        if (participant.sign_status === "SUCCESS" || participant.sign_status === "DISABLED") continue;
+        try {
+          const current = await participantOfficialRecord(env, workflow, participant.user_id);
+          const record = current.record;
+          if (!record || [61, 63].includes(record.reservationStatus)) {
+            await env.DB.prepare(
+              `UPDATE sign_workflow_participants
+                  SET sign_status = 'DISABLED', last_error_code = 'RESERVATION_NOT_SIGNABLE', updated_at = ?
+                WHERE workflow_id = ? AND user_id = ?`,
+            ).bind(Date.now(), workflow.id, participant.user_id).run();
+            continue;
+          }
+          if ([31, 51, 53].includes(record.reservationStatus)) {
+            await env.DB.prepare(
+              `UPDATE sign_workflow_participants
+                  SET sign_status = 'SUCCESS', signed_at = COALESCE(signed_at, ?), updated_at = ?
+                WHERE workflow_id = ? AND user_id = ?`,
+            ).bind(record.signInTime ?? Date.now(), Date.now(), workflow.id, participant.user_id).run();
+            continue;
+          }
+          if (record.reservationStatus !== 21 || (record.minSignTime && now < record.minSignTime)) continue;
+          if (record.maxSignTime && now > record.maxSignTime) {
+            await env.DB.prepare(
+              `UPDATE sign_workflow_participants
+                  SET sign_status = 'FAILED', last_error_code = 'SIGN_WINDOW_EXPIRED', updated_at = ?
+                WHERE workflow_id = ? AND user_id = ?`,
+            ).bind(Date.now(), workflow.id, participant.user_id).run();
+            continue;
+          }
+          const claimed = await env.DB.prepare(
+            `UPDATE sign_workflow_participants
+                SET sign_status = 'SUBMITTING', sign_attempt_count = sign_attempt_count + 1, updated_at = ?
+              WHERE workflow_id = ? AND user_id = ? AND sign_status IN ('PENDING', 'SUBMITTING', 'FAILED')`,
+          ).bind(Date.now(), workflow.id, participant.user_id).run();
+          if (claimed.meta.changes !== 1) continue;
+          const device = resolveSignDevice(env, record.roomId);
+          if (Number(device.roomId) !== workflow.room_id) throw new HttpError(409, "SIGN_ROOM_MISMATCH", "签到预约的真实房间与任务不一致");
+          const key = await createOfficialQrSignCheckCode(env, current.token, device.roomId, device.systemMac);
+          await submitOfficialSign(env, current.token, device.roomId, device.systemMac, key);
+          const confirmed = await participantOfficialRecord(env, workflow, participant.user_id);
+          if (confirmed.record && [31, 51, 53].includes(confirmed.record.reservationStatus)) {
+            await env.DB.prepare(
+              `UPDATE sign_workflow_participants
+                  SET sign_status = 'SUCCESS', signed_at = ?, last_error_code = NULL, last_error_message = NULL, updated_at = ?
+                WHERE workflow_id = ? AND user_id = ?`,
+            ).bind(confirmed.record.signInTime ?? Date.now(), Date.now(), workflow.id, participant.user_id).run();
+          } else {
+            await env.DB.prepare(
+              `UPDATE sign_workflow_participants SET sign_status = 'PENDING', last_error_code = 'SIGN_SYNC_PENDING', updated_at = ?
+                WHERE workflow_id = ? AND user_id = ?`,
+            ).bind(Date.now(), workflow.id, participant.user_id).run();
+          }
+        } catch (error) {
+          await env.DB.prepare(
+            `UPDATE sign_workflow_participants
+                SET sign_status = 'PENDING', last_error_code = ?, last_error_message = ?, updated_at = ?
+              WHERE workflow_id = ? AND user_id = ?`,
+          ).bind(
+            error instanceof HttpError ? error.code : "AUTOMATIC_SIGN_FAILED",
+            error instanceof Error ? error.message : "自动签到失败",
+            Date.now(),
+            workflow.id,
+            participant.user_id,
+          ).run();
+        }
+      }
+    }
+
+    const refreshed = await env.DB.prepare(
+      "SELECT user_id, participant_order, sign_status FROM sign_workflow_participants WHERE workflow_id = ? ORDER BY participant_order",
+    ).bind(workflow.id).all<WorkflowParticipantRow>();
+    const allSigned = refreshed.results.length > 0 && refreshed.results.every((participant) => participant.sign_status === "SUCCESS");
+    if (!allSigned || !flag(env, "ENABLE_SIGNOUT_SUBMISSION") || now < workflow.signout_scheduled_at || workflow.signout_status === "SUCCESS") continue;
+
+    await env.DB.prepare(
+      `UPDATE sign_workflows SET signout_status = 'SUBMITTING', signout_attempt_count = signout_attempt_count + 1, updated_at = ?
+        WHERE id = ? AND signout_status IN ('PENDING', 'SUBMITTING', 'FAILED')`,
+    ).bind(Date.now(), workflow.id).run();
+    let signedOutBy: string | null = null;
+    let lastErrorCode = "AUTOMATIC_SIGNOUT_FAILED";
+    for (const participant of refreshed.results) {
+      try {
+        const current = await participantOfficialRecord(env, workflow, participant.user_id);
+        if (!current.record) continue;
+        if ([51, 53].includes(current.record.reservationStatus)) {
+          signedOutBy = participant.user_id;
+          break;
+        }
+        if (current.record.reservationStatus !== 31) continue;
+        if (current.record.roomId !== workflow.room_id) throw new HttpError(409, "SIGNOUT_ROOM_MISMATCH", "签退预约的真实房间与任务不一致");
+        await signOutOfficialReservation(env, current.token, current.profile.studentId, String(current.record.roomId));
+        const confirmed = await participantOfficialRecord(env, workflow, participant.user_id);
+        if (confirmed.record && [51, 53].includes(confirmed.record.reservationStatus)) {
+          signedOutBy = participant.user_id;
+          break;
+        }
+        lastErrorCode = "SIGNOUT_SYNC_PENDING";
+      } catch (error) {
+        lastErrorCode = error instanceof HttpError ? error.code : "AUTOMATIC_SIGNOUT_FAILED";
+      }
+    }
+    if (signedOutBy) {
+      await env.DB.prepare(
+        `UPDATE sign_workflows
+            SET status = 'SUCCESS', signout_status = 'SUCCESS', signout_user_id = ?, signout_executed_at = ?,
+                failure_code = NULL, failure_message = NULL, updated_at = ? WHERE id = ?`,
+      ).bind(signedOutBy, Date.now(), Date.now(), workflow.id).run();
+    } else {
+      await env.DB.prepare(
+        `UPDATE sign_workflows SET signout_status = 'PENDING', failure_code = ?, updated_at = ? WHERE id = ?`,
+      ).bind(lastErrorCode, Date.now(), workflow.id).run();
     }
   }
 }

@@ -1,6 +1,7 @@
 import { config as loadDotenv } from "dotenv";
 import type { AppEnv } from "../config";
 import type { AppDatabase } from "../db/types";
+import { assertCompleteSignDeviceMap } from "../lib/reservations";
 
 const defaults = {
   LIBYY_APP_ID: "41043f17-3c17-4f2e-894c-5d615f992db9",
@@ -91,13 +92,15 @@ export function loadNodeEnv(db: AppDatabase): AppEnv {
   if (process.env.CAS_CREDENTIAL_ENCRYPTION_KEY === secrets.TOKEN_ENCRYPTION_KEY) {
     throw new Error("CAS_CREDENTIAL_ENCRYPTION_KEY must be different from TOKEN_ENCRYPTION_KEY");
   }
-  return {
+  const env = {
     DB: db,
     ...defaults,
     ...process.env,
     ...secrets,
     CAS_CREDENTIAL_ENCRYPTION_KEY: process.env.CAS_CREDENTIAL_ENCRYPTION_KEY,
   } as AppEnv;
+  assertCompleteSignDeviceMap(env.SIGN_ROOM_SYSTEM_MAC_MAP);
+  return env;
 }
 
 export function nodePort(): number {

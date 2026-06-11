@@ -1,0 +1,154 @@
+
+> njau-libyy@0.1.0 dev
+> npm run build:web && npm run build:server && node dist/server/node/server.js
+
+
+> njau-libyy@0.1.0 build:web
+> vite build --config apps/web/vite.config.ts
+
+[36mvite v8.0.16 [32mbuilding client environment for production...[36m[39m
+[2Ktransforming...✓ 1741 modules transformed.
+rendering chunks...
+computing gzip size...
+apps/web/dist/index.html                   0.41 kB │ gzip:  0.28 kB
+apps/web/dist/assets/index-_24Tm_Gy.css   25.11 kB │ gzip:  5.25 kB
+apps/web/dist/assets/index-B_fqTzNI.js   238.04 kB │ gzip: 73.69 kB
+
+[32m✓ built in 213ms[39m
+
+> njau-libyy@0.1.0 build:server
+> esbuild src/node/server.ts --bundle --platform=node --format=esm --target=node22 --outfile=dist/server/node/server.js --external:better-sqlite3 --external:dotenv --external:playwright --external:playwright-core
+
+
+  dist\server\node\server.js  254.0kb
+
+Done in 56ms
+[config] Using built-in fallback secret values for TOKEN_ENCRYPTION_KEY, SESSION_SECRET, PASSWORD_HASH_SECRET. Set stable random values in .env for production.
+{"level":"info","event":"server_started","port":3000,"staticRoot":"E:\\leecyang\\NJAU-Libyy\\apps\\web\\dist","databasePath":"/data/njau-libyy.sqlite"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"af30892e-a386-4754-83b4-39fadffe76fc","kind":"USER_SCORE_REFRESH","attempt":1,"retry":true,"code":"CREDENTIAL_NOT_ACTIVE"}
+{"level":"error","event":"official_request_failed","status":400,"officialCode":400}
+{"level":"error","event":"official_gateway_job_failed","jobId":"4d52c2d9-d394-48a8-9d40-3fd3fb386567","kind":"ROOMS_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"af30892e-a386-4754-83b4-39fadffe76fc","kind":"USER_SCORE_REFRESH","attempt":2,"retry":true,"code":"CREDENTIAL_NOT_ACTIVE"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"4d52c2d9-d394-48a8-9d40-3fd3fb386567","kind":"ROOMS_REFRESH","attempt":2,"retry":true,"code":"CREDENTIAL_NOT_ACTIVE"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"af30892e-a386-4754-83b4-39fadffe76fc","kind":"USER_SCORE_REFRESH","attempt":3,"retry":false,"code":"CREDENTIAL_NOT_ACTIVE"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"4d52c2d9-d394-48a8-9d40-3fd3fb386567","kind":"ROOMS_REFRESH","attempt":3,"retry":false,"code":"CREDENTIAL_NOT_ACTIVE"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"6915640a-f1c0-494a-aae6-07e3b78b8ece","kind":"ROOMS_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"738d9895-4baf-4a10-ac5c-d7a96d25aa25","kind":"USER_SCORE_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"6915640a-f1c0-494a-aae6-07e3b78b8ece","kind":"ROOMS_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"738d9895-4baf-4a10-ac5c-d7a96d25aa25","kind":"USER_SCORE_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"6915640a-f1c0-494a-aae6-07e3b78b8ece","kind":"ROOMS_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"738d9895-4baf-4a10-ac5c-d7a96d25aa25","kind":"USER_SCORE_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"0cd44ef0-dabb-465c-a83b-de2c7e618405","kind":"ROOMS_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"279a4114-aa31-48b3-b568-d590d212bda6","kind":"USER_SCORE_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"0cd44ef0-dabb-465c-a83b-de2c7e618405","kind":"ROOMS_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"279a4114-aa31-48b3-b568-d590d212bda6","kind":"USER_SCORE_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"0cd44ef0-dabb-465c-a83b-de2c7e618405","kind":"ROOMS_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"279a4114-aa31-48b3-b568-d590d212bda6","kind":"USER_SCORE_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"3ef07250-04fb-4551-ac7c-d4dca3eff683","kind":"ROOMS_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"681078f5-76fd-4ce7-8d14-de3ba419253d","kind":"USER_SCORE_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"3ef07250-04fb-4551-ac7c-d4dca3eff683","kind":"ROOMS_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"681078f5-76fd-4ce7-8d14-de3ba419253d","kind":"USER_SCORE_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"3ef07250-04fb-4551-ac7c-d4dca3eff683","kind":"ROOMS_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"681078f5-76fd-4ce7-8d14-de3ba419253d","kind":"USER_SCORE_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"90576d18-800f-4be1-bca2-2b3509ea1316","kind":"ROOMS_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"5c4d6033-8c02-4430-ab1f-f26d4d71e374","kind":"USER_SCORE_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"90576d18-800f-4be1-bca2-2b3509ea1316","kind":"ROOMS_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"5c4d6033-8c02-4430-ab1f-f26d4d71e374","kind":"USER_SCORE_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"90576d18-800f-4be1-bca2-2b3509ea1316","kind":"ROOMS_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"5c4d6033-8c02-4430-ab1f-f26d4d71e374","kind":"USER_SCORE_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"3b0b0d73-ec94-4b34-b765-ddc79a46f3c6","kind":"ROOMS_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"04cc0963-039d-4013-996b-4c21807f83e6","kind":"USER_SCORE_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"3b0b0d73-ec94-4b34-b765-ddc79a46f3c6","kind":"ROOMS_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"04cc0963-039d-4013-996b-4c21807f83e6","kind":"USER_SCORE_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"3b0b0d73-ec94-4b34-b765-ddc79a46f3c6","kind":"ROOMS_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"04cc0963-039d-4013-996b-4c21807f83e6","kind":"USER_SCORE_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"a99461ad-2b22-412b-8a79-7e6dfe6e53b4","kind":"ROOMS_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"9e7474d2-fe14-4045-8217-83b74cbd7c64","kind":"USER_SCORE_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"a99461ad-2b22-412b-8a79-7e6dfe6e53b4","kind":"ROOMS_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"9e7474d2-fe14-4045-8217-83b74cbd7c64","kind":"USER_SCORE_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"a99461ad-2b22-412b-8a79-7e6dfe6e53b4","kind":"ROOMS_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"9e7474d2-fe14-4045-8217-83b74cbd7c64","kind":"USER_SCORE_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"c0f43e7a-b34d-4e95-9b3b-23e411d5ee23","kind":"ROOMS_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"15d13e0d-768e-470c-af6b-c5ce1fdad3f2","kind":"USER_SCORE_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"c0f43e7a-b34d-4e95-9b3b-23e411d5ee23","kind":"ROOMS_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"15d13e0d-768e-470c-af6b-c5ce1fdad3f2","kind":"USER_SCORE_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"c0f43e7a-b34d-4e95-9b3b-23e411d5ee23","kind":"ROOMS_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"15d13e0d-768e-470c-af6b-c5ce1fdad3f2","kind":"USER_SCORE_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"b59a6a39-c627-4934-ac31-82bb9b8ed533","kind":"ROOMS_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"3ca08e7b-df81-4de7-9f71-f4b4efc16237","kind":"USER_SCORE_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"b59a6a39-c627-4934-ac31-82bb9b8ed533","kind":"ROOMS_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"3ca08e7b-df81-4de7-9f71-f4b4efc16237","kind":"USER_SCORE_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"b59a6a39-c627-4934-ac31-82bb9b8ed533","kind":"ROOMS_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"3ca08e7b-df81-4de7-9f71-f4b4efc16237","kind":"USER_SCORE_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"ab512f5f-eac2-42d7-b37f-09b291d3e182","kind":"ROOMS_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"68259fcf-d528-4d86-8acd-c324cd9e0471","kind":"USER_SCORE_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"ab512f5f-eac2-42d7-b37f-09b291d3e182","kind":"ROOMS_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"68259fcf-d528-4d86-8acd-c324cd9e0471","kind":"USER_SCORE_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"ab512f5f-eac2-42d7-b37f-09b291d3e182","kind":"ROOMS_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"68259fcf-d528-4d86-8acd-c324cd9e0471","kind":"USER_SCORE_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"f4c701dd-d334-4f07-8896-fcb9962d6edd","kind":"ROOMS_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"f6d2f5f1-cc41-40ac-a89f-6334f47f736e","kind":"USER_SCORE_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"f4c701dd-d334-4f07-8896-fcb9962d6edd","kind":"ROOMS_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"f6d2f5f1-cc41-40ac-a89f-6334f47f736e","kind":"USER_SCORE_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"f4c701dd-d334-4f07-8896-fcb9962d6edd","kind":"ROOMS_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"f6d2f5f1-cc41-40ac-a89f-6334f47f736e","kind":"USER_SCORE_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"5ac7c263-4e0a-4126-b7cf-cdd8d7f2c51b","kind":"ROOMS_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"50eaa5a6-cc54-4f5d-a8b0-714fa6d6b0be","kind":"USER_SCORE_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"5ac7c263-4e0a-4126-b7cf-cdd8d7f2c51b","kind":"ROOMS_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"50eaa5a6-cc54-4f5d-a8b0-714fa6d6b0be","kind":"USER_SCORE_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"5ac7c263-4e0a-4126-b7cf-cdd8d7f2c51b","kind":"ROOMS_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"50eaa5a6-cc54-4f5d-a8b0-714fa6d6b0be","kind":"USER_SCORE_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"7c6aa035-ef36-4f10-8ef2-c1259ab33107","kind":"ROOMS_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"eff2e0a3-7ee0-4dfd-aa81-096e4703d589","kind":"USER_SCORE_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"7c6aa035-ef36-4f10-8ef2-c1259ab33107","kind":"ROOMS_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"eff2e0a3-7ee0-4dfd-aa81-096e4703d589","kind":"USER_SCORE_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"7c6aa035-ef36-4f10-8ef2-c1259ab33107","kind":"ROOMS_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"eff2e0a3-7ee0-4dfd-aa81-096e4703d589","kind":"USER_SCORE_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"d10a4b7b-bae9-41f7-907b-9302e3dafd1f","kind":"ROOMS_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"7fe19bef-d018-4f95-bc35-1795a862b850","kind":"USER_SCORE_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"d10a4b7b-bae9-41f7-907b-9302e3dafd1f","kind":"ROOMS_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"7fe19bef-d018-4f95-bc35-1795a862b850","kind":"USER_SCORE_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"d10a4b7b-bae9-41f7-907b-9302e3dafd1f","kind":"ROOMS_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"7fe19bef-d018-4f95-bc35-1795a862b850","kind":"USER_SCORE_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"dec129a8-00af-402a-bf0b-4fd13082c6ef","kind":"ROOMS_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"0648ceb7-73cf-4bfd-821a-d4b531f18b94","kind":"USER_SCORE_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"dec129a8-00af-402a-bf0b-4fd13082c6ef","kind":"ROOMS_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"0648ceb7-73cf-4bfd-821a-d4b531f18b94","kind":"USER_SCORE_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"dec129a8-00af-402a-bf0b-4fd13082c6ef","kind":"ROOMS_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"0648ceb7-73cf-4bfd-821a-d4b531f18b94","kind":"USER_SCORE_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"7f9cb9fe-3004-4957-a178-c1d92ea409c7","kind":"ROOMS_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"9bea9ed6-f36a-4a69-84fc-2c4a48721761","kind":"USER_SCORE_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"7f9cb9fe-3004-4957-a178-c1d92ea409c7","kind":"ROOMS_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"9bea9ed6-f36a-4a69-84fc-2c4a48721761","kind":"USER_SCORE_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"7f9cb9fe-3004-4957-a178-c1d92ea409c7","kind":"ROOMS_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"9bea9ed6-f36a-4a69-84fc-2c4a48721761","kind":"USER_SCORE_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"a695b4cb-10ed-444c-a361-5c93e8e02c9d","kind":"ROOMS_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"850316c6-7005-4e44-923c-5f3c655bf9b4","kind":"USER_SCORE_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"a695b4cb-10ed-444c-a361-5c93e8e02c9d","kind":"ROOMS_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"850316c6-7005-4e44-923c-5f3c655bf9b4","kind":"USER_SCORE_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"a695b4cb-10ed-444c-a361-5c93e8e02c9d","kind":"ROOMS_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"850316c6-7005-4e44-923c-5f3c655bf9b4","kind":"USER_SCORE_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"19b2308b-ae29-477e-bb89-9ee3db2b3ca4","kind":"ROOMS_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"85255c90-2430-431f-b9b3-0b199911c527","kind":"USER_SCORE_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"19b2308b-ae29-477e-bb89-9ee3db2b3ca4","kind":"ROOMS_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"85255c90-2430-431f-b9b3-0b199911c527","kind":"USER_SCORE_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"19b2308b-ae29-477e-bb89-9ee3db2b3ca4","kind":"ROOMS_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"85255c90-2430-431f-b9b3-0b199911c527","kind":"USER_SCORE_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"9c88c8d1-6a96-4929-9caa-c7be4b09f340","kind":"ROOMS_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"6fec4907-2091-4c9a-bd81-d9743ad5c962","kind":"USER_SCORE_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"9c88c8d1-6a96-4929-9caa-c7be4b09f340","kind":"ROOMS_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"6fec4907-2091-4c9a-bd81-d9743ad5c962","kind":"USER_SCORE_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"9c88c8d1-6a96-4929-9caa-c7be4b09f340","kind":"ROOMS_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"6fec4907-2091-4c9a-bd81-d9743ad5c962","kind":"USER_SCORE_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"da70fc93-8521-4d8c-80e7-a1552532258a","kind":"ROOMS_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"e90a27aa-ddbc-4e14-abd3-aa7629a66f00","kind":"USER_SCORE_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"da70fc93-8521-4d8c-80e7-a1552532258a","kind":"ROOMS_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"e90a27aa-ddbc-4e14-abd3-aa7629a66f00","kind":"USER_SCORE_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"da70fc93-8521-4d8c-80e7-a1552532258a","kind":"ROOMS_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"e90a27aa-ddbc-4e14-abd3-aa7629a66f00","kind":"USER_SCORE_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"50b91289-388d-4c02-bcc6-be40ed3ed15c","kind":"ROOMS_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"50bdf88b-4351-41e9-9a89-d51b27b24ef7","kind":"USER_SCORE_REFRESH","attempt":1,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"50b91289-388d-4c02-bcc6-be40ed3ed15c","kind":"ROOMS_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"50bdf88b-4351-41e9-9a89-d51b27b24ef7","kind":"USER_SCORE_REFRESH","attempt":2,"retry":true,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"50b91289-388d-4c02-bcc6-be40ed3ed15c","kind":"ROOMS_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}
+{"level":"error","event":"official_gateway_job_failed","jobId":"50bdf88b-4351-41e9-9a89-d51b27b24ef7","kind":"USER_SCORE_REFRESH","attempt":3,"retry":false,"code":"OFFICIAL_TOKEN_INVALID"}

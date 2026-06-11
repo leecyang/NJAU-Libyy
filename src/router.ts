@@ -6,9 +6,11 @@ import {
   adminUserStatus,
   bind,
   cancelReservation,
+  cancelSignWorkflow,
   changeTaskStatus,
   createInvitation,
   createSignLink,
+  createSignWorkflowTask,
   createTask,
   createTeam,
   dashboard,
@@ -21,6 +23,7 @@ import {
   invitableUsers,
   leaveTeam,
   listMyTeams,
+  listSignWorkflows,
   listTasks,
   manualReservation,
   me,
@@ -31,6 +34,9 @@ import {
   removeTeamMember,
   reservationDetail,
   reservationHistory,
+  reservationParticipants,
+  refreshReservationOptions,
+  refreshReservationParticipants,
   refreshRooms,
   respondInvitation,
   respondTeamInvitation,
@@ -72,6 +78,9 @@ const routes = new Map<string, Handler>([
   ["POST /api/v1/reservations/manual", manualReservation],
   ["GET /api/v1/reservations/history", reservationHistory],
   ["POST /api/v1/reservations/sync", syncReservationHistory],
+  ["GET /api/v1/reservation-participants", reservationParticipants],
+  ["POST /api/v1/reservation-participants/refresh", refreshReservationParticipants],
+  ["POST /api/v1/reservation-options/refresh", refreshReservationOptions],
   ["POST /api/v1/reservation-tasks", createTask],
   ["GET /api/v1/reservation-tasks", listTasks],
   ["GET /api/v1/users/invitable", invitableUsers],
@@ -83,6 +92,8 @@ const routes = new Map<string, Handler>([
   ["GET /api/v1/invitations/received", receivedInvitations],
   ["GET /api/v1/sign-tasks", signTasks],
   ["GET /api/v1/signout-tasks", signoutTasks],
+  ["POST /api/v1/sign-workflows", createSignWorkflowTask],
+  ["GET /api/v1/sign-workflows", listSignWorkflows],
   ["GET /api/v1/admin/dashboard", dashboard],
   ["GET /api/v1/admin/config", adminConfig],
   ["POST /api/v1/admin/emails/test", adminTestEmail],
@@ -142,6 +153,9 @@ export async function routeApi(env: AppEnv, request: Request): Promise<Response>
 
   const signParameterMatch = /^\/api\/v1\/sign-tasks\/([^/]+)\/parameters$/.exec(url.pathname);
   if (request.method === "POST" && signParameterMatch?.[1]) return submitSignParameters(env, request, signParameterMatch[1]);
+
+  const signWorkflowCancelMatch = /^\/api\/v1\/sign-workflows\/([^/]+)\/cancel$/.exec(url.pathname);
+  if (request.method === "POST" && signWorkflowCancelMatch?.[1]) return cancelSignWorkflow(env, request, signWorkflowCancelMatch[1]);
 
   const adminList = /^\/api\/v1\/admin\/(users|credentials|tasks|reservations|invitations|teams|team-invitations|sign-tasks|signout-tasks|emails|audit-logs|gateway-jobs|gateway-snapshots)$/.exec(url.pathname);
   if (request.method === "GET" && adminList?.[1]) return adminCollection(env, request, adminList[1]);

@@ -6,7 +6,7 @@ import {
   signOutOfficialReservation,
   submitOfficialSign,
 } from "../src/lib/official";
-import { submitDueSignTasks, submitDueSignoutTasks } from "../src/lib/scheduler";
+import { submitDueSignTasks, submitDueSignoutTasks, submitDueSignWorkflows } from "../src/lib/scheduler";
 
 vi.mock("../src/lib/credentials", () => ({
   getAccessToken: vi.fn(async (_env: AppEnv, userId: string) => `token:${userId}`),
@@ -75,7 +75,12 @@ class FakeStatement {
 class FakeDB {
   readonly updates: Array<{ sql: string; args: unknown[] }> = [];
 
-  constructor(private readonly signRows: SignRow[], private readonly signoutRows: SignoutRow[] = []) {}
+  constructor(
+    private readonly signRows: SignRow[],
+    private readonly signoutRows: SignoutRow[] = [],
+    private readonly workflowRows: Array<Record<string, unknown>> = [],
+    private readonly workflowParticipantRows: Array<Record<string, unknown>> = [],
+  ) {}
 
   prepare(sql: string): FakeStatement {
     return new FakeStatement(this, sql);
@@ -86,6 +91,8 @@ class FakeDB {
   }
 
   all<T>(sql: string): T[] {
+    if (sql.includes("FROM sign_workflows")) return this.workflowRows as T[];
+    if (sql.includes("FROM sign_workflow_participants")) return this.workflowParticipantRows as T[];
     if (sql.includes("FROM signout_tasks")) return this.signoutRows as T[];
     if (sql.includes("FROM sign_tasks")) return this.signRows as T[];
     return [];
@@ -263,5 +270,36 @@ describe("automatic signout scheduler", () => {
 
     expect(signOutOfficialReservation).toHaveBeenCalledOnce();
     expect(db.updates.some((update) => update.sql.includes("status IN ('PENDING', 'SUBMITTING')"))).toBe(true);
+  });
+});
+
+describe("combined sign workflow scheduler", () => {
+  it("generates a fresh room-specific key for every participant", async () => {
+    const workflow = {
+      id: "workflow-id",
+      official_reservation_id: "18660",
+      room_id: 2,
+      date: "2026-06-02",
+      start_time: "09:00",
+      end_time: "10:00",
+      sign_scheduled_at: 1780375500000,
+      signout_scheduled_at: 1780380000000,
+      signout_status: "PENDING",
+    };
+    const participants = [
+      { user_id: "owner-user-id", participant_order: 1, sign_status: "PENDING" },
+      { user_id: "member-user-id", participant_order: 2, sign_status: "PENDING" },
+    ];
+    const db = new FakeDB([], [], [workflow], participants);
+    vi.mocked(fetchOfficialReservationHistory).mockResolvedValue([reservationRecord(21)]);
+    vi.mocked(createOfficialQrSignCheckCode).mockResolvedValueOnce("key-owner").mockResolvedValueOnce("key-member");
+    vi.mocked(submitOfficialSign).mockResolvedValue();
+
+    await submitDueSignWorkflows(env(db), 1780375500000);
+
+    expect(createOfficialQrSignCheckCode).toHaveBeenNthCalledWith(1, expect.anything(), "token:owner-user-id", "2", "ZP2441000049");
+    expect(createOfficialQrSignCheckCode).toHaveBeenNthCalledWith(2, expect.anything(), "token:member-user-id", "2", "ZP2441000049");
+    expect(submitOfficialSign).toHaveBeenNthCalledWith(1, expect.anything(), "token:owner-user-id", "2", "ZP2441000049", "key-owner");
+    expect(submitOfficialSign).toHaveBeenNthCalledWith(2, expect.anything(), "token:member-user-id", "2", "ZP2441000049", "key-member");
   });
 });

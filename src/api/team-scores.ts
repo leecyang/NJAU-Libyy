@@ -24,7 +24,7 @@ export async function teamMemberScores(env: AppEnv, request: Request, teamId: st
   if (!leader.student_id) throw new HttpError(409, "SETUP_REQUIRED", "请先完成官方凭证配置");
 
   if (env.OFFICIAL_GATEWAY) {
-    const snapshot = await env.OFFICIAL_GATEWAY.readSnapshot<{ teamId: string; teamName: string; members: Array<{ userId: string; realName: string; totalScore: number | null }> }>(teamScoresSnapshotKey(leader.id, teamId));
+    const snapshot = await env.OFFICIAL_GATEWAY.readSnapshot<{ teamId: string; teamName: string; members: TeamScoreMember[] }>(teamScoresSnapshotKey(leader.id, teamId));
     return ok(snapshot?.value ?? { teamId: team.id, teamName: team.name, members: [] });
   }
   return ok(await fetchTeamScores(env, leader, team));
@@ -34,7 +34,16 @@ function teamScoresSnapshotKey(userId: string, teamId: string): string {
   return `user:${userId}:team:${teamId}:scores`;
 }
 
-async function fetchTeamScores(env: AppEnv, leader: User, team: { id: string; name: string }): Promise<{ teamId: string; teamName: string; members: Array<{ userId: string; realName: string; totalScore: number | null }> }> {
+type TeamScoreMember = {
+  localUserId: string;
+  userId: string;
+  studentId: string;
+  realName: string;
+  totalScore: number | null;
+  isCurrentUser: boolean;
+};
+
+async function fetchTeamScores(env: AppEnv, leader: User, team: { id: string; name: string }): Promise<{ teamId: string; teamName: string; members: TeamScoreMember[] }> {
   const members = await env.DB.prepare(
     `SELECT u.id, u.student_id, u.real_name FROM team_members tm JOIN users u ON u.id = tm.user_id WHERE tm.team_id = ? AND u.status = 'ACTIVE' AND u.student_id IS NOT NULL`,
   ).bind(team.id).all<{ id: string; student_id: string; real_name: string }>();
@@ -42,7 +51,7 @@ async function fetchTeamScores(env: AppEnv, leader: User, team: { id: string; na
   const token = await getAccessToken(env, leader.id);
   if (!leader.student_id) throw new HttpError(409, "SETUP_REQUIRED", "请先完成官方凭证配置");
   const leaderStudentId = leader.student_id;
-  const scores: Array<{ userId: string; realName: string; totalScore: number | null }> = [];
+  const scores: TeamScoreMember[] = [];
 
   let leaderScore: number | null = null;
   try {
@@ -51,7 +60,7 @@ async function fetchTeamScores(env: AppEnv, leader: User, team: { id: string; na
   } catch {
     leaderScore = null;
   }
-  scores.push({ userId: leaderStudentId, realName: leader.real_name ?? leader.email, totalScore: leaderScore });
+  scores.push({ localUserId: leader.id, userId: leaderStudentId, studentId: leaderStudentId, realName: leader.real_name ?? leader.email, totalScore: leaderScore, isCurrentUser: true });
 
   for (const member of members.results) {
     let memberScore: number | null = null;
@@ -61,7 +70,7 @@ async function fetchTeamScores(env: AppEnv, leader: User, team: { id: string; na
     } catch {
       memberScore = null;
     }
-    scores.push({ userId: member.student_id, realName: member.real_name, totalScore: memberScore });
+    scores.push({ localUserId: member.id, userId: member.student_id, studentId: member.student_id, realName: member.real_name, totalScore: memberScore, isCurrentUser: false });
   }
 
   return { teamId: team.id, teamName: team.name, members: scores };

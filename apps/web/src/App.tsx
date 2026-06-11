@@ -91,18 +91,48 @@ type TimeSelection = {
 };
 type Reservation = Record<string, string | number | boolean | null>;
 type Task = Record<string, string | number | null>;
-type SignAutomationTask = {
+type ReservationParticipant = {
   id: string;
-  reservation_id: string;
-  scheduled_at: number;
+  studentId: string;
+  realName: string;
+  email: string;
+  isCurrentUser: boolean;
+  teamName: string | null;
+  totalScore: number | null;
+};
+type ReservationOption = {
+  id: string;
+  ownerUserId: string;
+  ownerName: string;
+  officialReservationId: string;
+  roomId: number;
+  roomName: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+};
+type SignWorkflowParticipant = {
+  userId: string;
+  realName: string;
+  participantOrder: number;
+  signStatus: string;
+  signAttemptCount: number;
+  signedAt: number | null;
+  lastErrorCode?: string | null;
+};
+type SignWorkflow = {
+  id: string;
+  room_name_snapshot: string;
+  date: string;
+  start_time: string;
+  end_time: string;
+  sign_scheduled_at: number;
+  signout_scheduled_at: number;
   status: string;
-  attempt_count?: number;
-  executed_at?: number | null;
-  official_reservation_id?: string | null;
-  room_name_snapshot?: string | null;
-  date?: string | null;
-  start_time?: string | null;
-  end_time?: string | null;
+  signout_status: string;
+  signout_executed_at?: number | null;
+  failure_code?: string | null;
+  participants: SignWorkflowParticipant[];
 };
 type TeamMember = {
   id: string;
@@ -136,16 +166,6 @@ type InvitableUser = {
   email: string;
   real_name?: string;
   student_id?: string;
-};
-type RecentContact = {
-  id: string;
-  studentId?: string;
-  student_id?: string;
-  realName?: string;
-  real_name?: string;
-  lastUsedAt?: number;
-  last_used_at?: number;
-  totalScore?: number;
 };
 
 function today(): string {
@@ -189,6 +209,7 @@ function statusText(status: string | number | null | undefined): string {
     WAITING_WINDOW: "等待窗口",
     WAITING_MEMBERS: "等待成员",
     READY: "准备中",
+    ACTIVE: "执行中",
     SUBMITTING: "提交中",
     SUCCESS: "成功",
     FAILED: "失败",
@@ -198,6 +219,17 @@ function statusText(status: string | number | null | undefined): string {
     DISABLED: "已关闭",
   };
   return labels[value] ?? value;
+}
+
+function credentialStatusText(status: string): string {
+  const labels: Record<string, string> = {
+    ACTIVE: "已连接",
+    REFRESHING: "正在连接",
+    REFRESH_FAILED: "连接未完成",
+    REAUTH_REQUIRED: "需要重新连接",
+    DISABLED: "暂不可用",
+  };
+  return labels[status] ?? "等待连接";
 }
 
 function taskCandidateText(task: Task): string {
@@ -275,10 +307,6 @@ function visibleTeamMembers(team: Team): Array<{ id: string; name: string; role:
     { id: team.leader_user_id ?? `${team.id}-leader`, name: team.leader_name ?? "队长", role: "队长" },
     ...members,
   ];
-}
-
-function contactName(contact: RecentContact): string {
-  return contact.realName ?? contact.real_name ?? contact.studentId ?? contact.student_id ?? contact.id;
 }
 
 function toggleValue(values: string[], value: string): string[] {
@@ -374,11 +402,13 @@ function rangeText(ranges: AvailabilityRange[]): string {
 }
 
 const timeSlots = Array.from({ length: 28 }, (_, index) => minutesToTime(8 * 60 + index * 30));
-const availabilityTicks = [8, 12, 16, 20, 22];
+const availabilityTicks = Array.from({ length: 8 }, (_, index) => 8 + index * 2);
 type TrackerBlock = {
   key: string;
-  state: "available" | "empty";
+  state: "available" | "empty" | "selected";
   tooltip: string;
+  ariaLabel?: string;
+  disabled?: boolean;
 };
 
 function slotAvailable(ranges: AvailabilityRange[], slot: string): boolean {
@@ -387,13 +417,50 @@ function slotAvailable(ranges: AvailabilityRange[], slot: string): boolean {
   return ranges.some((range) => start >= timeToMinutes(range.startTime) && end <= timeToMinutes(range.endTime));
 }
 
-function TremorTracker({ data, label }: { data: TrackerBlock[]; label: string }) {
+function UptimeKumaTicks() {
   return (
-    <div className="tremor-tracker" role="img" aria-label={label}>
-      {data.map((block) => (
-        <div className={`tremor-tracker-block-shell ${block.state}`} key={block.key} title={block.tooltip}>
-          <div className={`tremor-tracker-block ${block.state}`} />
-        </div>
+    <div className="uptime-kuma-ticks" aria-hidden="true">
+      {availabilityTicks.map((hour) => <span key={hour}>{String(hour).padStart(2, "0")}</span>)}
+    </div>
+  );
+}
+
+function UptimeKumaTimeline({
+  data,
+  label,
+  onSelect,
+}: {
+  data: TrackerBlock[];
+  label: string;
+  onSelect?: (index: number) => void;
+}) {
+  const segments = Array.from({ length: Math.ceil(data.length / 4) }, (_, index) => data.slice(index * 4, index * 4 + 4));
+  return (
+    <div className="uptime-kuma-timeline" role={onSelect ? "group" : "img"} aria-label={label}>
+      {segments.map((segment, segmentIndex) => (
+        <span className="uptime-kuma-segment" key={`segment-${segmentIndex}`}>
+          {segment.map((block, blockIndex) => {
+            const index = segmentIndex * 4 + blockIndex;
+            return onSelect ? (
+              <button
+                type="button"
+                className={`uptime-kuma-heartbeat ${block.state}`}
+                key={block.key}
+                title={block.tooltip}
+                disabled={block.disabled}
+                aria-label={block.ariaLabel ?? block.tooltip}
+                aria-pressed={block.state === "selected"}
+                onClick={() => onSelect(index)}
+              />
+            ) : (
+              <span
+                className={`uptime-kuma-heartbeat ${block.state}`}
+                key={block.key}
+                title={block.tooltip}
+              />
+            );
+          })}
+        </span>
       ))}
     </div>
   );
@@ -402,16 +469,14 @@ function TremorTracker({ data, label }: { data: TrackerBlock[]; label: string })
 function RoomAvailabilityHistory({ dates, room }: { dates: string[]; room: RoomWithDays }) {
   return (
     <div className="availability-history" aria-label={`${room.name} 三天可用时间状态`}>
-      <div className="availability-ticks" aria-hidden="true">
-        {availabilityTicks.map((hour) => <span key={hour}>{String(hour).padStart(2, "0")}</span>)}
-      </div>
+      <UptimeKumaTicks />
       <div className="availability-rows">
         {dates.map((date) => {
           const ranges = room.days[date] ?? [];
           return (
             <div className="availability-row" key={`${room.id}-${date}`}>
               <span className="availability-day">{dayLabel(date)}</span>
-              <TremorTracker
+              <UptimeKumaTimeline
                 label={`${room.name} ${dayLabel(date)} 08:00 到 22:00 可用状态`}
                 data={timeSlots.map((slot) => {
                   const end = minutesToTime(timeToMinutes(slot) + 30);
@@ -492,13 +557,7 @@ function SquareTimeGridPicker({
         <div className="slot-wall" role="grid" aria-label={`${room.name} 三天可用时间线`}>
           <div className="slot-wall-head">
             <div className="slot-day-spacer">日期</div>
-            <div className="slot-hour-line">
-              {timeSlots.map((slot, index) => (
-                <span key={`head-${slot}`} className={index % 2 === 0 ? "full-hour" : "half-hour"}>
-                  {index % 2 === 0 ? slot : ""}
-                </span>
-              ))}
-            </div>
+            <UptimeKumaTicks />
           </div>
           {dates.map((date) => (
             <div className="slot-day-row" key={date} role="row">
@@ -506,25 +565,22 @@ function SquareTimeGridPicker({
                 <strong>{dayLabel(date)}</strong>
                 <small>{rangeText(room.days[date] ?? [])}</small>
               </div>
-              <div className="slot-cells">
-                {timeSlots.map((slot, index) => {
+              <UptimeKumaTimeline
+                label={`${room.name} ${dayLabel(date)} 08:00 到 22:00 可选状态`}
+                onSelect={(index) => choose(date, index)}
+                data={timeSlots.map((slot, index) => {
                   const available = room.reservable !== false && slotAvailable(room.days[date] ?? [], slot);
                   const selected = selectionContains(selection, date, index);
-                  return (
-                    <button
-                      type="button"
-                      key={`${date}-${slot}`}
-                      className={`slot-cell ${available ? "available" : "disabled"} ${selected ? "selected" : ""}`}
-                      disabled={!available}
-                      onClick={() => choose(date, index)}
-                      aria-pressed={selected}
-                      aria-label={`${dayLabel(date)} ${slot} 到 ${minutesToTime(timeToMinutes(slot) + 30)}`}
-                    >
-                      <span className="sr-only">{slot}</span>
-                    </button>
-                  );
+                  const end = minutesToTime(timeToMinutes(slot) + 30);
+                  return {
+                    key: `${date}-${slot}`,
+                    state: selected ? "selected" : available ? "available" : "empty",
+                    tooltip: `${dayLabel(date)} ${slot}-${end} ${selected ? "已选" : available ? "可选" : "不可选"}`,
+                    ariaLabel: `${dayLabel(date)} ${slot} 到 ${end}`,
+                    disabled: !available,
+                  };
                 })}
-              </div>
+              />
             </div>
           ))}
         </div>
@@ -536,103 +592,52 @@ function SquareTimeGridPicker({
   );
 }
 
-function ReservationGuestsPicker({
-  teamMembers,
-  contacts,
-  selectedTeamMemberIds,
-  selectedContactIds,
-  contactQuery,
-  contactBusy,
-  excludeSelf,
-  onToggleTeamMember,
-  onToggleContact,
-  onContactQueryChange,
-  onSearchContact,
-  onExcludeSelfChange,
+function OrderedParticipantPicker({
+  participants,
+  selectedIds,
+  onChange,
 }: {
-  teamMembers: TeamMember[];
-  contacts: RecentContact[];
-  selectedTeamMemberIds: string[];
-  selectedContactIds: string[];
-  contactQuery: string;
-  contactBusy: boolean;
-  excludeSelf: boolean;
-  onToggleTeamMember: (id: string) => void;
-  onToggleContact: (id: string) => void;
-  onContactQueryChange: (value: string) => void;
-  onSearchContact: () => Promise<void>;
-  onExcludeSelfChange: (value: boolean) => void;
+  participants: ReservationParticipant[];
+  selectedIds: string[];
+  onChange: (ids: string[]) => void;
 }) {
   return (
-    <section className="guest-picker" aria-label="邀请同行成员">
+    <section className="guest-picker" aria-label="选择预约成员">
       <div className="guest-picker-head">
         <div>
-          <span className="eyebrow">Guests</span>
-          <h3>邀请同行成员</h3>
+          <span className="eyebrow">预约成员</span>
+          <h3>选择预约成员</h3>
         </div>
-        <span>{selectedTeamMemberIds.length + selectedContactIds.length} 人</span>
-      </div>
-      <label className="exclude-self-toggle">
-        <input type="checkbox" checked={excludeSelf} onChange={(e) => onExcludeSelfChange(e.target.checked)} />
-        <span>我不参加本次预约（仅帮队友预约）</span>
-      </label>
-      <div className="guest-section">
-        <div className="guest-section-title">
-          <strong>小队成员</strong>
-          <small>仅展示你作为队长的小队成员</small>
-        </div>
-        <div className="guest-option-grid">
-          {teamMembers.map((member) => (
-            <label className="guest-option" key={member.id}>
-              <input
-                type="checkbox"
-                checked={selectedTeamMemberIds.includes(member.id)}
-                onChange={() => onToggleTeamMember(member.id)}
-              />
-              <span>
-                <strong>{memberName(member)}</strong>
-                <small>{member.teamName ?? "小队成员"}</small>
-              </span>
-            </label>
-          ))}
-          {!teamMembers.length ? <div className="guest-empty">暂无可直接邀请的小队成员</div> : null}
-        </div>
+        <span>{selectedIds.length} 人</span>
       </div>
       <div className="guest-section">
         <div className="guest-section-title">
-          <strong>最近联系人</strong>
-          <small>输入准确学号查询后会加入最近联系人</small>
-        </div>
-        <div className="contact-search-row">
-          <input
-            value={contactQuery}
-            onChange={(event) => onContactQueryChange(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                event.preventDefault();
-                void onSearchContact();
-              }
-            }}
-            placeholder="输入学号添加联系人"
-            inputMode="numeric"
-          />
-          <Button type="button" variant="secondary" busy={contactBusy} onClick={() => void onSearchContact()}>添加</Button>
+          <strong>我和小队成员</strong>
+          <small>第一位成员将作为主预约人，需至少有 2 分可用积分</small>
         </div>
         <div className="guest-option-grid">
-          {contacts.map((contact) => (
-            <label className="guest-option" key={contact.id}>
+          {participants.map((participant) => {
+            const order = selectedIds.indexOf(participant.id);
+            const selected = order >= 0;
+            return (
+            <label className={`guest-option${order === 0 ? " primary-participant" : ""}`} key={participant.id}>
               <input
                 type="checkbox"
-                checked={selectedContactIds.includes(contact.id)}
-                onChange={() => onToggleContact(contact.id)}
+                checked={selected}
+                onChange={() => onChange(selected ? selectedIds.filter((id) => id !== participant.id) : [...selectedIds, participant.id])}
               />
               <span>
-                <strong>{contactName(contact)}</strong>
-                <small>{contact.studentId ?? contact.student_id ?? "最近联系人"}</small>
+                <strong>{participant.realName}{participant.isCurrentUser ? "（我）" : ""}</strong>
+                <small>
+                  {order === 0 ? "主预约人 · " : selected ? `第 ${order + 1} 位 · ` : ""}
+                  {participant.totalScore == null ? "积分未知" : `剩余 ${participant.totalScore} 分`}
+                  {participant.teamName ? ` · ${participant.teamName}` : ""}
+                </small>
               </span>
             </label>
-          ))}
-          {!contacts.length ? <div className="guest-empty">还没有最近联系人</div> : null}
+            );
+          })}
+          {!participants.length ? <div className="guest-empty">暂时没有可选成员，请先邀请成员加入小队并完成校园账号连接</div> : null}
         </div>
       </div>
     </section>
@@ -665,7 +670,7 @@ function AuthPanel({ onReady, toast }: { onReady: () => Promise<void>; toast: (m
         purpose === "register" ? "/api/v1/auth/send-register-code" : "/api/v1/auth/send-reset-code",
         { method: "POST", body: JSON.stringify({ email: form.email.value }) },
       );
-      toast(result.devCode ? `验证码已发送：${result.devCode}` : "验证码邮件已排队");
+      toast(result.devCode ? `验证码已发送，本次验证码为 ${result.devCode}` : "验证码已发送，请查收邮箱");
     } catch (error) {
       toast(error instanceof Error ? error.message : "发送失败", true);
     } finally {
@@ -677,40 +682,26 @@ function AuthPanel({ onReady, toast }: { onReady: () => Promise<void>; toast: (m
     <main className="auth-layout">
       <section className="auth-copy">
         <div className="brand-mark">NJAU Libyy</div>
-        <h1>研讨室预约工作台</h1>
-        <div className="product-fragment auth-grid-preview compact">
-          <div className="fragment-bar">
-            <span />
-            <span />
-            <span />
-            <strong>可用时间</strong>
-          </div>
-          <div className="preview-calendar-grid" aria-hidden="true">
-            {Array.from({ length: 42 }, (_, index) => (
-              <span
-                key={index}
-                className={
-                  [4, 5, 6, 17, 18, 29].includes(index) ? "selected"
-                  : [0, 1, 2, 12, 13, 14, 20, 21, 30, 31, 32, 33, 34].includes(index) ? "available"
-                  : ""
-                }
-              />
-            ))}
-          </div>
-        </div>
+        <h1>研讨间预约</h1>
+        <p>查看未来三天的可用时间，和小队成员一起完成预约、签到与签退。</p>
+        <ul className="auth-intro-list">
+          <li>按时间快速查找可预约房间</li>
+          <li>统一管理小队成员与预约积分</li>
+          <li>提前安排预约和签到提醒</li>
+        </ul>
       </section>
       <section className="auth-card">
         {tab === "login" ? (
           <>
             <div className="auth-heading">
-              <span className="eyebrow">Sign in</span>
-              <h2>登录到工作台</h2>
-              <p>使用邮箱和密码进入研讨室预约管理界面。</p>
+              <span className="eyebrow">账户登录</span>
+              <h2>欢迎回来</h2>
+              <p>使用注册邮箱继续管理你的研讨间预约。</p>
             </div>
             <form onSubmit={(event) => submit("/api/v1/auth/login", event, "登录成功")} className="form-stack">
               <Field label="邮箱"><input name="email" type="email" autoComplete="email" required /></Field>
               <Field label="密码"><input name="password" type="password" autoComplete="current-password" required minLength={8} /></Field>
-              <Button busy={busy === "/api/v1/auth/login"} type="submit">进入工作台</Button>
+              <Button busy={busy === "/api/v1/auth/login"} type="submit">登录</Button>
             </form>
             <p className="auth-switch">
               没有账号？<button onClick={() => setTab("register")}>注册账号</button>
@@ -768,11 +759,11 @@ function Shell({
   children: ReactNode;
 }) {
   const items: Array<{ id: Page; label: string; icon: ReactNode; admin?: boolean }> = [
-    { id: "rooms", label: "房间", icon: <DoorOpen size={18} /> },
-    { id: "tasks", label: "任务", icon: <ClipboardList size={18} /> },
-    { id: "teams", label: "小队", icon: <UsersRound size={18} /> },
-    { id: "history", label: "历史", icon: <History size={18} /> },
-    { id: "admin", label: "管理", icon: <Shield size={18} />, admin: true },
+    { id: "rooms", label: "研讨间", icon: <DoorOpen size={18} /> },
+    { id: "tasks", label: "自动任务", icon: <ClipboardList size={18} /> },
+    { id: "teams", label: "我的小队", icon: <UsersRound size={18} /> },
+    { id: "history", label: "预约记录", icon: <History size={18} /> },
+    { id: "admin", label: "系统管理", icon: <Shield size={18} />, admin: true },
   ];
   return (
     <div className="app-shell">
@@ -824,9 +815,9 @@ function CredentialLockPage({
       <section className="credential-lock-panel">
         <div className="credential-lock-mark"><KeyRound size={22} /></div>
         <div className="credential-intro">
-          <span className="status-pill">{session.credential.credential_status}</span>
+          <span className="status-pill">{credentialStatusText(session.credential.credential_status)}</span>
           <h1>连接校园统一认证</h1>
-          <p>保存学号和统一认证密码后，服务端会在隔离的浏览器环境中登录图书馆系统，并在官方会话失效时自动恢复。</p>
+          <p>完成连接后，即可查询研讨间、提交预约并使用签到服务。账号信息仅用于访问图书馆预约功能。</p>
         </div>
         {attempt?.status === "SMS_REQUIRED" ? <form className="credential-form" onSubmit={async (event) => {
           event.preventDefault();
@@ -855,7 +846,7 @@ function CredentialLockPage({
           try {
             const endpoint = session.credential.login_student_id ? "/api/v1/credentials/rebind" : "/api/v1/credentials/bind";
             await api(endpoint, { method: "POST", body: JSON.stringify(data) });
-            toast("已启动统一认证");
+            toast("正在连接校园账号");
             await refresh();
             form.reset();
           } catch (error) {
@@ -867,7 +858,7 @@ function CredentialLockPage({
           {attempt?.errorMessage ? <div className="credential-error">{attempt.errorMessage}</div> : null}
           <Field label="学号"><input name="studentId" required maxLength={32} defaultValue={session.credential.login_student_id ?? session.user.studentId ?? ""} autoComplete="username" autoFocus /></Field>
           <Field label="统一认证密码"><input name="password" type="password" required maxLength={128} autoComplete="current-password" /></Field>
-          <Button busy={busy}>保存并登录图书馆系统</Button>
+          <Button busy={busy}>连接校园账号</Button>
         </form>}
       </section>
     </div>
@@ -904,14 +895,14 @@ function RoomsPage({ toast, navigate }: { toast: (message: string, error?: boole
 
   return (
     <div className="room-list-page">
-      <Card title="研讨间列表" icon={<CalendarClock size={20} />}>
+      <Card title="可预约研讨间" icon={<CalendarClock size={20} />}>
         <div className="three-day-head">
           <div>
-            <span className="eyebrow">三天可用日期</span>
+            <span className="eyebrow">未来三天</span>
             <div className="date-strip">{dates.map((date) => <span key={date}>{dayLabel(date)}</span>)}</div>
             <small className={`cache-status ${cache?.status?.toLowerCase() ?? "miss"}`}>
-              {cache?.status === "FRESH" ? "缓存已更新" : cache?.status === "STALE" ? "正在展示旧快照" : cache?.status === "EXPIRED" ? "快照已过期" : "尚无房间快照"}
-              {cache?.refreshedAt ? ` · ${formatTimestamp(cache.refreshedAt)}` : ""}
+              {cache?.status === "FRESH" ? "可用时间已更新" : cache?.status === "STALE" ? "当前信息可能不是最新" : cache?.status === "EXPIRED" ? "请更新可用时间" : "正在获取可用时间"}
+              {cache?.refreshedAt ? ` · 更新于 ${formatTimestamp(cache.refreshedAt)}` : ""}
             </small>
           </div>
           <Button className="desktop-only-action" onClick={() => loadRooms(true)} busy={busy} type="button"><RefreshCw size={16} />刷新</Button>
@@ -932,7 +923,7 @@ function RoomsPage({ toast, navigate }: { toast: (message: string, error?: boole
             </button>
           ))}
         </div>
-        {!rooms.length && !busy ? <Empty>暂无可展示房间</Empty> : null}
+        {!rooms.length && !busy ? <Empty>未来三天暂时没有可预约的研讨间</Empty> : null}
       </Card>
     </div>
   );
@@ -953,26 +944,12 @@ function RoomDetailPage({
   const [dates, setDates] = useState<string[]>(fallbackDates);
   const [room, setRoom] = useState<RoomWithDays | null>(null);
   const [selection, setSelection] = useState<TimeSelection | null>(null);
-  const [teams, setTeams] = useState<Team[]>([]);
-  const [contacts, setContacts] = useState<RecentContact[]>([]);
-  const [selectedTeamMemberIds, setSelectedTeamMemberIds] = useState<string[]>([]);
-  const [selectedContactIds, setSelectedContactIds] = useState<string[]>([]);
-  const [excludeSelf, setExcludeSelf] = useState(false);
-  const [contactQuery, setContactQuery] = useState("");
+  const [participants, setParticipants] = useState<ReservationParticipant[]>([]);
+  const [selectedParticipantIds, setSelectedParticipantIds] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
-  const [contactBusy, setContactBusy] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
-  const teamMemberOptions = useMemo(() => {
-    const members = new Map<string, TeamMember>();
-    for (const team of teams) {
-      if (team.is_leader !== true && team.is_leader !== 1) continue;
-      for (const member of parseTeamMembers(team.members)) {
-        if (!members.has(member.id)) members.set(member.id, { ...member, teamName: team.name });
-      }
-    }
-    return [...members.values()];
-  }, [teams]);
+  const primaryParticipant = participants.find((participant) => participant.id === selectedParticipantIds[0]) ?? null;
 
   async function loadRoom(refresh = false) {
     setBusy(true);
@@ -981,17 +958,17 @@ function RoomDetailPage({
         const job = await api<GatewayJob>("/api/v1/rooms/refresh", { method: "POST" });
         await waitForGatewayJob(job);
       }
-      const [response, teamData, contactData] = await Promise.all([
+      const participantRefresh = await api<GatewayJob | { participants: ReservationParticipant[] }>("/api/v1/reservation-participants/refresh", { method: "POST" });
+      if ("jobId" in participantRefresh) await waitForGatewayJob(participantRefresh);
+      const [response, participantData] = await Promise.all([
         api<RoomsResponse>("/api/v1/rooms"),
-        api<{ teams: Team[] }>("/api/v1/teams/mine").catch(() => ({ teams: [] })),
-        api<RecentContact[]>("/api/v1/recent-contacts").catch(() => []),
+        api<{ participants: ReservationParticipant[] }>("/api/v1/reservation-participants"),
       ]);
       const normalized = normalizeRooms(response, fallbackDates);
       const availableRooms = normalized.rooms.filter((item) => item.reservable !== false);
       setDates(normalized.dates);
       setRoom(availableRooms.find((item) => item.id === roomId) ?? null);
-      setTeams(teamData.teams);
-      setContacts(contactData);
+      setParticipants(participantData.participants);
       setSelection(null);
     } catch (error) {
       toast(error instanceof Error ? error.message : "加载失败", true);
@@ -1002,39 +979,23 @@ function RoomDetailPage({
 
   useEffect(() => { void loadRoom(); }, [roomId]);
 
-  async function searchContact() {
-    const query = contactQuery.trim();
-    if (!query) return;
-    setContactBusy(true);
-    try {
-      const searchJob = await api<GatewayJob<RecentContact>>(`/api/v1/official-users/search?q=${encodeURIComponent(query)}`);
-      const found = await waitForGatewayJob(searchJob);
-      const latest = await api<RecentContact[]>("/api/v1/recent-contacts");
-      setContacts(latest);
-      setSelectedContactIds((current) => current.includes(found.id) ? current : [...current, found.id]);
-      setContactQuery("");
-      toast(`已添加 ${contactName(found)}`);
-    } catch (error) {
-      toast(error instanceof Error ? error.message : "联系人查询失败", true);
-    } finally {
-      setContactBusy(false);
-    }
-  }
-
   async function reserve(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!room || !selection || room.reservable === false) return;
-    const totalGuests = selectedTeamMemberIds.length + selectedContactIds.length;
-    if (excludeSelf && totalGuests === 0) {
-      toast("请至少选择一位同行成员", true);
+    if (!selectedParticipantIds.length || !primaryParticipant) {
+      toast("请至少选择一位预约成员", true);
       return;
     }
-    if (excludeSelf && totalGuests < room.minReservationNum) {
+    if (selectedParticipantIds.length < room.minReservationNum) {
       toast(`该房间至少需要 ${room.minReservationNum} 人`, true);
       return;
     }
-    if (session.user.totalScore != null && session.user.totalScore < 2) {
-      toast("积分不足（需要至少 2 积分），请等待积分恢复", true);
+    if (selectedParticipantIds.length > room.maxNum) {
+      toast(`该房间最多允许 ${room.maxNum} 人`, true);
+      return;
+    }
+    if (primaryParticipant.totalScore == null || primaryParticipant.totalScore < 2) {
+      toast("主预约人剩余积分不足 2 分或暂时无法获取", true);
       return;
     }
     setSubmitting(true);
@@ -1046,17 +1007,14 @@ function RoomDetailPage({
           roomId: room.id,
           startTime: selection.startTime,
           endTime: selection.endTime,
-          teamMemberUserIds: selectedTeamMemberIds,
-          contactIds: selectedContactIds,
-          excludeSelf,
+          primaryUserId: selectedParticipantIds[0],
+          participantUserIds: selectedParticipantIds,
         }),
       });
       await waitForGatewayJob(job);
       toast("预约已提交");
       setSelection(null);
-      setSelectedTeamMemberIds([]);
-      setSelectedContactIds([]);
-      setExcludeSelf(false);
+      setSelectedParticipantIds([]);
       await loadRoom();
     } catch (error) {
       toast(error instanceof Error ? error.message : "预约失败", true);
@@ -1070,43 +1028,32 @@ function RoomDetailPage({
       <button className="back-button" type="button" onClick={() => navigate("/rooms")}>
         <ChevronLeft size={18} />返回房间
       </button>
-      <Card title="预约时间选择" icon={<DoorOpen size={20} />}>
-        {busy ? <Empty>正在加载房间时间线</Empty> : null}
-        {!busy && !room ? <Empty>没有找到这个房间</Empty> : null}
+      <Card title="选择预约时间" icon={<DoorOpen size={20} />}>
+        {busy ? <Empty>正在获取可预约时间</Empty> : null}
+        {!busy && !room ? <Empty>这个研讨间当前不可预约或已下线</Empty> : null}
         {room ? (
           <form className="form-stack" onSubmit={reserve}>
             <div className="room-detail-head">
               <div>
-                <span className="eyebrow">Room</span>
+                <span className="eyebrow">房间信息</span>
                 <h2>{room.name}</h2>
                 <p>{room.roomLocation ?? "研讨室"} · {room.minReservationNum}-{room.maxNum} 人 · {room.reservable === false ? "当前不可预约" : "可预约"}</p>
               </div>
               <Button className="desktop-only-action" onClick={() => loadRoom(true)} busy={busy} type="button" variant="secondary"><RefreshCw size={16} />刷新</Button>
             </div>
-            {room.reservable === false ? <div className="room-warning">该房间当前由官方标记为不可预约，时间线仅用于查看状态。</div> : null}
+            {room.reservable === false ? <div className="room-warning">这个研讨间当前暂停预约，你仍可查看已有时间安排。</div> : null}
             <SquareTimeGridPicker dates={dates} room={room} selection={selection} onChange={setSelection} />
-            <ReservationGuestsPicker
-              teamMembers={teamMemberOptions}
-              contacts={contacts}
-              selectedTeamMemberIds={selectedTeamMemberIds}
-              selectedContactIds={selectedContactIds}
-              contactQuery={contactQuery}
-              contactBusy={contactBusy}
-              onToggleTeamMember={(id) => setSelectedTeamMemberIds((current) => toggleValue(current, id))}
-              onToggleContact={(id) => setSelectedContactIds((current) => toggleValue(current, id))}
-              onContactQueryChange={setContactQuery}
-              onSearchContact={searchContact}
-              excludeSelf={excludeSelf}
-              onExcludeSelfChange={setExcludeSelf}
-            />
+            <OrderedParticipantPicker participants={participants} selectedIds={selectedParticipantIds} onChange={setSelectedParticipantIds} />
             <div className="reservation-summary">
               <div>
-                <span className="eyebrow">Selected</span>
+                <span className="eyebrow">预约确认</span>
                 <strong>{selection ? `${dayLabel(selection.date)} ${selection.startTime}-${selection.endTime}` : "尚未选择时间段"}</strong>
-                <small>{excludeSelf ? "仅帮队友预约（本人不参加）" : `主预约人 + ${selectedTeamMemberIds.length + selectedContactIds.length} 位同行成员`}</small>
-                {session.user.totalScore != null ? <small className={session.user.totalScore < 2 ? "score-warning" : ""}>当前积分: {session.user.totalScore}（预约消耗 2 积分）</small> : null}
+                <small>{primaryParticipant ? `主预约人：${primaryParticipant.realName} · 共 ${selectedParticipantIds.length} 人` : "请选择成员，第一位将作为主预约人"}</small>
+                <small className={!primaryParticipant || primaryParticipant.totalScore == null || primaryParticipant.totalScore < 2 ? "score-warning" : ""}>
+                  {primaryParticipant ? `主预约人剩余积分：${primaryParticipant.totalScore ?? "未知"}（至少需要 2 分）` : "尚未选择主预约人"}
+                </small>
               </div>
-              <Button disabled={!selection || room.reservable === false || (session.user.totalScore != null && session.user.totalScore < 2)} busy={submitting}>提交预约</Button>
+              <Button disabled={!selection || !selectedParticipantIds.length || room.reservable === false || !primaryParticipant || primaryParticipant.totalScore == null || primaryParticipant.totalScore < 2} busy={submitting}>提交预约</Button>
             </div>
           </form>
         ) : null}
@@ -1125,19 +1072,31 @@ function TasksPage({
   mode?: "list" | "new";
 }) {
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [signTasks, setSignTasks] = useState<SignAutomationTask[]>([]);
-  const [signoutTasks, setSignoutTasks] = useState<SignAutomationTask[]>([]);
+  const [workflows, setWorkflows] = useState<SignWorkflow[]>([]);
+  const [rooms, setRooms] = useState<RoomWithDays[]>([]);
+  const [participants, setParticipants] = useState<ReservationParticipant[]>([]);
+  const [selectedParticipantIds, setSelectedParticipantIds] = useState<string[]>([]);
+  const [taskType, setTaskType] = useState<"reservation" | "sign">("reservation");
+  const [roomId, setRoomId] = useState("");
+  const [reservationOptions, setReservationOptions] = useState<ReservationOption[]>([]);
+  const [reservationOptionId, setReservationOptionId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [optionBusy, setOptionBusy] = useState(false);
 
   async function load() {
     try {
-      const [reservationTasks, signInTasks, signOutTasks] = await Promise.all([
+      const participantRefresh = await api<GatewayJob | { participants: ReservationParticipant[] }>("/api/v1/reservation-participants/refresh", { method: "POST" });
+      if ("jobId" in participantRefresh) await waitForGatewayJob(participantRefresh);
+      const [reservationTasks, signWorkflows, roomResponse, participantResponse] = await Promise.all([
         api<Task[]>("/api/v1/reservation-tasks"),
-        api<SignAutomationTask[]>("/api/v1/sign-tasks").catch(() => []),
-        api<SignAutomationTask[]>("/api/v1/signout-tasks").catch(() => []),
+        api<SignWorkflow[]>("/api/v1/sign-workflows").catch(() => []),
+        api<RoomsResponse>("/api/v1/rooms"),
+        api<{ participants: ReservationParticipant[] }>("/api/v1/reservation-participants"),
       ]);
       setTasks(reservationTasks);
-      setSignTasks(signInTasks);
-      setSignoutTasks(signOutTasks);
+      setWorkflows(signWorkflows);
+      setRooms(normalizeRooms(roomResponse, threeDayDates()).rooms.filter((room) => room.reservable !== false));
+      setParticipants(participantResponse.participants);
     } catch (error) {
       toast(error instanceof Error ? error.message : "加载失败", true);
     }
@@ -1148,23 +1107,73 @@ function TasksPage({
     event.preventDefault();
     const form = event.currentTarget;
     const data = formData(form);
+    if (!selectedParticipantIds.length || !roomId) {
+      toast("请选择研讨间和预约成员", true);
+      return;
+    }
+    setBusy(true);
     try {
-      await api("/api/v1/reservation-tasks", {
-        method: "POST",
-        body: JSON.stringify({
-          targetDate: data.targetDate,
-          startTime: data.startTime,
-          endTime: data.endTime,
-          candidateRooms: [{ roomId: Number(data.roomId), roomName: data.roomName }],
-          teamMemberUserIds: [],
-        }),
-      });
+      if (taskType === "reservation") {
+        await api("/api/v1/reservation-tasks", {
+          method: "POST",
+          body: JSON.stringify({
+            targetDate: addDays(today(), 3),
+            startTime: data.startTime,
+            endTime: data.endTime,
+            roomId: Number(roomId),
+            primaryUserId: selectedParticipantIds[0],
+            participantUserIds: selectedParticipantIds,
+          }),
+        });
+      } else {
+        const option = reservationOptions.find((item) => item.id === reservationOptionId);
+        if (!option) throw new Error("请先查找并选择一条进行中的预约");
+        await api("/api/v1/sign-workflows", {
+          method: "POST",
+          body: JSON.stringify({
+            roomId: Number(roomId),
+            participantUserIds: selectedParticipantIds,
+            anchorUserId: option.ownerUserId,
+            officialReservationId: option.officialReservationId,
+            signAdvanceMinutes: Number(data.signAdvanceMinutes),
+            signoutAdvanceMinutes: Number(data.signoutAdvanceMinutes),
+          }),
+        });
+      }
       toast("自动任务已创建");
       form.reset();
+      setSelectedParticipantIds([]);
+      setRoomId("");
+      setReservationOptions([]);
+      setReservationOptionId("");
       await load();
       navigate("/tasks");
     } catch (error) {
       toast(error instanceof Error ? error.message : "创建失败", true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function refreshOptions() {
+    if (!roomId || !selectedParticipantIds.length) {
+      toast("请先选择研讨间和预约成员", true);
+      return;
+    }
+    setOptionBusy(true);
+    try {
+      const response = await api<GatewayJob<{ options: ReservationOption[] }> | { options: ReservationOption[] }>("/api/v1/reservation-options/refresh", {
+        method: "POST",
+        body: JSON.stringify({ roomId: Number(roomId), participantUserIds: selectedParticipantIds }),
+      });
+      const result = "jobId" in response ? await waitForGatewayJob(response) : response;
+      setReservationOptions(result.options);
+      setReservationOptionId(result.options[0]?.id ?? "");
+      toast(result.options.length ? `找到 ${result.options.length} 条进行中的预约` : "没有找到可管理的预约", !result.options.length);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "查找预约失败", true);
+    } finally {
+      setOptionBusy(false);
     }
   }
 
@@ -1178,20 +1187,67 @@ function TasksPage({
     }
   }
 
+  async function cancelWorkflow(id: string) {
+    try {
+      await api(`/api/v1/sign-workflows/${id}/cancel`, { method: "POST" });
+      toast("任务已取消");
+      await load();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "取消失败", true);
+    }
+  }
+
   if (mode === "new") {
     return (
       <div className="compact-page">
         <button className="back-button" type="button" onClick={() => navigate("/tasks")}>
           <ChevronLeft size={18} />返回任务
         </button>
-      <Card title="自动预约" icon={<ClipboardList size={20} />}>
+      <Card title="创建自动任务" icon={<ClipboardList size={20} />}>
         <form className="form-grid" onSubmit={create}>
-          <Field label="日期"><input name="targetDate" type="date" required /></Field>
-          <Field label="开始"><input name="startTime" type="time" step="1800" required /></Field>
-          <Field label="结束"><input name="endTime" type="time" step="1800" required /></Field>
-          <Field label="房间 ID"><input name="roomId" inputMode="numeric" required /></Field>
-          <Field label="房间名"><input name="roomName" required /></Field>
-          <Button>创建草稿</Button>
+          <Field label="任务类型">
+            <select value={taskType} onChange={(event) => { setTaskType(event.target.value as "reservation" | "sign"); setReservationOptions([]); setReservationOptionId(""); }}>
+              <option value="reservation">自动预约</option>
+              <option value="sign">自动签到与签退</option>
+            </select>
+          </Field>
+          <Field label="房间">
+            <select value={roomId} onChange={(event) => { setRoomId(event.target.value); setReservationOptions([]); setReservationOptionId(""); }} required>
+              <option value="">请选择研讨间</option>
+              {rooms.map((room) => <option key={room.id} value={room.id}>{room.name}</option>)}
+            </select>
+          </Field>
+          {taskType === "reservation" ? (
+            <>
+              <Field label="预约日期"><input value={addDays(today(), 3)} readOnly /></Field>
+              <Field label="开始时间"><input name="startTime" type="time" step="1800" required /></Field>
+              <Field label="结束时间"><input name="endTime" type="time" step="1800" required /></Field>
+            </>
+          ) : (
+            <>
+              <Field label="提前签到（分钟）"><input name="signAdvanceMinutes" type="number" min="0" max="60" defaultValue="15" required /></Field>
+              <Field label="提前签退（分钟）"><input name="signoutAdvanceMinutes" type="number" min="0" max="60" defaultValue="10" required /></Field>
+            </>
+          )}
+          <div className="form-grid-wide">
+            <OrderedParticipantPicker participants={participants} selectedIds={selectedParticipantIds} onChange={(ids) => { setSelectedParticipantIds(ids); setReservationOptions([]); setReservationOptionId(""); }} />
+          </div>
+          {taskType === "sign" ? (
+            <div className="form-grid-wide reservation-option-panel">
+              <div className="toolbar">
+                <Button type="button" variant="secondary" busy={optionBusy} onClick={() => void refreshOptions()}><RefreshCw size={16} />查找可管理的预约</Button>
+              </div>
+              <Field label="已有预约">
+                <select value={reservationOptionId} onChange={(event) => setReservationOptionId(event.target.value)} required>
+                  <option value="">请先查找预约</option>
+                  {reservationOptions.map((option) => (
+                    <option key={option.id} value={option.id}>{option.ownerName} · {option.roomName} · {option.date} {option.startTime}-{option.endTime}</option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+          ) : null}
+          <Button busy={busy}>创建任务</Button>
         </form>
       </Card>
       </div>
@@ -1200,9 +1256,9 @@ function TasksPage({
 
   return (
     <div className="compact-page">
-      <Card title="任务列表" icon={<History size={20} />}>
+      <Card title="自动任务" icon={<History size={20} />}>
         <div className="toolbar page-toolbar">
-          <Button type="button" onClick={() => navigate("/tasks/new")}><ClipboardList size={16} />新建任务</Button>
+          <Button type="button" onClick={() => navigate("/tasks/new")}><ClipboardList size={16} />创建任务</Button>
           <Button className="desktop-only-action" type="button" variant="secondary" onClick={load}><RefreshCw size={16} />刷新</Button>
         </div>
         <div className="task-sections">
@@ -1213,29 +1269,29 @@ function TasksPage({
                 <article className="list-row" key={String(task.id)}>
                   <div><strong>{String(task.target_date)} {String(task.start_time)}-{String(task.end_time)}</strong><span>{statusText(task.status as string | number | null | undefined)} · {taskCandidateText(task)}</span></div>
                   <div className="row-actions">
-                    {task.status === "DRAFT" ? <Button variant="secondary" onClick={() => action(String(task.id), "enable")}>启用</Button> : null}
                     {["DRAFT", "WAITING_WINDOW", "WAITING_MEMBERS", "READY"].includes(String(task.status)) ? <Button variant="ghost" onClick={() => action(String(task.id), "cancel")}>取消</Button> : null}
                   </div>
                 </article>
               ))}
-              {!tasks.length ? <Empty>暂无自动预约任务</Empty> : null}
+              {!tasks.length ? <Empty>还没有自动预约任务，可为三天后的预约提前做好安排</Empty> : null}
             </div>
           </section>
           <section className="task-section">
-            <div className="section-subtitle"><strong>自动签到与签退</strong><span>{signTasks.length + signoutTasks.length} 项</span></div>
+            <div className="section-subtitle"><strong>签到签退</strong><span>{workflows.length} 项</span></div>
             <div className="list">
-              {[
-                ...signTasks.map((task) => ({ ...task, kind: "自动签到" })),
-                ...signoutTasks.map((task) => ({ ...task, kind: "自动签退" })),
-              ].sort((left, right) => Number(right.scheduled_at ?? 0) - Number(left.scheduled_at ?? 0)).map((task) => (
-                <article className="list-row" key={`${task.kind}-${task.id}`}>
+              {workflows.map((workflow) => (
+                <article className="list-row" key={workflow.id}>
                   <div>
-                    <strong>{task.kind} · {task.room_name_snapshot ?? "研讨间"} · {task.date ?? "日期待定"} {task.start_time ?? ""}-{task.end_time ?? ""}</strong>
-                    <span>{statusText(task.status)} · 计划 {formatTimestamp(task.scheduled_at)} · 执行 {formatTimestamp(task.executed_at)} · 尝试 {Number(task.attempt_count ?? 0)} 次</span>
+                    <strong>{workflow.room_name_snapshot} · {workflow.date} {workflow.start_time}-{workflow.end_time}</strong>
+                    <span>{statusText(workflow.status)} · 签到 {formatTimestamp(workflow.sign_scheduled_at)} · 签退 {formatTimestamp(workflow.signout_scheduled_at)}</span>
+                    <span>{workflow.participants.map((participant) => `${participant.realName}: ${statusText(participant.signStatus)}`).join(" · ")} · 签退 {statusText(workflow.signout_status)}</span>
+                  </div>
+                  <div className="row-actions">
+                    {workflow.status === "ACTIVE" ? <Button variant="ghost" onClick={() => void cancelWorkflow(workflow.id)}>取消</Button> : null}
                   </div>
                 </article>
               ))}
-              {!signTasks.length && !signoutTasks.length ? <Empty>暂无自动签到或签退任务</Empty> : null}
+              {!workflows.length ? <Empty>还没有签到或签退安排</Empty> : null}
             </div>
           </section>
         </div>
@@ -1306,7 +1362,7 @@ function TeamsPage({
   async function invite(teamId: string, inviteeUserId: string) {
     try {
       await api(`/api/v1/teams/${teamId}/invitations`, { method: "POST", body: JSON.stringify({ inviteeUserId }) });
-      toast("邀请邮件已排队");
+      toast("邀请已发送");
     } catch (error) {
       toast(error instanceof Error ? error.message : "邀请失败", true);
     }
@@ -1332,8 +1388,8 @@ function TeamsPage({
           <button className="back-button" type="button" onClick={() => navigate("/teams")}>
             <ChevronLeft size={18} />返回小队
           </button>
-          <Card title="小队" icon={<UsersRound size={20} />}>
-            <Empty>你已经创建过小队。每个账号只能创建一个小队，但可以加入多个其他小队。</Empty>
+          <Card title="创建小队" icon={<UsersRound size={20} />}>
+            <Empty>你已经创建了一个小队。如需与其他同学协作，可以加入他们的小队。</Empty>
           </Card>
         </div>
       );
@@ -1343,10 +1399,10 @@ function TeamsPage({
         <button className="back-button" type="button" onClick={() => navigate("/teams")}>
           <ChevronLeft size={18} />返回小队
         </button>
-      <Card title="小队" icon={<UsersRound size={20} />}>
+      <Card title="创建小队" icon={<UsersRound size={20} />}>
         <form className="form-stack" onSubmit={create}>
-          <Field label="名称"><input name="name" required maxLength={50} /></Field>
-          <Field label="描述"><input name="description" maxLength={120} /></Field>
+          <Field label="小队名称"><input name="name" required maxLength={50} placeholder="例如：植保 2301 学习小组" /></Field>
+          <Field label="小队说明"><input name="description" maxLength={120} placeholder="简单说明小队用途，可不填" /></Field>
           <Button>创建小队</Button>
         </form>
       </Card>
@@ -1363,9 +1419,9 @@ function TeamsPage({
         <button className="back-button" type="button" onClick={() => navigate("/teams")}>
           <ChevronLeft size={18} />返回小队
         </button>
-        <Card title={team ? `邀请加入 ${team.name}` : "邀请成员"} icon={<Mail size={20} />}>
-          {!team ? <Empty>未找到这个小队</Empty> : null}
-          {team && !isTeamLeader(team) ? <Empty>只有小队创建者可以邀请成员。</Empty> : null}
+        <Card title={team ? `邀请成员加入 ${team.name}` : "邀请成员"} icon={<Mail size={20} />}>
+          {!team ? <Empty>这个小队可能已被删除或你已不在队内</Empty> : null}
+          {team && !isTeamLeader(team) ? <Empty>只有小队创建者可以邀请新成员</Empty> : null}
           {team && isTeamLeader(team) ? (
             <div className="invite-user-grid">
               {inviteUsers.map((user) => (
@@ -1378,7 +1434,7 @@ function TeamsPage({
                   <Button type="button" variant="secondary" onClick={() => invite(team.id, user.id)}>发送邀请</Button>
                 </article>
               ))}
-              {!inviteUsers.length ? <Empty>暂无可邀请的站内用户</Empty> : null}
+              {!inviteUsers.length ? <Empty>当前没有其他可邀请成员</Empty> : null}
             </div>
           ) : null}
         </Card>
@@ -1390,7 +1446,7 @@ function TeamsPage({
 
   return (
     <div className="compact-page">
-      <Card title="成员邀请" icon={<Mail size={20} />}>
+      <Card title="我的小队" icon={<Mail size={20} />}>
         <div className="toolbar page-toolbar">
           <Button type="button" disabled={!canCreateTeam} onClick={() => navigate("/teams/new")}><UsersRound size={16} />{canCreateTeam ? "新建小队" : "已创建小队"}</Button>
           <Button className="desktop-only-action" type="button" variant="secondary" onClick={() => load(true)}><RefreshCw size={16} />刷新</Button>
@@ -1416,7 +1472,7 @@ function TeamsPage({
             <article className="list-row" key={team.id}>
               <div>
                 <strong>{team.name}</strong>
-                <span>{team.description || "无描述"} · {visibleTeamMembers(team).length} 人 · {isTeamLeader(team) ? "我创建的" : "已加入"}</span>
+                <span>{team.description || "暂未填写小队说明"} · {visibleTeamMembers(team).length} 人 · {isTeamLeader(team) ? "由我创建" : "我已加入"}</span>
                 <div className="team-member-strip">
                   {visibleTeamMembers(team).map((member) => {
                     const memberScore = teamScores[team.id]?.find((s) => s.realName === member.name);
@@ -1434,7 +1490,7 @@ function TeamsPage({
               ) : null}
             </article>
           ))}
-          {!teams.length ? <Empty>暂无小队</Empty> : null}
+          {!teams.length ? <Empty>你还没有加入小队，可创建小队并邀请同学一起预约</Empty> : null}
         </div>
       </Card>
     </div>
@@ -1469,7 +1525,7 @@ function HistoryPage({ toast }: { toast: (message: string, error?: boolean) => v
       const job = await api<GatewayJob<{ url?: string }>>(`/api/v1/reservations/${id}/${actionName}`, { method: "POST" });
       const result = await waitForGatewayJob(job);
       if (result.url) window.open(result.url, "_blank", "noopener,noreferrer");
-      toast("订单状态已更新");
+      toast("预约状态已更新");
       await load();
     } catch (error) {
       toast(error instanceof Error ? error.message : "操作失败", true);
@@ -1477,14 +1533,14 @@ function HistoryPage({ toast }: { toast: (message: string, error?: boolean) => v
   }
 
   return (
-    <Card title="预约历史" icon={<History size={20} />}>
-      <div className="toolbar desktop-only-toolbar"><Button type="button" onClick={() => load(true)}><RefreshCw size={16} />同步</Button></div>
+    <Card title="预约记录" icon={<History size={20} />}>
+      <div className="toolbar desktop-only-toolbar"><Button type="button" onClick={() => load(true)}><RefreshCw size={16} />更新记录</Button></div>
       <div className="list">
         {visibleItems.map((item) => (
           <article className="list-row" key={String(item.id)}>
             <div>
               <strong>{item.room_name_snapshot} · {item.date} {item.start_time}-{item.end_time}</strong>
-              <span>{String(item.statusLabel ?? item.status_label ?? item.status)} · 官方订单 {String(item.official_reservation_id ?? "同步中")}</span>
+              <span>{String(item.statusLabel ?? item.status_label ?? item.status)} · 预约编号 {String(item.official_reservation_id ?? "正在获取")}</span>
             </div>
             <div className="row-actions">
               {item.status === "SIGNED_IN" ? <Button variant="secondary" onClick={() => action(String(item.id), "signout")}>签退</Button> : null}
@@ -1492,7 +1548,7 @@ function HistoryPage({ toast }: { toast: (message: string, error?: boolean) => v
             </div>
           </article>
         ))}
-        {!items.length ? <Empty>暂无预约记录</Empty> : null}
+        {!items.length ? <Empty>还没有预约记录，完成预约后可在这里查看和管理</Empty> : null}
       </div>
       {items.length > pageSize ? (
         <div className="pagination">
@@ -1516,6 +1572,20 @@ function AdminPage({
 }) {
   const [body, setBody] = useState<unknown>(null);
   const collections = ["users", "credentials", "tasks", "reservations", "teams", "team-invitations", "sign-tasks", "signout-tasks", "emails", "audit-logs", "gateway-jobs", "gateway-snapshots"];
+  const collectionLabels: Record<string, string> = {
+    users: "用户账号",
+    credentials: "校园账号连接",
+    tasks: "自动预约任务",
+    reservations: "预约记录",
+    teams: "小队",
+    "team-invitations": "小队邀请",
+    "sign-tasks": "签到任务",
+    "signout-tasks": "签退任务",
+    emails: "邮件通知",
+    "audit-logs": "操作记录",
+    "gateway-jobs": "访问任务",
+    "gateway-snapshots": "数据记录",
+  };
 
   async function load(path = `/api/v1/admin/${collection}`) {
     try {
@@ -1527,15 +1597,19 @@ function AdminPage({
   useEffect(() => { void load(); }, [collection]);
 
   return (
-    <Card title="管理员" icon={<Settings size={20} />}>
-      <div className="toolbar">
-        <select value={collection} onChange={(event) => navigate(`/admin/${event.target.value}`)}>
-          {collections.map((item) => <option key={item}>{item}</option>)}
-        </select>
-        <Button type="button" variant="secondary" onClick={() => load("/api/v1/admin/config")}>配置</Button>
-        <Button type="button" onClick={() => api("/api/v1/admin/emails/test", { method: "POST" }).then(() => toast("测试邮件已排队")).catch((error: ApiError) => toast(error.message, true))}>测试邮件</Button>
+    <Card title="系统管理" icon={<Settings size={20} />}>
+      <div className="admin-intro">
+        <strong>{collectionLabels[collection] ?? "系统记录"}</strong>
+        <span>查看服务运行情况和用户操作记录。</span>
       </div>
-      <pre className="json-panel">{JSON.stringify(body, null, 2)}</pre>
+      <div className="toolbar admin-toolbar">
+        <select value={collection} onChange={(event) => navigate(`/admin/${event.target.value}`)}>
+          {collections.map((item) => <option key={item} value={item}>{collectionLabels[item]}</option>)}
+        </select>
+        <Button type="button" variant="secondary" onClick={() => load("/api/v1/admin/config")}>运行设置</Button>
+        <Button type="button" onClick={() => api("/api/v1/admin/emails/test", { method: "POST" }).then(() => toast("测试邮件已发送")).catch((error: ApiError) => toast(error.message, true))}>发送测试邮件</Button>
+      </div>
+      <pre className="json-panel" aria-label={`${collectionLabels[collection] ?? "系统"}详情`}>{JSON.stringify(body, null, 2)}</pre>
     </Card>
   );
 }
@@ -1624,7 +1698,7 @@ export function App() {
       </main>
       <footer className="footer">
         <strong>NJAU Libyy</strong>
-        <a href="https://github.com/leecyang" target="_blank" rel="noreferrer">github.com/leecyang</a>
+        <span>研讨间预约与小队协作</span>
       </footer>
       <Toast message={message} error={isError} />
     </Shell>

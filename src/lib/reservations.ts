@@ -32,6 +32,25 @@ export type SignDevice = {
   systemMac: string;
 };
 
+export type SignWorkflowInput = {
+  reservationId?: string | null;
+  requestedByUserId: string;
+  anchorUserId: string;
+  officialReservationId: string;
+  roomId: number;
+  roomName: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+  startTimestamp: number;
+  endTimestamp: number;
+  minSignTime?: number | null;
+  signAdvanceMinutes?: number;
+  signoutAdvanceMinutes?: number;
+  participantUserIds: string[];
+  replaceExisting?: boolean;
+};
+
 export function shanghaiParts(timestamp: number): { date: string; time: string } {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Shanghai",
@@ -126,29 +145,126 @@ export async function officialMemberSnapshot(env: AppEnv, record: OfficialReserv
   }));
 }
 
-export async function ensureReservationTasks(env: AppEnv, reservationId: string, record: OfficialReservationRecord): Promise<void> {
-  const signout = await env.DB.prepare("SELECT id FROM signout_tasks WHERE reservation_id = ?").bind(reservationId).first();
-  const sign = await env.DB.prepare("SELECT id FROM sign_tasks WHERE reservation_id = ?").bind(reservationId).first();
-  const statements: AppPreparedStatement[] = [];
-  if (!signout && (record.reservationStatus === 21 || record.reservationStatus === 31)) {
-    statements.push(env.DB.prepare(
-      `INSERT INTO signout_tasks (id, reservation_id, official_reservation_id, scheduled_at, status, attempt_count)
-       VALUES (?, ?, ?, ?, 'PENDING', 0)`,
-    ).bind(crypto.randomUUID(), reservationId, String(record.id), record.endTime - 10 * 60_000));
-  }
-  if (!sign && (record.reservationStatus === 21 || record.reservationStatus === 31)) {
-    statements.push(env.DB.prepare(
-      `INSERT INTO sign_tasks (id, reservation_id, scheduled_at, status, executed_at)
-       VALUES (?, ?, ?, ?, ?)`,
+export async function createSignWorkflow(env: AppEnv, input: SignWorkflowInput): Promise<string> {
+  if (!input.participantUserIds.length) throw new HttpError(400, "PARTICIPANTS_REQUIRED", "签到任务至少需要一位成员");
+  const existing = input.reservationId
+    ? await env.DB.prepare("SELECT id FROM sign_workflows WHERE reservation_id = ?").bind(input.reservationId).first<{ id: string }>()
+    : null;
+  if (existing && !input.replaceExisting) return existing.id;
+
+  const signAdvance = Math.min(60, Math.max(0, Math.trunc(input.signAdvanceMinutes ?? 15)));
+  const signoutAdvance = Math.min(60, Math.max(0, Math.trunc(input.signoutAdvanceMinutes ?? 10)));
+  const requestedSignAt = input.startTimestamp - signAdvance * 60_000;
+  const signScheduledAt = Math.max(requestedSignAt, input.minSignTime ?? requestedSignAt);
+  const signoutScheduledAt = input.endTimestamp - signoutAdvance * 60_000;
+  const workflowId = existing?.id ?? crypto.randomUUID();
+  const now = Date.now();
+  const participantIds = [...new Set(input.participantUserIds)];
+  const statements: AppPreparedStatement[] = existing ? [
+    env.DB.prepare(
+      `UPDATE sign_workflows
+          SET requested_by_user_id = ?, anchor_user_id = ?, official_reservation_id = ?, room_id = ?,
+              room_name_snapshot = ?, date = ?, start_time = ?, end_time = ?, sign_advance_minutes = ?,
+              signout_advance_minutes = ?, sign_scheduled_at = ?, signout_scheduled_at = ?, status = 'ACTIVE',
+              signout_status = 'PENDING', signout_user_id = NULL, signout_executed_at = NULL,
+              failure_code = NULL, failure_message = NULL, updated_at = ?
+        WHERE id = ?`,
     ).bind(
-      crypto.randomUUID(),
-      reservationId,
-      record.minSignTime ?? record.startTime - 14 * 60_000,
-      record.reservationStatus === 31 ? "SUCCESS" : "PENDING",
-      record.reservationStatus === 31 ? record.signInTime ?? Date.now() : null,
-    ));
+      input.requestedByUserId,
+      input.anchorUserId,
+      input.officialReservationId,
+      input.roomId,
+      input.roomName,
+      input.date,
+      input.startTime,
+      input.endTime,
+      signAdvance,
+      signoutAdvance,
+      signScheduledAt,
+      signoutScheduledAt,
+      now,
+      workflowId,
+    ),
+    env.DB.prepare("DELETE FROM sign_workflow_participants WHERE workflow_id = ?").bind(workflowId),
+  ] : [
+    env.DB.prepare(
+      `INSERT INTO sign_workflows
+        (id, reservation_id, requested_by_user_id, anchor_user_id, official_reservation_id,
+         room_id, room_name_snapshot, date, start_time, end_time, sign_advance_minutes,
+         signout_advance_minutes, sign_scheduled_at, signout_scheduled_at, status,
+         signout_status, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', 'PENDING', ?, ?)`,
+    ).bind(
+      workflowId,
+      input.reservationId ?? null,
+      input.requestedByUserId,
+      input.anchorUserId,
+      input.officialReservationId,
+      input.roomId,
+      input.roomName,
+      input.date,
+      input.startTime,
+      input.endTime,
+      signAdvance,
+      signoutAdvance,
+      signScheduledAt,
+      signoutScheduledAt,
+      now,
+      now,
+    ),
+  ];
+  participantIds.forEach((userId, index) => {
+    statements.push(env.DB.prepare(
+      `INSERT INTO sign_workflow_participants
+        (workflow_id, user_id, participant_order, sign_status, updated_at)
+       VALUES (?, ?, ?, 'PENDING', ?)`,
+    ).bind(workflowId, userId, index + 1, now));
+  });
+  await env.DB.batch(statements);
+  return workflowId;
+}
+
+export async function ensureReservationTasks(env: AppEnv, reservationId: string, record: OfficialReservationRecord): Promise<void> {
+  if (![21, 31].includes(record.reservationStatus)) return;
+  const reservation = await env.DB.prepare(
+    `SELECT owner_user_id, COALESCE(requested_by_user_id, owner_user_id) AS requested_by_user_id,
+            room_name_snapshot, date, start_time, end_time, member_snapshot_json
+       FROM reservations WHERE id = ?`,
+  ).bind(reservationId).first<{
+    owner_user_id: string;
+    requested_by_user_id: string;
+    room_name_snapshot: string;
+    date: string;
+    start_time: string;
+    end_time: string;
+    member_snapshot_json: string;
+  }>();
+  if (!reservation) return;
+  let members: MemberSnapshot[] = [];
+  try {
+    const parsed = JSON.parse(reservation.member_snapshot_json) as unknown;
+    if (Array.isArray(parsed)) members = parsed as MemberSnapshot[];
+  } catch {
+    members = [];
   }
-  if (statements.length) await env.DB.batch(statements);
+  await createSignWorkflow(env, {
+    reservationId,
+    requestedByUserId: reservation.requested_by_user_id,
+    anchorUserId: reservation.owner_user_id,
+    officialReservationId: String(record.id),
+    roomId: record.roomId,
+    roomName: record.roomName ?? reservation.room_name_snapshot,
+    date: reservation.date,
+    startTime: reservation.start_time,
+    endTime: reservation.end_time,
+    startTimestamp: record.startTime,
+    endTimestamp: record.endTime,
+    minSignTime: record.minSignTime,
+    participantUserIds: [
+      reservation.owner_user_id,
+      ...members.map((member) => member.localUserId).filter((id): id is string => Boolean(id)),
+    ],
+  });
 }
 
 export async function syncOfficialReservationHistory(env: AppEnv, user: ReservationUser): Promise<OfficialReservationRecord[]> {
@@ -240,26 +356,43 @@ export async function findOfficialRecord(
 
 export function resolveSignDevice(env: AppEnv, roomId: number | string): SignDevice {
   const normalizedRoomId = String(roomId);
-  const mappingText = env.SIGN_ROOM_SYSTEM_MAC_MAP?.trim();
-  if (mappingText) {
-    try {
-      const parsed = JSON.parse(mappingText) as unknown;
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        const systemMac = (parsed as Record<string, unknown>)[normalizedRoomId];
-        if (typeof systemMac === "string" && systemMac.trim()) {
-          return { roomId: normalizedRoomId, systemMac: systemMac.trim() };
-        }
-      }
-    } catch {
-      throw new HttpError(503, "SIGN_ROOM_SYSTEM_MAC_MAP_INVALID", "签到房间设备映射配置格式错误");
-    }
-  }
-
-  const legacyRoomId = env.AUTHORIZED_SIGN_ROOM_ID?.trim();
-  const legacySystemMac = env.AUTHORIZED_SIGN_SYSTEM_MAC?.trim();
-  if (legacyRoomId === normalizedRoomId && legacySystemMac) {
-    return { roomId: normalizedRoomId, systemMac: legacySystemMac };
-  }
-
+  const mapping = parseSignDeviceMap(env.SIGN_ROOM_SYSTEM_MAC_MAP);
+  const systemMac = mapping[normalizedRoomId];
+  if (systemMac) return { roomId: normalizedRoomId, systemMac };
   throw new HttpError(503, "SIGN_DEVICE_NOT_CONFIGURED_FOR_ROOM", "当前房间尚未配置签到设备映射");
+}
+
+export function parseSignDeviceMap(value: string | undefined): Record<string, string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value?.trim() || "{}");
+  } catch {
+    throw new HttpError(503, "SIGN_ROOM_SYSTEM_MAC_MAP_INVALID", "签到房间设备映射配置格式错误");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new HttpError(503, "SIGN_ROOM_SYSTEM_MAC_MAP_INVALID", "签到房间设备映射配置格式错误");
+  }
+  const result: Record<string, string> = {};
+  const usedMacs = new Set<string>();
+  for (const [roomId, rawMac] of Object.entries(parsed)) {
+    if (!/^\d+$/.test(roomId) || typeof rawMac !== "string" || !rawMac.trim()) {
+      throw new HttpError(503, "SIGN_ROOM_SYSTEM_MAC_MAP_INVALID", "签到房间设备映射包含无效值");
+    }
+    const systemMac = rawMac.trim();
+    if (usedMacs.has(systemMac)) {
+      throw new HttpError(503, "SIGN_ROOM_SYSTEM_MAC_DUPLICATED", "不同房间不能复用同一个签到设备 MAC");
+    }
+    usedMacs.add(systemMac);
+    result[roomId] = systemMac;
+  }
+  return result;
+}
+
+export function assertCompleteSignDeviceMap(value: string | undefined): Record<string, string> {
+  const mapping = parseSignDeviceMap(value);
+  const missing = Array.from({ length: 26 }, (_, index) => String(index + 2)).filter((roomId) => !mapping[roomId]);
+  if (missing.length) {
+    throw new HttpError(503, "SIGN_ROOM_SYSTEM_MAC_MAP_INCOMPLETE", `签到房间设备映射缺少房间：${missing.join(", ")}`);
+  }
+  return mapping;
 }
