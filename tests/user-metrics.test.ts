@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import type { AppEnv } from "../src/config";
 import { applyMigrations } from "../src/node/migrations";
 import { openSqliteDatabase } from "../src/node/sqlite";
-import { claimReservationQuota, releaseReservationQuota, reservationQuotas } from "../src/lib/user-metrics";
+import { claimReservationQuota, releaseReservationQuota, requestedMetricDates, reservationQuotas } from "../src/lib/user-metrics";
 
 function testEnv() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "njau-libyy-metrics-"));
@@ -22,6 +22,13 @@ async function addUser(env: AppEnv, id: string) {
 }
 
 describe("reservation quota claims", () => {
+  it("uses explicitly requested reservation dates without leaking a stale default window", () => {
+    expect(requestedMetricDates(new Request("https://app.test/api/v1/reservation-participants?date=2026-06-15")))
+      .toEqual(["2026-06-15"]);
+    expect(requestedMetricDates(new Request("https://app.test/api/v1/reservation-participants?date=bad"), ["2026-06-12"]))
+      .toEqual(["2026-06-12"]);
+  });
+
   it("allows two claims, rejects the third, and restores capacity after release", async () => {
     const env = testEnv();
     await addUser(env, "user-a");

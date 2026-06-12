@@ -1,15 +1,9 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { useGSAP } from "@gsap/react";
-import { gsap } from "gsap";
-import { ScrollTrigger } from "gsap/ScrollTrigger";
 import {
-  Activity,
-  ArrowRight,
   CalendarClock,
   ChevronLeft,
   CircleUserRound,
   ClipboardList,
-  Database,
   DoorOpen,
   History,
   KeyRound,
@@ -17,14 +11,11 @@ import {
   LogOut,
   Mail,
   RefreshCw,
-  Send,
   Settings,
   Shield,
   UsersRound,
 } from "lucide-react";
 import { api, ApiError, type GatewayJob, waitForGatewayJob } from "./api";
-
-gsap.registerPlugin(useGSAP, ScrollTrigger);
 
 type Page = "rooms" | "tasks" | "teams" | "history" | "admin";
 type Route = {
@@ -352,7 +343,7 @@ function Button({
 
 function Card({ children, title, icon }: { children: ReactNode; title?: string; icon?: ReactNode }) {
   return (
-    <section className="card motion-card">
+    <section className="card">
       {title ? <div className="card-title">{icon}<h2>{title}</h2></div> : null}
       {children}
     </section>
@@ -365,69 +356,6 @@ function Field({ label, children }: { label: string; children: ReactNode }) {
 
 function Empty({ children }: { children: ReactNode }) {
   return <div className="empty">{children}</div>;
-}
-
-function BrandLockup({ compact = false }: { compact?: boolean }) {
-  return (
-    <span className={compact ? "brand-lockup compact" : "brand-lockup"}>
-      <span className="brand-symbol" aria-hidden="true" />
-      <span><strong>NJAU Libyy</strong>{compact ? null : <small>研讨间预约</small>}</span>
-    </span>
-  );
-}
-
-function PageIntro({
-  title,
-  description,
-  action,
-}: {
-  title: string;
-  description: string;
-  action?: ReactNode;
-}) {
-  return (
-    <header className="page-intro motion-reveal">
-      <div>
-        <h1>{title}</h1>
-        <p>{description}</p>
-      </div>
-      {action ? <div className="page-intro-action">{action}</div> : null}
-    </header>
-  );
-}
-
-function PageStage({ page, children }: { page: Page; children: ReactNode }) {
-  const scope = useRef<HTMLElement>(null);
-
-  useGSAP(() => {
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-
-    gsap.fromTo(
-      ".motion-reveal",
-      { autoAlpha: 0, y: 18 },
-      { autoAlpha: 1, y: 0, duration: 0.7, stagger: 0.08, ease: "power3.out" },
-    );
-    gsap.utils.toArray<HTMLElement>(".motion-card").forEach((card, index) => {
-      gsap.fromTo(card, {
-        autoAlpha: 0.72,
-        scale: 0.985,
-        y: Math.min(index * 6, 18),
-      }, {
-        autoAlpha: 1,
-        scale: 1,
-        y: 0,
-        ease: "none",
-        scrollTrigger: {
-          trigger: card,
-          start: "top 96%",
-          end: "top 68%",
-          scrub: 0.6,
-        },
-      });
-    });
-  }, { scope, dependencies: [page], revertOnUpdate: true });
-
-  return <main className="content" ref={scope}>{children}</main>;
 }
 
 const pagePaths: Record<Page, string> = {
@@ -811,41 +739,6 @@ function OrderedParticipantPicker({
 function AuthPanel({ onReady, toast }: { onReady: () => Promise<void>; toast: (message: string, error?: boolean) => void }) {
   const [tab, setTab] = useState<"login" | "register" | "reset">("login");
   const [busy, setBusy] = useState("");
-  const scope = useRef<HTMLElement>(null);
-
-  useGSAP(() => {
-    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    const timeline = gsap.timeline({ defaults: { ease: "power3.out" } });
-    timeline
-      .from(".auth-nav", { autoAlpha: 0, y: -16, duration: 0.55 })
-      .from(".auth-copy > *", { autoAlpha: 0, y: 26, duration: 0.7, stagger: 0.08 }, "-=0.2")
-      .from(".auth-card", { autoAlpha: 0, y: 32, scale: 0.975, duration: 0.85 }, "-=0.65");
-
-    gsap.fromTo(".auth-inline-image", { scale: 0.82, autoAlpha: 0.45 }, {
-      scale: 1,
-      autoAlpha: 1,
-      ease: "none",
-      scrollTrigger: {
-        trigger: ".auth-copy",
-        start: "top 90%",
-        end: "bottom 35%",
-        scrub: 0.8,
-      },
-    });
-    gsap.utils.toArray<HTMLElement>(".auth-capability").forEach((item, index) => {
-      gsap.fromTo(item, { y: 18 + index * 8, scale: 0.97 }, {
-        y: 0,
-        scale: 1,
-        ease: "none",
-        scrollTrigger: {
-          trigger: item,
-          start: "top 96%",
-          end: "top 72%",
-          scrub: 0.55,
-        },
-      });
-    });
-  }, { scope });
 
   async function submit(path: string, event: FormEvent<HTMLFormElement>, success: string) {
     event.preventDefault();
@@ -878,34 +771,18 @@ function AuthPanel({ onReady, toast }: { onReady: () => Promise<void>; toast: (m
   }
 
   return (
-    <main className="auth-page" ref={scope}>
-      <header className="auth-nav">
-        <BrandLockup />
-        {tab === "login" ? <span className="auth-nav-note">从一个空闲时段开始</span> : <button type="button" onClick={() => setTab("login")}>返回登录</button>}
-      </header>
-      <div className="auth-layout">
-        <section className="auth-copy">
-          <h1>把研讨间<span className="auth-inline-image" aria-hidden="true" /><span className="auth-heading-tail">安排得更从容</span></h1>
-          <p>看清未来三天的空闲时间，和固定成员一起预约，并在需要时提前安排签到与签退。</p>
-          <div className="auth-capabilities" aria-label="主要功能">
-            <article className="auth-capability">
-              <strong>先看时间</strong>
-              <span>连续比较三天内每间研讨间的可用时段。</span>
-            </article>
-            <article className="auth-capability">
-              <strong>再选成员</strong>
-              <span>按顺序选择同行成员，清楚确认积分与次数。</span>
-            </article>
-            <article className="auth-capability">
-              <strong>提前安排</strong>
-              <span>为开放日预约、签到和签退预留好时间。</span>
-            </article>
-          </div>
-          <div className="auth-marquee" aria-hidden="true">
-            <div>可用时间 · 小队协作 · 预约记录 · 签到签退 · 可用时间 · 小队协作 · 预约记录 · 签到签退</div>
-          </div>
-        </section>
-        <section className="auth-card">
+    <main className="auth-layout">
+      <section className="auth-copy">
+        <div className="brand-mark">NJAU Libyy</div>
+        <h1>研讨间预约</h1>
+        <p>查看未来三天的可用时间，和固定成员一起完成预约、签到与签退。</p>
+        <ul className="auth-intro-list">
+          <li>快速比较不同房间的可用时间</li>
+          <li>统一查看成员积分与预约次数</li>
+          <li>提前安排预约、签到和签退</li>
+        </ul>
+      </section>
+      <section className="auth-card">
         {tab === "login" ? (
           <>
             <div className="auth-heading">
@@ -956,12 +833,7 @@ function AuthPanel({ onReady, toast }: { onReady: () => Promise<void>; toast: (m
             </form>
           </>
         ) : null}
-        </section>
-      </div>
-      <footer className="auth-footer">
-        <span>南京农业大学图书馆研讨间预约辅助工具</span>
-        <span>账号信息仅用于完成你发起的预约操作</span>
-      </footer>
+      </section>
     </main>
   );
 }
@@ -989,7 +861,7 @@ function Shell({
   return (
     <div className="app-shell">
       <header className="top-nav">
-        <button className="brand-button" onClick={() => navigate("/rooms")} aria-label="返回研讨间首页"><BrandLockup compact /></button>
+        <button className="brand-button" onClick={() => navigate("/rooms")} aria-label="返回研讨间首页">NJAU Libyy</button>
         <nav className="nav-pills" aria-label="主要页面">
           {items.filter((item) => !item.admin || session.user.role === "ADMIN").map((item) => (
             <button key={item.id} className={page === item.id ? "active" : ""} aria-current={page === item.id ? "page" : undefined} onClick={() => navigate(pagePath(item.id))}>{item.icon}{item.label}</button>
@@ -1116,20 +988,17 @@ function RoomsPage({ toast, navigate }: { toast: (message: string, error?: boole
 
   return (
     <div className="room-list-page">
-      <PageIntro
-        title="今天想约哪一间？"
-        description="从未来三天的空闲时间开始选择，进入房间后再确认同行成员。"
-        action={<Button onClick={() => loadRooms(true)} busy={busy} type="button" variant="secondary"><RefreshCw size={16} />更新可用时间</Button>}
-      />
-      <Card title="未来三天的可用时间" icon={<CalendarClock size={20} />}>
+      <Card title="可预约研讨间" icon={<CalendarClock size={20} />}>
         <div className="three-day-head">
           <div>
+            <span className="eyebrow">未来三天</span>
             <div className="date-strip">{dates.map((date) => <span key={date}>{dayLabel(date)}</span>)}</div>
             <small className={`cache-status ${cache?.status?.toLowerCase() ?? "miss"}`}>
               {cache?.status === "FRESH" ? "可用时间已更新" : cache?.status === "STALE" ? "当前信息可能不是最新" : cache?.status === "EXPIRED" ? "请更新可用时间" : "正在获取可用时间"}
               {cache?.refreshedAt ? ` · 更新于 ${formatTimestamp(cache.refreshedAt)}` : ""}
             </small>
           </div>
+          <Button className="desktop-only-action" onClick={() => loadRooms(true)} busy={busy} type="button" variant="secondary"><RefreshCw size={16} />更新可用时间</Button>
         </div>
         <div className="room-grid">
           {rooms.map((room) => (
@@ -1186,7 +1055,7 @@ function RoomDetailPage({
       if ("jobId" in participantRefresh) await waitForGatewayJob(participantRefresh);
       const [response, participantData] = await Promise.all([
         api<RoomsResponse>("/api/v1/rooms"),
-        api<{ participants: ReservationParticipant[] }>("/api/v1/reservation-participants"),
+        api<{ participants: ReservationParticipant[] }>(`/api/v1/reservation-participants?${fallbackDates.map((date) => `date=${encodeURIComponent(date)}`).join("&")}`),
       ]);
       const normalized = normalizeRooms(response, fallbackDates);
       const availableRooms = normalized.rooms.filter((item) => item.reservable !== false);
@@ -1202,6 +1071,19 @@ function RoomDetailPage({
   }
 
   useEffect(() => { void loadRoom(); }, [roomId]);
+
+  useEffect(() => {
+    if (!selection?.date) return;
+    void api<{ participants: ReservationParticipant[] }>(`/api/v1/reservation-participants?date=${encodeURIComponent(selection.date)}`)
+      .then((response) => {
+        const quotas = new Map(response.participants.map((participant) => [participant.id, participant.reservationQuota]));
+        setParticipants((current) => current.map((participant) => ({
+          ...participant,
+          reservationQuota: quotas.get(participant.id) ?? participant.reservationQuota,
+        })));
+      })
+      .catch(() => undefined);
+  }, [selection?.date]);
 
   async function reserve(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1252,11 +1134,7 @@ function RoomDetailPage({
       <button className="back-button" type="button" onClick={() => navigate("/rooms")}>
         <ChevronLeft size={18} />返回房间
       </button>
-      <PageIntro
-        title={room ? `预约 ${room.name}` : "选择预约时间"}
-        description="依次确认时间、主预约人和同行成员，提交前仍可随时调整。"
-      />
-      <Card title="确认时间与成员" icon={<DoorOpen size={20} />}>
+      <Card title="选择预约时间" icon={<DoorOpen size={20} />}>
         {busy ? <Empty>正在获取可预约时间</Empty> : null}
         {!busy && !room ? <Empty>这个研讨间当前不可预约或已下线</Empty> : null}
         {room ? (
@@ -1329,7 +1207,7 @@ function TasksPage({
         api<Task[]>("/api/v1/reservation-tasks"),
         api<SignWorkflow[]>("/api/v1/sign-workflows").catch(() => []),
         api<RoomsResponse>("/api/v1/rooms"),
-        api<{ participants: ReservationParticipant[] }>("/api/v1/reservation-participants"),
+        api<{ participants: ReservationParticipant[] }>(`/api/v1/reservation-participants?date=${encodeURIComponent(targetDate)}`),
       ]);
       setTasks(reservationTasks);
       setWorkflows(signWorkflows);
@@ -1437,8 +1315,7 @@ function TasksPage({
         <button className="back-button" type="button" onClick={() => navigate("/tasks")}>
           <ChevronLeft size={18} />返回提前安排
         </button>
-      <PageIntro title="提前安排下一次预约" description="预约开放后将按你确认的房间、时间和成员尝试提交；签到与签退仅用于已有预约。" />
-      <Card title="填写安排" icon={<ClipboardList size={20} />}>
+      <Card title="新增提前安排" icon={<ClipboardList size={20} />}>
         <form className="form-grid" onSubmit={create}>
           <Field label="你希望提前做什么">
             <select value={taskType} onChange={(event) => {
@@ -1497,7 +1374,7 @@ function TasksPage({
               <OrderedParticipantPicker participants={participants} selectedIds={selectedParticipantIds} onChange={setSelectedParticipantIds} selectedDate={targetDate} />
             </div>
           ) : null}
-          <Button busy={busy}>保存安排<ArrowRight size={16} /></Button>
+          <Button busy={busy}>保存安排</Button>
         </form>
       </Card>
       </div>
@@ -1506,13 +1383,9 @@ function TasksPage({
 
   return (
     <div className="compact-page">
-      <PageIntro
-        title="把下一步提前安排好"
-        description="查看尚未开始、正在进行和已经完成的预约与签到安排。"
-        action={<Button type="button" onClick={() => navigate("/tasks/new")}><ClipboardList size={16} />新增安排</Button>}
-      />
       <Card title="我的提前安排" icon={<History size={20} />}>
         <div className="toolbar page-toolbar">
+          <Button type="button" onClick={() => navigate("/tasks/new")}><ClipboardList size={16} />新增安排</Button>
           <Button type="button" variant="secondary" onClick={load}><RefreshCw size={16} />更新安排</Button>
         </div>
         <div className="task-sections">
@@ -1662,8 +1535,7 @@ function TeamsPage({
           <button className="back-button" type="button" onClick={() => navigate("/teams")}>
             <ChevronLeft size={18} />返回同行成员
           </button>
-          <PageIntro title="建立固定同行成员" description="每个人只能创建一个小队，但仍可接受其他同学的邀请。" />
-          <Card title="暂时无法新建" icon={<UsersRound size={20} />}>
+          <Card title="新建小队" icon={<UsersRound size={20} />}>
             <Empty>你已经创建了一个小队。可以继续邀请成员，或加入其他同学的小队。</Empty>
           </Card>
         </div>
@@ -1674,8 +1546,7 @@ function TeamsPage({
         <button className="back-button" type="button" onClick={() => navigate("/teams")}>
           <ChevronLeft size={18} />返回同行成员
         </button>
-      <PageIntro title="建立固定同行成员" description="为经常一起使用研讨间的同学建立小队，之后选择成员会更快。" />
-      <Card title="填写小队信息" icon={<UsersRound size={20} />}>
+      <Card title="新建小队" icon={<UsersRound size={20} />}>
         <form className="form-stack" onSubmit={create}>
           <Field label="小队名称"><input name="name" required maxLength={50} placeholder="例如：植保 2301 学习小组" /></Field>
           <Field label="小队说明"><input name="description" maxLength={120} placeholder="简单说明小队用途，可不填" /></Field>
@@ -1695,7 +1566,6 @@ function TeamsPage({
         <button className="back-button" type="button" onClick={() => navigate("/teams")}>
           <ChevronLeft size={18} />返回同行成员
         </button>
-        <PageIntro title={team ? `邀请成员加入 ${team.name}` : "邀请同行成员"} description="邀请发出后，对方可以在自己的同行成员页面接受或拒绝。" />
         <Card title={team ? `邀请成员加入 ${team.name}` : "邀请成员"} icon={<Mail size={20} />}>
           {!team ? <Empty>这个小队可能已被删除或你已不在队内</Empty> : null}
           {team && !isTeamLeader(team) ? <Empty>只有小队创建者可以邀请新成员</Empty> : null}
@@ -1723,13 +1593,9 @@ function TeamsPage({
 
   return (
     <div className="compact-page">
-      <PageIntro
-        title="和熟悉的人一起预约"
-        description="集中查看成员的可用积分与今日预约次数，提交前更容易选对主预约人。"
-        action={<Button type="button" disabled={!canCreateTeam} onClick={() => navigate("/teams/new")}><UsersRound size={16} />{canCreateTeam ? "新建小队" : "已创建小队"}</Button>}
-      />
       <Card title="我的同行成员" icon={<Mail size={20} />}>
         <div className="toolbar page-toolbar">
+          <Button type="button" disabled={!canCreateTeam} onClick={() => navigate("/teams/new")}><UsersRound size={16} />{canCreateTeam ? "新建小队" : "已创建小队"}</Button>
           <Button type="button" variant="secondary" onClick={() => load(true)}><RefreshCw size={16} />更新成员信息</Button>
         </div>
         {pendingInvitations.length ? (
@@ -1836,13 +1702,8 @@ function HistoryPage({ toast }: { toast: (message: string, error?: boolean) => v
   }
 
   return (
-    <div className="compact-page">
-      <PageIntro
-        title="每一次预约，都在这里"
-        description="查看预约时间、当前进度，并在允许的时间内取消或签退。"
-        action={<Button type="button" variant="secondary" onClick={() => load(true)}><RefreshCw size={16} />更新预约记录</Button>}
-      />
     <Card title="我的预约" icon={<History size={20} />}>
+      <div className="toolbar desktop-only-toolbar"><Button type="button" variant="secondary" onClick={() => load(true)}><RefreshCw size={16} />更新预约记录</Button></div>
       <div className="list">
         {visibleItems.map((item) => (
           <article className="list-row" key={String(item.id)}>
@@ -1866,116 +1727,6 @@ function HistoryPage({ toast }: { toast: (message: string, error?: boolean) => v
         </div>
       ) : null}
     </Card>
-    </div>
-  );
-}
-
-type AdminOverview = {
-  active_users?: number;
-  active_credentials?: number;
-  open_tasks?: number;
-  pending_emails?: number;
-};
-
-const adminFieldLabels: Record<string, string> = {
-  user_id: "用户标识",
-  reservation_id: "预约标识",
-  team_id: "小队标识",
-  real_name: "姓名",
-  email: "邮箱",
-  role: "身份",
-  status: "当前情况",
-  student_id: "学号",
-  created_at: "加入时间",
-  last_login_at: "最近登录",
-  credential_status: "校园账号",
-  last_refresh_success_at: "最近连接",
-  last_error_message: "需要关注",
-  target_date: "日期",
-  date: "日期",
-  start_time: "开始",
-  end_time: "结束",
-  room_name_snapshot: "研讨间",
-  name: "名称",
-  description: "说明",
-  leader_name: "创建者",
-  recipient_email: "收件人",
-  template: "通知内容",
-  attempt_count: "尝试次数",
-  next_attempt_at: "下次尝试",
-  sent_at: "送达时间",
-  action: "操作",
-  result: "结果",
-  actor_type: "操作来源",
-  target_type: "影响对象",
-  kind: "内容",
-  error_message: "未完成原因",
-  started_at: "开始时间",
-  finished_at: "完成时间",
-  refreshed_at: "更新时间",
-  fresh_until: "有效至",
-};
-
-const adminPreferredColumns: Record<string, string[]> = {
-  users: ["real_name", "email", "student_id", "role", "status", "last_login_at"],
-  credentials: ["user_id", "credential_status", "last_refresh_success_at", "refresh_failure_count", "last_error_message"],
-  tasks: ["target_date", "start_time", "end_time", "status", "created_at"],
-  reservations: ["room_name_snapshot", "date", "start_time", "end_time", "status", "created_at"],
-  invitations: ["invitee_real_name", "invitee_student_id", "status", "expires_at", "created_at"],
-  teams: ["name", "description", "leader_name", "created_at"],
-  "team-invitations": ["team_id", "status", "expires_at", "responded_at"],
-  "sign-tasks": ["reservation_id", "scheduled_at", "status", "attempt_count", "executed_at"],
-  "signout-tasks": ["reservation_id", "scheduled_at", "status", "attempt_count", "executed_at"],
-  emails: ["recipient_email", "template", "status", "attempt_count", "next_attempt_at", "sent_at"],
-  "audit-logs": ["action", "actor_type", "target_type", "result", "created_at"],
-  "gateway-jobs": ["kind", "status", "attempt_count", "error_message", "started_at", "finished_at"],
-  "gateway-snapshots": ["kind", "scope", "version", "refreshed_at", "fresh_until", "last_error_message"],
-};
-
-function adminRows(value: unknown): Array<Record<string, unknown>> {
-  if (Array.isArray(value)) return value.filter(isRecord);
-  if (isRecord(value)) return [value];
-  return [];
-}
-
-function adminValue(key: string, value: unknown, collection: string): string {
-  if (value === null || value === undefined || value === "") return "-";
-  if (typeof value === "boolean") return value ? "是" : "否";
-  if (key === "role") return String(value) === "ADMIN" ? "管理员" : "普通用户";
-  if (key === "status" && collection === "users") return String(value) === "ACTIVE" ? "正常使用" : "已停用";
-  if (key === "credential_status") return credentialStatusText(String(value));
-  if (key === "status" && collection === "emails") return String(value) === "PENDING" ? "等待发送" : statusText(String(value));
-  if (key === "status" || key.endsWith("_status") || key === "result") return statusText(String(value));
-  if (key.endsWith("_at") || key.endsWith("_until")) {
-    const numeric = typeof value === "number" ? value : Number(value);
-    if (Number.isFinite(numeric)) return formatTimestamp(numeric);
-  }
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
-}
-
-function AdminRecords({ body, collection }: { body: unknown; collection: string }) {
-  const rows = adminRows(body);
-  if (!rows.length) return <Empty>这里暂时没有需要查看的记录。</Empty>;
-  const preferred = adminPreferredColumns[collection] ?? [];
-  const available = new Set(rows.flatMap((row) => Object.keys(row)));
-  const columns = preferred.filter((key) => available.has(key));
-  const visibleColumns = columns.length ? columns : Object.keys(rows[0] ?? {}).slice(0, 6);
-  const formatValue = (key: string, value: unknown) => adminValue(key, value, collection);
-
-  return (
-    <div className="admin-table-wrap">
-      <table className="admin-table">
-        <thead><tr>{visibleColumns.map((key) => <th key={key}>{adminFieldLabels[key] ?? key.replaceAll("_", " ")}</th>)}</tr></thead>
-        <tbody>
-          {rows.map((row, rowIndex) => (
-            <tr key={String(row.id ?? row.user_id ?? row.cache_key ?? rowIndex)}>
-              {visibleColumns.map((key) => <td key={key} title={formatValue(key, row[key])}>{formatValue(key, row[key])}</td>)}
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
   );
 }
 
@@ -1989,8 +1740,6 @@ function AdminPage({
   collection?: string;
 }) {
   const [body, setBody] = useState<unknown>(null);
-  const [overview, setOverview] = useState<AdminOverview>({});
-  const [visibleCollection, setVisibleCollection] = useState(collection);
   const collections = ["users", "credentials", "tasks", "reservations", "invitations", "teams", "team-invitations", "sign-tasks", "signout-tasks", "emails", "audit-logs", "gateway-jobs", "gateway-snapshots"];
   const collectionLabels: Record<string, string> = {
     users: "使用账号",
@@ -2008,41 +1757,29 @@ function AdminPage({
     "gateway-snapshots": "可用时间更新",
   };
 
-  async function load(path = `/api/v1/admin/${collection}`, nextCollection = collection) {
+  async function load(path = `/api/v1/admin/${collection}`) {
     try {
       setBody(await api(path));
-      setVisibleCollection(nextCollection);
     } catch (error) {
       toast(error instanceof Error ? error.message : "加载失败", true);
     }
   }
-  useEffect(() => {
-    setVisibleCollection(collection);
-    void Promise.all([
-      load(`/api/v1/admin/${collection}`, collection),
-      api<AdminOverview>("/api/v1/admin/dashboard").then(setOverview),
-    ]);
-  }, [collection]);
+  useEffect(() => { void load(); }, [collection]);
 
   return (
-    <div className="admin-page">
-      <PageIntro title="保持预约服务清晰可用" description="查看账号、预约与通知情况，及时发现需要人工处理的内容。" />
-      <section className="admin-overview motion-card" aria-label="使用概览">
-        <article><Activity size={19} /><span>正在使用</span><strong>{overview.active_users ?? "-"}</strong><small>个可用账号</small></article>
-        <article><Shield size={19} /><span>校园账号</span><strong>{overview.active_credentials ?? "-"}</strong><small>个已连接</small></article>
-        <article><CalendarClock size={19} /><span>提前安排</span><strong>{overview.open_tasks ?? "-"}</strong><small>项尚未完成</small></article>
-        <article><Send size={19} /><span>待送达通知</span><strong>{overview.pending_emails ?? "-"}</strong><small>封等待发送</small></article>
-      </section>
-    <Card title={collectionLabels[visibleCollection] ?? "运营记录"} icon={<Database size={20} />}>
+    <Card title="运营管理" icon={<Settings size={20} />}>
+      <div className="admin-intro">
+        <strong>{collectionLabels[collection] ?? "运营记录"}</strong>
+        <span>查看账号、预约与通知情况，及时处理需要关注的内容。</span>
+      </div>
       <div className="toolbar admin-toolbar">
         <select value={collection} onChange={(event) => navigate(`/admin/${event.target.value}`)}>
           {collections.map((item) => <option key={item} value={item}>{collectionLabels[item]}</option>)}
         </select>
         <Button type="button" onClick={() => api("/api/v1/admin/emails/test", { method: "POST" }).then(() => toast("确认邮件已发送，请检查收件箱")).catch((error: ApiError) => toast(error.message, true))}>确认邮件可送达</Button>
       </div>
-      <AdminRecords body={body} collection={visibleCollection} />
+      <pre className="json-panel" aria-label={`${collectionLabels[collection] ?? "运营记录"}详情`}>{JSON.stringify(body, null, 2)}</pre>
     </Card>
-    </div>
   );
 }
 
@@ -2120,16 +1857,16 @@ export function App() {
 
   return (
     <Shell session={session} page={route.page} navigate={navigate} onLogout={logout}>
-      <PageStage key={window.location.pathname} page={route.page}>
+      <main className="content">
         {route.page === "rooms" && !route.roomId ? <RoomsPage toast={toast} navigate={navigate} /> : null}
         {route.page === "rooms" && route.roomId ? <RoomDetailPage roomId={route.roomId} session={session} toast={toast} navigate={navigate} /> : null}
         {route.page === "tasks" ? <TasksPage toast={toast} navigate={navigate} mode={route.taskMode ?? "list"} /> : null}
         {route.page === "teams" ? <TeamsPage toast={toast} navigate={navigate} mode={route.teamMode ?? "list"} inviteTeamId={route.teamInviteId} /> : null}
         {route.page === "history" ? <HistoryPage toast={toast} /> : null}
         {route.page === "admin" ? <AdminPage toast={toast} navigate={navigate} collection={route.adminCollection ?? "users"} /> : null}
-      </PageStage>
+      </main>
       <footer className="footer">
-        <BrandLockup compact />
+        <strong>NJAU Libyy</strong>
         <span>清楚查看时间，从容完成预约</span>
       </footer>
       <Toast message={message} error={isError} />

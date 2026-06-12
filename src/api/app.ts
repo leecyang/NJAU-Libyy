@@ -56,6 +56,7 @@ import {
   readUserMetrics,
   releaseReservationQuota,
   reservationQuotas,
+  requestedMetricDates,
 } from "../lib/user-metrics";
 
 type JsonObject = Record<string, unknown>;
@@ -384,12 +385,22 @@ export function registerOfficialGatewayHandlers(env: AppEnv): void {
 
 export async function reservationParticipants(env: AppEnv, request: Request): Promise<Response> {
   const requester = await requireBoundUser(env, request);
-  if (!env.OFFICIAL_GATEWAY) return ok({ participants: await fetchReservationParticipantScores(env, requester) });
+  const dates = requestedMetricDates(request);
+  if (!env.OFFICIAL_GATEWAY) {
+    const participants = await fetchReservationParticipantScores(env, requester);
+    const quotas = await reservationQuotas(env.DB, participants.map((participant) => participant.id), dates);
+    return ok({
+      participants: participants.map((participant) => ({
+        ...participant,
+        reservationQuota: quotas.get(participant.id) ?? [],
+      })),
+    });
+  }
   const snapshot = await env.OFFICIAL_GATEWAY.readSnapshot<{ participants: Array<ReservationParticipant & { totalScore: number | null }> }>(
     `user:${requester.id}:reservation-participants`,
   );
   const participants = snapshot?.value.participants ?? [];
-  const quotas = await reservationQuotas(env.DB, participants.map((participant) => participant.id));
+  const quotas = await reservationQuotas(env.DB, participants.map((participant) => participant.id), dates);
   return ok({
     participants: participants.map((participant) => ({
       ...participant,

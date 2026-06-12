@@ -34,6 +34,12 @@ export function metricDates(now = new Date()): string[] {
   return [0, 1, 2, 3].map((offset) => shanghaiDateAt(offset, now));
 }
 
+export function requestedMetricDates(request: Request, fallback = metricDates()): string[] {
+  const values = new URL(request.url).searchParams.getAll("date");
+  const dates = [...new Set(values.filter((value) => /^\d{4}-\d{2}-\d{2}$/.test(value)))];
+  return dates.length ? dates.slice(0, 8) : fallback;
+}
+
 export function userScoreSnapshotKey(userId: string): string {
   return `user:${userId}:score`;
 }

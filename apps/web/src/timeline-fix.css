@@ -89,6 +89,13 @@
  * slot-wall min-width used by wider room detail layouts can overflow the page.
  * Keep this instance fluid and let the 28 half-hour beans shrink with the card.
  */
+.room-detail-page .square-time-picker,
+.room-detail-page .slot-wall-scroll,
+.room-detail-page .slot-wall,
+.room-detail-page .slot-wall-head,
+.room-detail-page .slot-day-row,
+.room-detail-page .uptime-kuma-ticks,
+.room-detail-page .uptime-kuma-timeline,
 .task-time-row,
 .task-time-row .square-time-picker,
 .task-time-row .slot-wall-scroll,
@@ -101,40 +108,52 @@
   max-width: 100% !important;
 }
 
+.room-detail-page .slot-wall-scroll,
+.room-detail-page .slot-wall,
 .task-time-row .slot-wall-scroll,
 .task-time-row .slot-wall {
   width: 100% !important;
 }
 
+.room-detail-page .slot-wall-scroll,
 .task-time-row .slot-wall-scroll {
   overflow-x: hidden !important;
 }
 
+.room-detail-page .slot-wall,
 .task-time-row .slot-wall {
   min-width: 0 !important;
 }
 
+.room-detail-page .slot-wall-head,
+.room-detail-page .slot-day-row,
 .task-time-row .slot-wall-head,
 .task-time-row .slot-day-row {
   grid-template-columns: clamp(76px, 18%, 130px) minmax(0, 1fr) !important;
   gap: clamp(8px, 1.4vw, 14px) !important;
 }
 
+.room-detail-page .uptime-kuma-ticks,
+.room-detail-page .uptime-kuma-timeline,
 .task-time-row .uptime-kuma-ticks,
 .task-time-row .uptime-kuma-timeline {
   width: 100% !important;
 }
 
 @media (max-width: 640px) {
+  .room-detail-page .slot-wall,
   .task-time-row .slot-wall {
     padding: 12px !important;
   }
 
+  .room-detail-page .slot-wall-head,
+  .room-detail-page .slot-day-row,
   .task-time-row .slot-wall-head,
   .task-time-row .slot-day-row {
     grid-template-columns: minmax(0, 1fr) !important;
   }
 
+  .room-detail-page .slot-day-spacer,
   .task-time-row .slot-day-spacer {
     display: none;
   }
