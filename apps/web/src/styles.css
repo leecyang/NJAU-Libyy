@@ -900,36 +900,50 @@ input:focus, textarea:focus, select:focus { border-color: var(--ink); box-shadow
 }
 .list-row > div:first-child { display: grid; gap: 4px; min-width: 0; }
 .row-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
-.team-member-strip {
-  display: flex !important;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
-}
-.team-member-strip > span {
-  display: inline-flex;
+.team-card { display: block; padding: 20px; }
+.team-card-content { display: grid !important; gap: 18px !important; }
+.team-card-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.team-card-heading > div:first-child { display: grid; gap: 5px; min-width: 0; }
+.team-card-heading > div:first-child > strong { font-size: 17px; }
+.team-card-heading > div:first-child > span { color: var(--muted); line-height: 1.45; }
+.team-member-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
+.team-member-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 6px;
-  min-height: 26px;
-  padding: 3px 8px;
+  gap: 11px;
+  min-height: 72px;
+  padding: 12px;
   border: 1px solid var(--hairline);
-  border-radius: 999px;
+  border-radius: var(--radius-md);
   background: var(--surface-soft);
-  color: var(--ink) !important;
-  font-size: 12px !important;
-  font-weight: 600;
+  transition: border-color 140ms ease, background 140ms ease;
 }
-.team-member-strip > span.leader {
-  border-color: var(--ink);
-  background: var(--canvas);
-}
-.team-member-strip small {
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 500;
-}
-.team-member-action { margin-top: 6px; padding: 3px 8px; border: 1px solid var(--hairline); border-radius: 999px; background: #fff; color: var(--error); font-size: 11px; font-weight: 600; }
+.team-member-card:hover { border-color: #d4d4d8; background: #fafafa; }
+.team-member-card.leader { border-color: #d4d4d8; background: var(--canvas); }
+.team-member-avatar { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 50%; background: var(--ink); color: #fff; font-size: 14px; font-weight: 700; }
+.team-member-card:not(.leader) .team-member-avatar { background: #e4e4e7; color: var(--ink); }
+.team-member-info { display: grid; gap: 5px; min-width: 0; }
+.team-member-name { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.team-member-name strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+.team-member-name span { flex: none; padding: 2px 6px; border-radius: 999px; background: #e4e4e7; color: var(--muted); font-size: 10px !important; font-weight: 650; }
+.team-member-card.leader .team-member-name span { background: var(--ink); color: #fff; }
+.team-member-info small { color: var(--muted); font-size: 11px; line-height: 1.4; }
+.team-member-action { width: 30px; height: 30px; display: grid; place-items: center; padding: 0; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--muted-soft); opacity: .55; transition: opacity 140ms ease, color 140ms ease, border-color 140ms ease, background 140ms ease; }
+.team-member-card:hover .team-member-action, .team-member-action:focus-visible { opacity: 1; color: var(--error); border-color: #fecaca; background: #fff; }
 .team-actions { align-self: center; }
+.dialog-backdrop { position: fixed; inset: 0; z-index: 60; display: grid; place-items: center; padding: 20px; background: rgba(24,24,27,.42); backdrop-filter: blur(4px); }
+.door-dialog { width: min(620px, 100%); max-height: min(720px, calc(100vh - 40px)); display: grid; gap: 18px; overflow: auto; padding: 22px; border: 1px solid rgba(255,255,255,.7); border-radius: var(--radius-lg); background: var(--canvas); box-shadow: 0 24px 70px rgba(24,24,27,.24); animation: content-enter 160ms ease-out; }
+.door-dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.door-dialog-head > div { display: grid; gap: 4px; }
+.door-dialog-head h3 { font-size: 20px; }
+.dialog-close { width: 36px; height: 36px; flex: none; display: grid; place-items: center; border: 1px solid var(--hairline); border-radius: 9px; background: var(--canvas); color: var(--muted); }
+.dialog-close:hover:not(:disabled) { color: var(--ink); background: var(--surface-soft); }
+.door-option-list { display: grid; gap: 10px; }
+.door-option { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 16px; padding: 15px; border: 1px solid var(--hairline); border-radius: var(--radius-md); background: var(--surface-soft); }
+.door-option > div { display: grid; gap: 4px; min-width: 0; }
+.door-option span, .door-option small { color: var(--muted); line-height: 1.4; }
 .pagination {
   display: flex;
   align-items: center;
@@ -1169,6 +1183,14 @@ input:focus, textarea:focus, select:focus { border-color: var(--ink); box-shadow
   }
   .row-actions { justify-content: stretch; }
   .row-actions .button { flex: 1; }
+  .team-card { padding: 16px; }
+  .team-card-heading { flex-direction: column; }
+  .team-card-heading .team-actions { width: 100%; }
+  .team-member-grid { grid-template-columns: 1fr; }
+  .team-member-action { opacity: 1; }
+  .door-dialog { max-height: calc(100vh - 24px); padding: 18px; }
+  .door-option { grid-template-columns: 1fr; }
+  .door-option .button { width: 100%; }
   .page-head { flex-direction: column; align-items: flex-start; }
   .footer {
     min-height: 56px;

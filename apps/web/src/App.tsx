@@ -13,7 +13,9 @@ import {
   RefreshCw,
   Settings,
   Shield,
+  UserMinus,
   UsersRound,
+  X,
 } from "lucide-react";
 import { api, ApiError, type GatewayJob, waitForGatewayJob } from "./api";
 
@@ -169,6 +171,25 @@ type TeamInvitation = {
   created_at: number;
   team_name: string;
   inviter_name?: string;
+};
+type TeamDoorOption = {
+  id: string;
+  roomId: number;
+  roomName: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+  signedInMembers: Array<{ id: string; studentId: string; realName: string }>;
+};
+type TeamDoorOptionsResult = {
+  options: TeamDoorOption[];
+  warnings: Array<{ userId: string; realName: string; message: string }>;
+};
+type TeamDoorResult = {
+  roomId: number;
+  roomName: string;
+  openedByUserId: string;
+  openedByName: string;
 };
 type InvitableUser = {
   id: string;
@@ -1447,6 +1468,9 @@ function TeamsPage({
     totalScore: number | null;
     reservationQuota: Array<{ date: string; remaining: number; limit: number }>;
   }>>>({});
+  const [doorBusyTeamId, setDoorBusyTeamId] = useState("");
+  const [openingOptionId, setOpeningOptionId] = useState("");
+  const [doorSelection, setDoorSelection] = useState<{ team: Team; options: TeamDoorOption[] } | null>(null);
 
   async function load(refreshScores = false) {
     try {
@@ -1522,6 +1546,52 @@ function TeamsPage({
       await load(true);
     } catch (error) {
       toast(error instanceof Error ? error.message : "操作失败", true);
+    }
+  }
+
+  async function resolveGatewayResult<T>(response: GatewayJob<T> | T): Promise<T> {
+    return response && typeof response === "object" && "jobId" in response
+      ? waitForGatewayJob(response as GatewayJob<T>)
+      : response as T;
+  }
+
+  async function openDoor(team: Team, option: TeamDoorOption) {
+    setOpeningOptionId(option.id);
+    try {
+      const response = await api<GatewayJob<TeamDoorResult> | TeamDoorResult>(`/api/v1/teams/${encodeURIComponent(team.id)}/open-door`, {
+        method: "POST",
+        body: JSON.stringify({ optionId: option.id }),
+      });
+      const result = await resolveGatewayResult(response);
+      setDoorSelection(null);
+      toast(`${result.roomName} 开门成功，使用了 ${result.openedByName} 的已签到预约`);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "开门失败", true);
+    } finally {
+      setOpeningOptionId("");
+    }
+  }
+
+  async function findDoorOptions(team: Team) {
+    setDoorBusyTeamId(team.id);
+    try {
+      const response = await api<GatewayJob<TeamDoorOptionsResult> | TeamDoorOptionsResult>(`/api/v1/teams/${encodeURIComponent(team.id)}/door-options`, {
+        method: "POST",
+      });
+      const result = await resolveGatewayResult(response);
+      if (!result.options.length) {
+        toast(result.warnings.length ? "没有可开门的预约，部分成员预约读取失败" : "当前没有已签到且正在进行的预约", true);
+        return;
+      }
+      if (result.options.length === 1) {
+        await openDoor(team, result.options[0]!);
+        return;
+      }
+      setDoorSelection({ team, options: result.options });
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "查询可开门预约失败", true);
+    } finally {
+      setDoorBusyTeamId("");
     }
   }
 
@@ -1614,54 +1684,86 @@ function TeamsPage({
             ))}
           </div>
         ) : null}
-        <div className="list">
+        <div className="list team-list">
           {teams.map((team) => (
-            <article className="list-row" key={team.id}>
-              <div>
-                <strong>{team.name}</strong>
-                <span>{team.description || "暂未填写小队说明"} · {visibleTeamMembers(team).length} 人 · {isTeamLeader(team) ? "由我创建" : "我已加入"}</span>
-                <div className="team-member-strip">
+            <article className="list-row team-card" key={team.id}>
+              <div className="team-card-content">
+                <div className="team-card-heading">
+                  <div>
+                    <strong>{team.name}</strong>
+                    <span>{team.description || "暂未填写小队说明"} · {visibleTeamMembers(team).length} 人 · {isTeamLeader(team) ? "由我创建" : "我已加入"}</span>
+                  </div>
+                  <div className="row-actions team-actions">
+                    {isTeamLeader(team) ? <Button type="button" busy={doorBusyTeamId === team.id} onClick={() => void findDoorOptions(team)}><DoorOpen size={16} />开门</Button> : null}
+                    {isTeamLeader(team) ? <Button type="button" variant="secondary" onClick={() => navigate(`/teams/${encodeURIComponent(team.id)}/invite`)}>邀请成员</Button> : null}
+                    {isTeamLeader(team) ? (
+                      <Button type="button" variant="ghost" onClick={() => void manageTeam(
+                        `/api/v1/teams/${encodeURIComponent(team.id)}`,
+                        `确认解散小队“${team.name}”？`,
+                        "小队已解散",
+                      )}>解散小队</Button>
+                    ) : (
+                      <Button type="button" variant="ghost" onClick={() => void manageTeam(
+                        `/api/v1/teams/${encodeURIComponent(team.id)}/members/me`,
+                        `确认退出小队“${team.name}”？`,
+                        "已退出小队",
+                      )}>退出小队</Button>
+                    )}
+                  </div>
+                </div>
+                <div className="team-member-grid">
                   {visibleTeamMembers(team).map((member) => {
                     const memberMetric = teamMetrics[team.id]?.find((metric) => metric.localUserId === member.id);
                     const quota = memberMetric?.reservationQuota.find((item) => item.date === today());
                     const scoreText = memberMetric?.totalScore != null ? `${memberMetric.totalScore} 分` : "积分待确认";
                     return (
-                      <span key={`${team.id}-${member.id}`} className={member.role === "队长" ? "leader" : ""}>
-                        {member.name}
-                        <small>{member.role} · {scoreText}{quota ? ` · 今日剩余 ${quota.remaining}/${quota.limit} 次` : ""}</small>
+                      <article key={`${team.id}-${member.id}`} className={`team-member-card ${member.role === "队长" ? "leader" : ""}`}>
+                        <div className="team-member-avatar" aria-hidden="true">{member.name.trim().slice(0, 1).toUpperCase()}</div>
+                        <div className="team-member-info">
+                          <div className="team-member-name"><strong>{member.name}</strong><span>{member.role}</span></div>
+                          <small>{scoreText}{quota ? ` · 今日剩余 ${quota.remaining}/${quota.limit} 次` : ""}</small>
+                        </div>
                         {isTeamLeader(team) && member.role !== "队长" ? (
-                          <button type="button" className="team-member-action" onClick={() => void manageTeam(
+                          <button type="button" className="team-member-action" aria-label={`将 ${member.name} 移出小队`} title="移出小队" onClick={() => void manageTeam(
                             `/api/v1/teams/${encodeURIComponent(team.id)}/members/${encodeURIComponent(member.id)}`,
                             `确认将 ${member.name} 移出小队？`,
                             "队员已移出",
-                          )}>移出</button>
+                          )}><UserMinus size={15} /></button>
                         ) : null}
-                      </span>
+                      </article>
                     );
                   })}
                 </div>
-              </div>
-              <div className="row-actions team-actions">
-                {isTeamLeader(team) ? <Button type="button" variant="secondary" onClick={() => navigate(`/teams/${encodeURIComponent(team.id)}/invite`)}>邀请成员</Button> : null}
-                {isTeamLeader(team) ? (
-                  <Button type="button" variant="ghost" onClick={() => void manageTeam(
-                    `/api/v1/teams/${encodeURIComponent(team.id)}`,
-                    `确认解散小队“${team.name}”？`,
-                    "小队已解散",
-                  )}>解散小队</Button>
-                ) : (
-                  <Button type="button" variant="ghost" onClick={() => void manageTeam(
-                    `/api/v1/teams/${encodeURIComponent(team.id)}/members/me`,
-                    `确认退出小队“${team.name}”？`,
-                    "已退出小队",
-                  )}>退出小队</Button>
-                )}
               </div>
             </article>
           ))}
           {!teams.length ? <Empty>这里还没有同行成员。新建一个小队，邀请经常一起预约的同学加入。</Empty> : null}
         </div>
       </Card>
+      {doorSelection ? (
+        <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.target === event.currentTarget && !openingOptionId) setDoorSelection(null);
+        }}>
+          <section className="door-dialog" role="dialog" aria-modal="true" aria-labelledby="door-dialog-title">
+            <div className="door-dialog-head">
+              <div><span className="eyebrow">{doorSelection.team.name}</span><h3 id="door-dialog-title">选择要打开的预约</h3></div>
+              <button type="button" className="dialog-close" aria-label="关闭" disabled={Boolean(openingOptionId)} onClick={() => setDoorSelection(null)}><X size={18} /></button>
+            </div>
+            <div className="door-option-list">
+              {doorSelection.options.map((option) => (
+                <article className="door-option" key={option.id}>
+                  <div>
+                    <strong>{option.roomName}</strong>
+                    <span>{option.date} · {option.startTime}-{option.endTime}</span>
+                    <small>已签到：{option.signedInMembers.map((member) => member.realName).join("、")}</small>
+                  </div>
+                  <Button type="button" busy={openingOptionId === option.id} disabled={Boolean(openingOptionId)} onClick={() => void openDoor(doorSelection.team, option)}><DoorOpen size={16} />开门</Button>
+                </article>
+              ))}
+            </div>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }
