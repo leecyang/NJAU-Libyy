@@ -4,6 +4,7 @@ import "@fontsource-variable/geist";
 import { App } from "./App";
 import "./styles.css";
 import "./timeline-fix.css";
+import "./task-time-picker-fix";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
