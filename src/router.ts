@@ -53,6 +53,7 @@ import {
   updateTask,
 } from "./api/app";
 import { refreshTeamMemberMetrics, refreshTeamMemberScores, teamMemberMetrics, teamMemberScores } from "./api/team-scores";
+import { openTeamDoor, teamDoorOptions } from "./api/team-door";
 import { login, logout, register, resetPassword, sendRegisterCode, sendResetCode } from "./api/auth";
 import { json } from "./lib/http";
 
@@ -137,6 +138,10 @@ export async function routeApi(env: AppEnv, request: Request): Promise<Response>
   if (request.method === "DELETE" && teamMatch?.[1]) return deleteTeam(env, request, teamMatch[1]);
   const teamInviteMatch = /^\/api\/v1\/teams\/([^/]+)\/invitations$/.exec(url.pathname);
   if (request.method === "POST" && teamInviteMatch?.[1]) return inviteTeamMember(env, request, teamInviteMatch[1]);
+  const teamDoorOptionsMatch = /^\/api\/v1\/teams\/([^/]+)\/door-options$/.exec(url.pathname);
+  if (request.method === "POST" && teamDoorOptionsMatch?.[1]) return teamDoorOptions(env, request, teamDoorOptionsMatch[1]);
+  const teamOpenDoorMatch = /^\/api\/v1\/teams\/([^/]+)\/open-door$/.exec(url.pathname);
+  if (request.method === "POST" && teamOpenDoorMatch?.[1]) return openTeamDoor(env, request, teamOpenDoorMatch[1]);
   const teamLeaveMatch = /^\/api\/v1\/teams\/([^/]+)\/members\/me$/.exec(url.pathname);
   if (request.method === "DELETE" && teamLeaveMatch?.[1]) return leaveTeam(env, request, teamLeaveMatch[1]);
   const teamMemberMatch = /^\/api\/v1\/teams\/([^/]+)\/members\/([^/]+)$/.exec(url.pathname);

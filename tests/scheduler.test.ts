@@ -7,7 +7,7 @@ import {
   submitOfficialSign,
 } from "../src/lib/official";
 import { queueMail } from "../src/lib/mail";
-import { submitDueSignTasks, submitDueSignoutTasks, submitDueSignWorkflows } from "../src/lib/scheduler";
+import { submitDueSignTasks, submitDueSignoutTasks, submitDueSignWorkflows, workflowNotificationKey } from "../src/lib/scheduler";
 
 vi.mock("../src/lib/credentials", () => ({
   getAccessToken: vi.fn(async (_env: AppEnv, userId: string) => `token:${userId}`),
@@ -278,6 +278,12 @@ describe("automatic signout scheduler", () => {
 });
 
 describe("combined sign workflow scheduler", () => {
+  it("uses the reservation slot rather than workflow id for notification dedupe", () => {
+    const first = { id: "workflow-one", room_id: 2, date: "2026-06-02", start_time: "09:00", end_time: "10:00" };
+    const second = { id: "workflow-two", room_id: 2, date: "2026-06-02", start_time: "09:00", end_time: "10:00" };
+    expect(workflowNotificationKey(first)).toBe(workflowNotificationKey(second));
+  });
+
   it("generates a fresh room-specific key for every participant", async () => {
     const workflow = {
       id: "workflow-id",
@@ -336,8 +342,8 @@ describe("combined sign workflow scheduler", () => {
     await submitDueSignWorkflows(env(db), 1780376000000);
 
     expect(queueMail).toHaveBeenCalledTimes(2);
-    expect(queueMail).toHaveBeenCalledWith(expect.anything(), "owner@example.com", "AUTO_SIGN_SUCCESS", expect.objectContaining({ roomName: "7E08" }), expect.anything());
-    expect(queueMail).toHaveBeenCalledWith(expect.anything(), "member@example.com", "AUTO_SIGN_SUCCESS", expect.anything(), expect.anything());
+    expect(queueMail).toHaveBeenCalledWith(expect.anything(), "owner@example.com", "AUTO_SIGN_SUCCESS", expect.objectContaining({ roomName: "7E08" }), { dedupeKey: "auto-sign:2:2026-06-02:09:00:10:00:success:owner-user-id" });
+    expect(queueMail).toHaveBeenCalledWith(expect.anything(), "member@example.com", "AUTO_SIGN_SUCCESS", expect.anything(), { dedupeKey: "auto-sign:2:2026-06-02:09:00:10:00:success:member-user-id" });
   });
 
   it("marks the workflow failed and sends one final sign failure at the reservation deadline", async () => {
@@ -392,7 +398,7 @@ describe("combined sign workflow scheduler", () => {
 
     await submitDueSignWorkflows(env(db), 1780379500000);
 
-    expect(queueMail).toHaveBeenCalledWith(expect.anything(), "owner@example.com", "AUTO_SIGNOUT_SUCCESS", expect.anything(), expect.anything());
+    expect(queueMail).toHaveBeenCalledWith(expect.anything(), "owner@example.com", "AUTO_SIGNOUT_SUCCESS", expect.anything(), { dedupeKey: "auto-signout:2:2026-06-02:09:00:10:00:success:owner-user-id" });
     expect(db.updates.some((update) => update.sql.includes("signout_status = 'SUCCESS'"))).toBe(true);
   });
 

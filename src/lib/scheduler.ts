@@ -588,6 +588,10 @@ function workflowPayload(workflow: SignWorkflowRow, participants: WorkflowPartic
   };
 }
 
+export function workflowNotificationKey(workflow: Pick<SignWorkflowRow, "room_id" | "date" | "start_time" | "end_time">): string {
+  return `${workflow.room_id}:${workflow.date}:${workflow.start_time}:${workflow.end_time}`;
+}
+
 function workflowRecordMatches(workflow: SignWorkflowRow, record: { roomId: number; startTime: number; endTime: number }): boolean {
   if (record.roomId !== workflow.room_id) return false;
   const start = shanghaiParts(record.startTime);
@@ -706,10 +710,11 @@ export async function submitDueSignWorkflows(env: AppEnv, now: number, limit = 2
     const allSigned = refreshed.results.length > 0 && refreshed.results.every((participant) => participant.sign_status === "SUCCESS");
     const recipients = await workflowNotificationUsers(env, workflow, refreshed.results);
     const payload = workflowPayload(workflow, refreshed.results);
+    const notificationKey = workflowNotificationKey(workflow);
     const endAt = workflow.signout_scheduled_at + workflow.signout_advance_minutes * 60_000;
 
     if (allSigned) {
-      await queueUserNotifications(env, recipients, `auto-sign:${workflow.id}:success`, "AUTO_SIGN_SUCCESS", payload);
+      await queueUserNotifications(env, recipients, `auto-sign:${notificationKey}:success`, "AUTO_SIGN_SUCCESS", payload);
     } else {
       if (autoSignEnabled && now >= endAt) {
         const reason = refreshed.results.find((participant) => participant.last_error_message)?.last_error_message
@@ -727,7 +732,7 @@ export async function submitDueSignWorkflows(env: AppEnv, now: number, limit = 2
                     failure_message = ?, updated_at = ? WHERE id = ? AND status = 'ACTIVE'`,
           ).bind(reason, now, workflow.id),
         ]);
-        await queueUserNotifications(env, recipients, `auto-sign:${workflow.id}:failed`, "AUTO_SIGN_FAILED", { ...payload, reason });
+        await queueUserNotifications(env, recipients, `auto-sign:${notificationKey}:failed`, "AUTO_SIGN_FAILED", { ...payload, reason });
       }
       continue;
     }
@@ -768,7 +773,7 @@ export async function submitDueSignWorkflows(env: AppEnv, now: number, limit = 2
             SET status = 'SUCCESS', signout_status = 'SUCCESS', signout_user_id = ?, signout_executed_at = ?,
                 failure_code = NULL, failure_message = NULL, updated_at = ? WHERE id = ?`,
       ).bind(signedOutBy, Date.now(), Date.now(), workflow.id).run();
-      await queueUserNotifications(env, recipients, `auto-signout:${workflow.id}:success`, "AUTO_SIGNOUT_SUCCESS", payload);
+      await queueUserNotifications(env, recipients, `auto-signout:${notificationKey}:success`, "AUTO_SIGNOUT_SUCCESS", payload);
     } else if (now >= endAt) {
       const reason = lastErrorCode === "SIGNOUT_SYNC_PENDING" ? "签退已提交，但预约结束前未能确认结果" : lastErrorCode;
       await env.DB.prepare(
@@ -776,7 +781,7 @@ export async function submitDueSignWorkflows(env: AppEnv, now: number, limit = 2
             SET status = 'FAILED', signout_status = 'FAILED', failure_code = ?, failure_message = ?, updated_at = ?
           WHERE id = ? AND status = 'ACTIVE'`,
       ).bind(lastErrorCode, reason, now, workflow.id).run();
-      await queueUserNotifications(env, recipients, `auto-signout:${workflow.id}:failed`, "AUTO_SIGNOUT_FAILED", { ...payload, reason });
+      await queueUserNotifications(env, recipients, `auto-signout:${notificationKey}:failed`, "AUTO_SIGNOUT_FAILED", { ...payload, reason });
     } else {
       await env.DB.prepare(
         `UPDATE sign_workflows SET signout_status = 'PENDING', failure_code = ?, updated_at = ? WHERE id = ?`,
