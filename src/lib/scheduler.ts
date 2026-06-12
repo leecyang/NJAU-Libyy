@@ -1,7 +1,7 @@
 import type { AppEnv } from "../config";
 import { flag } from "../config";
 import { audit } from "./audit";
-import { getAccessToken, getOfficialReservationProfile, refreshCredential } from "./credentials";
+import { getAccessToken, getOfficialReservationProfile, recoverExpiredOfficialLogin, refreshCredential } from "./credentials";
 import { HttpError } from "./http";
 import { deliverDueMail, queueMail } from "./mail";
 import {
@@ -28,6 +28,7 @@ import {
 } from "./reservations";
 import { assertReservation, type Room } from "./validation";
 import { assertPrimaryReservationScore } from "./reservation-participants";
+import { canonicalReservationSource, claimReservationQuota, moveReservationQuota, releaseReservationQuota } from "./user-metrics";
 
 type SchedulerLimitName =
   | "SCHEDULER_REFRESH_LIMIT"
@@ -140,6 +141,57 @@ async function refreshOfficialSnapshots(env: AppEnv, now: number): Promise<void>
     });
     await env.OFFICIAL_GATEWAY.linkSnapshotRefresh(key, job.id);
   }
+
+  const staleReservations = await env.DB.prepare(
+    `SELECT u.id
+       FROM users u JOIN official_credentials c ON c.user_id = u.id
+       LEFT JOIN official_gateway_snapshots s ON s.cache_key = 'user:' || u.id || ':reservations'
+      WHERE u.status = 'ACTIVE' AND u.student_id IS NOT NULL AND c.credential_status = 'ACTIVE'
+        AND (s.cache_key IS NULL OR s.fresh_until <= ?)
+      ORDER BY COALESCE(s.refreshed_at, 0) ASC LIMIT 3`,
+  ).bind(now).all<{ id: string }>();
+  for (const user of staleReservations.results) {
+    const key = `user:${user.id}:reservations`;
+    const job = await env.OFFICIAL_GATEWAY.enqueue({
+      kind: "RESERVATIONS_REFRESH",
+      lane: "READ",
+      ownerUserId: user.id,
+      dedupeKey: `refresh:${key}`,
+      payload: {},
+      priority: 95,
+    });
+    await env.OFFICIAL_GATEWAY.linkSnapshotRefresh(key, job.id);
+  }
+
+  await env.DB.prepare(
+    `DELETE FROM reservation_quota_claims
+      WHERE source_type = 'TASK' AND NOT EXISTS (
+        SELECT 1 FROM reservation_tasks task
+         WHERE task.id = reservation_quota_claims.source_id
+           AND task.status IN ('DRAFT', 'WAITING_WINDOW', 'WAITING_MEMBERS', 'READY', 'SUBMITTING')
+      )`,
+  ).run();
+
+  const unclaimedTasks = await env.DB.prepare(
+    `SELECT task.id, task.owner_user_id, task.target_date
+       FROM reservation_tasks task
+      WHERE task.status IN ('DRAFT', 'WAITING_WINDOW', 'WAITING_MEMBERS', 'READY', 'SUBMITTING')
+        AND NOT EXISTS (
+          SELECT 1 FROM reservation_quota_claims claim
+           WHERE claim.source_type = 'TASK' AND claim.source_id = task.id
+        )
+      LIMIT 20`,
+  ).all<{ id: string; owner_user_id: string; target_date: string }>();
+  for (const task of unclaimedTasks.results) {
+    const members = await env.DB.prepare(
+      "SELECT member_user_id FROM reservation_task_members WHERE task_id = ? AND member_user_id IS NOT NULL",
+    ).bind(task.id).all<{ member_user_id: string }>();
+    try {
+      await claimReservationQuota(env, [task.owner_user_id, ...members.results.map((member) => member.member_user_id)], task.target_date, "TASK", task.id);
+    } catch {
+      // Existing tasks are left intact; the normal submit-time checks remain authoritative.
+    }
+  }
 }
 
 async function expireTeamInvitations(env: AppEnv, now: number): Promise<void> {
@@ -209,6 +261,59 @@ type ReadyTask = {
   end_time: string;
 };
 
+type NotificationUser = {
+  id: string;
+  email: string;
+  real_name: string | null;
+};
+
+async function queueUserNotifications(
+  env: AppEnv,
+  users: NotificationUser[],
+  eventKey: string,
+  template: string,
+  payload: Record<string, unknown>,
+): Promise<void> {
+  const unique = new Map(users.map((user) => [user.id, user]));
+  for (const user of unique.values()) {
+    await queueMail(env, user.email, template, payload, { dedupeKey: `${eventKey}:${user.id}` });
+  }
+}
+
+async function taskNotificationUsers(env: AppEnv, task: ReadyTask): Promise<NotificationUser[]> {
+  const rows = await env.DB.prepare(
+    `SELECT DISTINCT u.id, u.email, u.real_name
+       FROM users u
+      WHERE u.status = 'ACTIVE'
+        AND (u.id IN (?, ?) OR EXISTS (
+          SELECT 1 FROM reservation_task_members member
+           WHERE member.task_id = ? AND member.member_user_id = u.id
+        ))`,
+  ).bind(task.owner_user_id, task.requested_by_user_id, task.id).all<NotificationUser>();
+  return rows.results;
+}
+
+async function taskParticipantNames(env: AppEnv, task: ReadyTask): Promise<string[]> {
+  const rows = await env.DB.prepare(
+    `SELECT u.real_name AS name, 0 AS participant_order
+       FROM users u WHERE u.id = ?
+     UNION ALL
+     SELECT COALESCE(u.real_name, member.official_real_name) AS name, member.participant_order
+       FROM reservation_task_members member
+       LEFT JOIN users u ON u.id = member.member_user_id
+      WHERE member.task_id = ?
+      ORDER BY participant_order`,
+  ).bind(task.owner_user_id, task.id).all<{ name: string | null }>();
+  return rows.results.map((row) => row.name).filter((name): name is string => Boolean(name));
+}
+
+async function taskCandidateRoomNames(env: AppEnv, taskId: string): Promise<string> {
+  const rows = await env.DB.prepare(
+    "SELECT room_name_snapshot FROM reservation_task_candidate_rooms WHERE task_id = ? ORDER BY priority",
+  ).bind(taskId).all<{ room_name_snapshot: string }>();
+  return rows.results.map((row) => row.room_name_snapshot).filter(Boolean).join(" / ") || "候选研讨间";
+}
+
 type Candidate = {
   room_id: number;
   room_name_snapshot: string;
@@ -274,7 +379,6 @@ async function submitReadyReservationTasks(env: AppEnv, now: number, limit = 2):
     ).bind(now, now, task.id).run();
     if (claimed.meta.changes !== 1) continue;
     try {
-      const owner = await env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(task.owner_user_id).first<{ email: string }>();
       const token = await getAccessToken(env, task.owner_user_id);
       const profile = await getOfficialReservationProfile(env, task.owner_user_id, token);
       const primary = await env.DB.prepare("SELECT id, email, student_id, real_name FROM users WHERE id = ?")
@@ -354,12 +458,31 @@ async function submitReadyReservationTasks(env: AppEnv, now: number, limit = 2):
           JSON.stringify(members), localReservationStatus(official.reservationStatus), redactedResponse(submitted.response), String(official.id), official.reservationStatus, createdAt, createdAt, createdAt),
         env.DB.prepare("UPDATE reservation_tasks SET status = 'SUCCESS', official_reservation_id = ?, updated_at = ? WHERE id = ? AND status = 'SUBMITTING'").bind(String(official.id), createdAt, task.id),
       ]);
+      const quotaSource = canonicalReservationSource({
+        roomId: submitted.room.id,
+        date: task.target_date,
+        startTime: task.start_time,
+        endTime: task.end_time,
+        studentIds: [profile.studentId, ...members.map((member) => member.userId)],
+      });
+      try {
+        await moveReservationQuota(env, "TASK", task.id, "RESERVATION", quotaSource);
+      } catch {
+        await releaseReservationQuota(env, "TASK", task.id);
+      }
       await ensureReservationTasks(env, reservationId, official);
       await audit(env.DB, { actorUserId: task.owner_user_id, actorType: "SYSTEM", action: "AUTO_RESERVATION_SUBMITTED", targetType: "RESERVATION", targetId: reservationId, result: "SUBMITTED_UNVERIFIED" });
-      if (owner) await queueMail(env, owner.email, "AUTO_RESERVATION_SUCCESS", { date: task.target_date, startTime: task.start_time, endTime: task.end_time, roomName: submitted.room.name });
+      await queueUserNotifications(env, await taskNotificationUsers(env, task), `auto-reservation:${task.id}:success`, "AUTO_RESERVATION_SUCCESS", {
+        date: task.target_date,
+        startTime: task.start_time,
+        endTime: task.end_time,
+        roomName: submitted.room.name,
+        participants: [profile.realName, ...members.map((member) => member.userName)],
+      });
     } catch (error) {
       const message = error instanceof HttpError ? error.message : "自动预约提交失败";
-      if (error instanceof HttpError && error.code === "CREDENTIAL_RECOVERY_IN_PROGRESS") {
+      const recovering = await recoverExpiredOfficialLogin(env, task.owner_user_id, error);
+      if (recovering || (error instanceof HttpError && error.code === "CREDENTIAL_RECOVERY_IN_PROGRESS")) {
         await env.DB.prepare(
           "UPDATE reservation_tasks SET status = 'READY', failure_code = NULL, failure_message = NULL, updated_at = ? WHERE id = ? AND status = 'SUBMITTING'",
         ).bind(Date.now(), task.id).run();
@@ -368,8 +491,15 @@ async function submitReadyReservationTasks(env: AppEnv, now: number, limit = 2):
       await env.DB.prepare(
         "UPDATE reservation_tasks SET status = 'FAILED', failure_code = ?, failure_message = ?, updated_at = ? WHERE id = ? AND status = 'SUBMITTING'",
       ).bind(error instanceof HttpError ? error.code : "AUTO_SUBMISSION_FAILED", message, Date.now(), task.id).run();
-      const owner = await env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(task.owner_user_id).first<{ email: string }>();
-      if (owner) await queueMail(env, owner.email, "AUTO_RESERVATION_FAILED", { date: task.target_date, startTime: task.start_time, endTime: task.end_time, reason: message });
+      await releaseReservationQuota(env, "TASK", task.id);
+      await queueUserNotifications(env, await taskNotificationUsers(env, task), `auto-reservation:${task.id}:failed`, "AUTO_RESERVATION_FAILED", {
+        date: task.target_date,
+        startTime: task.start_time,
+        endTime: task.end_time,
+        roomName: await taskCandidateRoomNames(env, task.id),
+        participants: await taskParticipantNames(env, task),
+        reason: message,
+      });
       await audit(env.DB, { actorUserId: task.owner_user_id, actorType: "SYSTEM", action: "AUTO_RESERVATION_SUBMITTED", targetType: "RESERVATION_TASK", targetId: task.id, result: "FAILED", metadata: { code: error instanceof HttpError ? error.code : "AUTO_SUBMISSION_FAILED" } });
     }
   }
@@ -415,13 +545,17 @@ async function backfillSignWorkflows(env: AppEnv, limit = 20): Promise<void> {
 
 type SignWorkflowRow = {
   id: string;
+  requested_by_user_id: string;
+  anchor_user_id: string;
   official_reservation_id: string;
   room_id: number;
+  room_name_snapshot: string;
   date: string;
   start_time: string;
   end_time: string;
   sign_scheduled_at: number;
   signout_scheduled_at: number;
+  signout_advance_minutes: number;
   signout_status: string;
 };
 
@@ -429,7 +563,30 @@ type WorkflowParticipantRow = {
   user_id: string;
   participant_order: number;
   sign_status: string;
+  real_name?: string | null;
+  last_error_code?: string | null;
+  last_error_message?: string | null;
 };
+
+async function workflowNotificationUsers(env: AppEnv, workflow: SignWorkflowRow, participants: WorkflowParticipantRow[]): Promise<NotificationUser[]> {
+  const ids = [...new Set([workflow.requested_by_user_id, workflow.anchor_user_id, ...participants.map((participant) => participant.user_id)])];
+  if (!ids.length) return [];
+  const placeholders = ids.map(() => "?").join(", ");
+  const rows = await env.DB.prepare(
+    `SELECT id, email, real_name FROM users WHERE status = 'ACTIVE' AND id IN (${placeholders})`,
+  ).bind(...ids).all<NotificationUser>();
+  return rows.results;
+}
+
+function workflowPayload(workflow: SignWorkflowRow, participants: WorkflowParticipantRow[]): Record<string, unknown> {
+  return {
+    roomName: workflow.room_name_snapshot,
+    date: workflow.date,
+    startTime: workflow.start_time,
+    endTime: workflow.end_time,
+    participants: participants.map((participant) => participant.real_name || participant.user_id),
+  };
+}
 
 function workflowRecordMatches(workflow: SignWorkflowRow, record: { roomId: number; startTime: number; endTime: number }): boolean {
   if (record.roomId !== workflow.room_id) return false;
@@ -450,20 +607,25 @@ async function participantOfficialRecord(env: AppEnv, workflow: SignWorkflowRow,
 
 export async function submitDueSignWorkflows(env: AppEnv, now: number, limit = 20): Promise<void> {
   const workflows = await env.DB.prepare(
-    `SELECT id, official_reservation_id, room_id, date, start_time, end_time,
-            sign_scheduled_at, signout_scheduled_at, signout_status
+    `SELECT id, requested_by_user_id, anchor_user_id, official_reservation_id, room_id,
+            room_name_snapshot, date, start_time, end_time, sign_scheduled_at,
+            signout_scheduled_at, signout_advance_minutes, signout_status
        FROM sign_workflows
       WHERE status = 'ACTIVE' AND (sign_scheduled_at <= ? OR signout_scheduled_at <= ?)
       ORDER BY MIN(sign_scheduled_at, signout_scheduled_at) LIMIT ${limit}`,
   ).bind(now, now).all<SignWorkflowRow>();
 
   for (const workflow of workflows.results) {
+    const autoSignEnabled = flag(env, "ENABLE_AUTO_SIGN_SUBMISSION");
     const participants = await env.DB.prepare(
-      `SELECT user_id, participant_order, sign_status
-         FROM sign_workflow_participants WHERE workflow_id = ? ORDER BY participant_order`,
+      `SELECT participant.user_id, participant.participant_order, participant.sign_status,
+              participant.last_error_code, participant.last_error_message, user.real_name
+         FROM sign_workflow_participants participant
+         JOIN users user ON user.id = participant.user_id
+        WHERE participant.workflow_id = ? ORDER BY participant.participant_order`,
     ).bind(workflow.id).all<WorkflowParticipantRow>();
 
-    if (flag(env, "ENABLE_AUTO_SIGN_SUBMISSION") && now >= workflow.sign_scheduled_at) {
+    if (autoSignEnabled && now >= workflow.sign_scheduled_at) {
       for (const participant of participants.results) {
         if (participant.sign_status === "SUCCESS" || participant.sign_status === "DISABLED") continue;
         try {
@@ -518,6 +680,7 @@ export async function submitDueSignWorkflows(env: AppEnv, now: number, limit = 2
             ).bind(Date.now(), workflow.id, participant.user_id).run();
           }
         } catch (error) {
+          await recoverExpiredOfficialLogin(env, participant.user_id, error);
           await env.DB.prepare(
             `UPDATE sign_workflow_participants
                 SET sign_status = 'PENDING', last_error_code = ?, last_error_message = ?, updated_at = ?
@@ -534,10 +697,42 @@ export async function submitDueSignWorkflows(env: AppEnv, now: number, limit = 2
     }
 
     const refreshed = await env.DB.prepare(
-      "SELECT user_id, participant_order, sign_status FROM sign_workflow_participants WHERE workflow_id = ? ORDER BY participant_order",
+      `SELECT participant.user_id, participant.participant_order, participant.sign_status,
+              participant.last_error_code, participant.last_error_message, user.real_name
+         FROM sign_workflow_participants participant
+         JOIN users user ON user.id = participant.user_id
+        WHERE participant.workflow_id = ? ORDER BY participant.participant_order`,
     ).bind(workflow.id).all<WorkflowParticipantRow>();
     const allSigned = refreshed.results.length > 0 && refreshed.results.every((participant) => participant.sign_status === "SUCCESS");
-    if (!allSigned || !flag(env, "ENABLE_SIGNOUT_SUBMISSION") || now < workflow.signout_scheduled_at || workflow.signout_status === "SUCCESS") continue;
+    const recipients = await workflowNotificationUsers(env, workflow, refreshed.results);
+    const payload = workflowPayload(workflow, refreshed.results);
+    const endAt = workflow.signout_scheduled_at + workflow.signout_advance_minutes * 60_000;
+
+    if (allSigned) {
+      await queueUserNotifications(env, recipients, `auto-sign:${workflow.id}:success`, "AUTO_SIGN_SUCCESS", payload);
+    } else {
+      if (autoSignEnabled && now >= endAt) {
+        const reason = refreshed.results.find((participant) => participant.last_error_message)?.last_error_message
+          ?? refreshed.results.find((participant) => participant.last_error_code)?.last_error_code
+          ?? "预约结束前未完成全部成员签到";
+        await env.DB.batch([
+          env.DB.prepare(
+            `UPDATE sign_workflow_participants
+                SET sign_status = 'FAILED', last_error_code = COALESCE(last_error_code, 'SIGN_DEADLINE_EXPIRED'), updated_at = ?
+              WHERE workflow_id = ? AND sign_status <> 'SUCCESS'`,
+          ).bind(now, workflow.id),
+          env.DB.prepare(
+            `UPDATE sign_workflows
+                SET status = 'FAILED', signout_status = 'DISABLED', failure_code = 'SIGN_DEADLINE_EXPIRED',
+                    failure_message = ?, updated_at = ? WHERE id = ? AND status = 'ACTIVE'`,
+          ).bind(reason, now, workflow.id),
+        ]);
+        await queueUserNotifications(env, recipients, `auto-sign:${workflow.id}:failed`, "AUTO_SIGN_FAILED", { ...payload, reason });
+      }
+      continue;
+    }
+
+    if (!flag(env, "ENABLE_SIGNOUT_SUBMISSION") || now < workflow.signout_scheduled_at || workflow.signout_status === "SUCCESS") continue;
 
     await env.DB.prepare(
       `UPDATE sign_workflows SET signout_status = 'SUBMITTING', signout_attempt_count = signout_attempt_count + 1, updated_at = ?
@@ -563,6 +758,7 @@ export async function submitDueSignWorkflows(env: AppEnv, now: number, limit = 2
         }
         lastErrorCode = "SIGNOUT_SYNC_PENDING";
       } catch (error) {
+        await recoverExpiredOfficialLogin(env, participant.user_id, error);
         lastErrorCode = error instanceof HttpError ? error.code : "AUTOMATIC_SIGNOUT_FAILED";
       }
     }
@@ -572,6 +768,15 @@ export async function submitDueSignWorkflows(env: AppEnv, now: number, limit = 2
             SET status = 'SUCCESS', signout_status = 'SUCCESS', signout_user_id = ?, signout_executed_at = ?,
                 failure_code = NULL, failure_message = NULL, updated_at = ? WHERE id = ?`,
       ).bind(signedOutBy, Date.now(), Date.now(), workflow.id).run();
+      await queueUserNotifications(env, recipients, `auto-signout:${workflow.id}:success`, "AUTO_SIGNOUT_SUCCESS", payload);
+    } else if (now >= endAt) {
+      const reason = lastErrorCode === "SIGNOUT_SYNC_PENDING" ? "签退已提交，但预约结束前未能确认结果" : lastErrorCode;
+      await env.DB.prepare(
+        `UPDATE sign_workflows
+            SET status = 'FAILED', signout_status = 'FAILED', failure_code = ?, failure_message = ?, updated_at = ?
+          WHERE id = ? AND status = 'ACTIVE'`,
+      ).bind(lastErrorCode, reason, now, workflow.id).run();
+      await queueUserNotifications(env, recipients, `auto-signout:${workflow.id}:failed`, "AUTO_SIGNOUT_FAILED", { ...payload, reason });
     } else {
       await env.DB.prepare(
         `UPDATE sign_workflows SET signout_status = 'PENDING', failure_code = ?, updated_at = ? WHERE id = ?`,

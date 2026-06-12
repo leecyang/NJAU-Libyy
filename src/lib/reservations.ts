@@ -2,6 +2,7 @@ import type { AppEnv } from "../config";
 import type { AppPreparedStatement } from "../db/types";
 import { getAccessToken, getOfficialReservationProfile } from "./credentials";
 import { HttpError } from "./http";
+import { canonicalReservationSource, claimReservationQuota, releaseReservationQuota } from "./user-metrics";
 import { fetchOfficialReservationHistory, type OfficialReservationRecord } from "./official";
 
 export type ReservationUser = {
@@ -280,7 +281,15 @@ export async function syncOfficialReservationHistory(env: AppEnv, user: Reservat
       "SELECT id FROM reservations WHERE owner_user_id = ? AND official_reservation_id = ?",
     ).bind(user.id, String(record.id)).first<{ id: string }>();
     const reservationId = local?.id ?? crypto.randomUUID();
-    const snapshot = JSON.stringify(await officialMemberSnapshot(env, record));
+    const memberSnapshot = await officialMemberSnapshot(env, record);
+    const snapshot = JSON.stringify(memberSnapshot);
+    const quotaSource = canonicalReservationSource({
+      roomId: record.roomId,
+      date: parts.date,
+      startTime: parts.time,
+      endTime: end.time,
+      studentIds: memberSnapshot.map((member) => member.userId),
+    });
 
     if (local) {
       await env.DB.prepare(
@@ -321,6 +330,17 @@ export async function syncOfficialReservationHistory(env: AppEnv, user: Reservat
         now,
         now,
       ).run();
+    }
+
+    if ([61, 63].includes(record.reservationStatus)) {
+      await releaseReservationQuota(env, "RESERVATION", quotaSource);
+    } else {
+      const localParticipantIds = memberSnapshot.map((member) => member.localUserId).filter((id): id is string => Boolean(id));
+      try {
+        await claimReservationQuota(env, localParticipantIds, parts.date, "RESERVATION", quotaSource);
+      } catch {
+        // Existing data can temporarily exceed the local quota; synchronization must still complete.
+      }
     }
 
     await ensureReservationTasks(env, reservationId, record);

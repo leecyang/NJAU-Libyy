@@ -74,6 +74,16 @@ function layout(title: string, content: string): string {
 </html>`;
 }
 
+function participantList(value: unknown): string {
+  if (!Array.isArray(value) || value.length === 0) return "";
+  const items = value.map((item) => `<li>${escapeHtml(item)}</li>`).join("");
+  return `<p>参与成员：</p><ul>${items}</ul>`;
+}
+
+function automationDetails(payload: Record<string, unknown>): string {
+  return `<p>房间：${escapeHtml(payload.roomName)}</p><p>时间：${escapeHtml(payload.date)} ${escapeHtml(payload.startTime)}-${escapeHtml(payload.endTime)}</p>${participantList(payload.participants)}`;
+}
+
 export function renderTemplate(template: string, payload: Record<string, unknown>): MailTemplate {
   switch (template) {
     case "REGISTER_CODE":
@@ -103,13 +113,58 @@ export function renderTemplate(template: string, payload: Record<string, unknown
       };
     case "AUTO_RESERVATION_SUCCESS":
       return {
-        subject: "NJAU Libyy 自动预约已提交",
-        html: layout("自动预约已提交", `<p>${escapeHtml(payload.date)} ${escapeHtml(payload.startTime)}-${escapeHtml(payload.endTime)} 的自动预约请求已提交。</p><p>房间：${escapeHtml(payload.roomName)}</p>`),
+        subject: "NJAU Libyy 自动预约成功",
+        html: layout("自动预约成功", `<p>自动预约已经完成。</p>${automationDetails(payload)}`),
       };
     case "AUTO_RESERVATION_FAILED":
       return {
         subject: "NJAU Libyy 自动预约失败",
-        html: layout("自动预约失败", `<p>${escapeHtml(payload.date)} ${escapeHtml(payload.startTime)}-${escapeHtml(payload.endTime)} 的自动预约未能完成。</p><p>原因：${escapeHtml(payload.reason)}</p>`),
+        html: layout("自动预约失败", `<p>自动预约未能完成。</p>${automationDetails(payload)}<p>原因：${escapeHtml(payload.reason)}</p>`),
+      };
+    case "AUTO_SIGN_SUCCESS":
+      return {
+        subject: "NJAU Libyy 自动签到成功",
+        html: layout("自动签到成功", `<p>全部站内成员已完成自动签到。</p>${automationDetails(payload)}`),
+      };
+    case "AUTO_SIGN_FAILED":
+      return {
+        subject: "NJAU Libyy 自动签到失败",
+        html: layout("自动签到失败", `<p>预约结束前未能完成全部成员的自动签到。</p>${automationDetails(payload)}<p>原因：${escapeHtml(payload.reason)}</p>`),
+      };
+    case "AUTO_SIGNOUT_SUCCESS":
+      return {
+        subject: "NJAU Libyy 自动签退成功",
+        html: layout("自动签退成功", `<p>系统已完成自动签退。</p>${automationDetails(payload)}`),
+      };
+    case "AUTO_SIGNOUT_FAILED":
+      return {
+        subject: "NJAU Libyy 自动签退失败",
+        html: layout("自动签退失败", `<p>预约结束前未能完成自动签退。</p>${automationDetails(payload)}<p>原因：${escapeHtml(payload.reason)}</p>`),
+      };
+    case "TEAM_INVITATION_ACCEPTED":
+      return {
+        subject: "NJAU Libyy 小队邀请已接受",
+        html: layout("成员已加入小队", `<p><strong>${escapeHtml(payload.memberName)}</strong> 已接受邀请并加入小队 <strong>${escapeHtml(payload.teamName)}</strong>。</p>`),
+      };
+    case "TEAM_INVITATION_REJECTED":
+      return {
+        subject: "NJAU Libyy 小队邀请已拒绝",
+        html: layout("小队邀请已拒绝", `<p><strong>${escapeHtml(payload.memberName)}</strong> 已拒绝加入小队 <strong>${escapeHtml(payload.teamName)}</strong>。</p>`),
+      };
+    case "TEAM_MEMBER_LEFT":
+      return {
+        subject: "NJAU Libyy 小队成员已退出",
+        html: layout("小队成员已退出", `<p><strong>${escapeHtml(payload.memberName)}</strong> 已退出小队 <strong>${escapeHtml(payload.teamName)}</strong>。</p>`),
+      };
+    case "TEAM_MEMBER_REMOVED":
+      return {
+        subject: "NJAU Libyy 你已被移出小队",
+        html: layout("你已被移出小队", `<p><strong>${escapeHtml(payload.operatorName)}</strong> 已将你移出小队 <strong>${escapeHtml(payload.teamName)}</strong>。</p>`),
+      };
+    case "TEAM_DISBANDED":
+      return {
+        subject: "NJAU Libyy 小队已解散",
+        html: layout("小队已解散", `<p><strong>${escapeHtml(payload.operatorName)}</strong> 已解散小队 <strong>${escapeHtml(payload.teamName)}</strong>。</p>`),
       };
     case "TEST_EMAIL":
       return {

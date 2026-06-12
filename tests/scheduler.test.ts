@@ -6,6 +6,7 @@ import {
   signOutOfficialReservation,
   submitOfficialSign,
 } from "../src/lib/official";
+import { queueMail } from "../src/lib/mail";
 import { submitDueSignTasks, submitDueSignoutTasks, submitDueSignWorkflows } from "../src/lib/scheduler";
 
 vi.mock("../src/lib/credentials", () => ({
@@ -80,6 +81,7 @@ class FakeDB {
     private readonly signoutRows: SignoutRow[] = [],
     private readonly workflowRows: Array<Record<string, unknown>> = [],
     private readonly workflowParticipantRows: Array<Record<string, unknown>> = [],
+    private readonly notificationRows: Array<Record<string, unknown>> = [],
   ) {}
 
   prepare(sql: string): FakeStatement {
@@ -95,6 +97,7 @@ class FakeDB {
     if (sql.includes("FROM sign_workflow_participants")) return this.workflowParticipantRows as T[];
     if (sql.includes("FROM signout_tasks")) return this.signoutRows as T[];
     if (sql.includes("FROM sign_tasks")) return this.signRows as T[];
+    if (sql.includes("FROM users WHERE status")) return this.notificationRows as T[];
     return [];
   }
 
@@ -154,6 +157,7 @@ beforeEach(() => {
   vi.mocked(createOfficialQrSignCheckCode).mockReset();
   vi.mocked(submitOfficialSign).mockReset();
   vi.mocked(signOutOfficialReservation).mockReset();
+  vi.mocked(queueMail).mockReset();
   vi.spyOn(console, "error").mockImplementation(() => undefined);
 });
 
@@ -301,5 +305,122 @@ describe("combined sign workflow scheduler", () => {
     expect(createOfficialQrSignCheckCode).toHaveBeenNthCalledWith(2, expect.anything(), "token:member-user-id", "2", "ZP2441000049");
     expect(submitOfficialSign).toHaveBeenNthCalledWith(1, expect.anything(), "token:owner-user-id", "2", "ZP2441000049", "key-owner");
     expect(submitOfficialSign).toHaveBeenNthCalledWith(2, expect.anything(), "token:member-user-id", "2", "ZP2441000049", "key-member");
+  });
+
+  it("notifies every local participant once when automatic sign succeeds", async () => {
+    const workflow = {
+      id: "workflow-success",
+      requested_by_user_id: "owner-user-id",
+      anchor_user_id: "owner-user-id",
+      official_reservation_id: "18660",
+      room_id: 2,
+      room_name_snapshot: "7E08",
+      date: "2026-06-02",
+      start_time: "09:00",
+      end_time: "10:00",
+      sign_scheduled_at: 1780375500000,
+      signout_scheduled_at: 1780379400000,
+      signout_advance_minutes: 10,
+      signout_status: "PENDING",
+    };
+    const participants = [
+      { user_id: "owner-user-id", participant_order: 1, sign_status: "SUCCESS", real_name: "Owner" },
+      { user_id: "member-user-id", participant_order: 2, sign_status: "SUCCESS", real_name: "Member" },
+    ];
+    const recipients = [
+      { id: "owner-user-id", email: "owner@example.com", real_name: "Owner" },
+      { id: "member-user-id", email: "member@example.com", real_name: "Member" },
+    ];
+    const db = new FakeDB([], [], [workflow], participants, recipients);
+
+    await submitDueSignWorkflows(env(db), 1780376000000);
+
+    expect(queueMail).toHaveBeenCalledTimes(2);
+    expect(queueMail).toHaveBeenCalledWith(expect.anything(), "owner@example.com", "AUTO_SIGN_SUCCESS", expect.objectContaining({ roomName: "7E08" }), expect.anything());
+    expect(queueMail).toHaveBeenCalledWith(expect.anything(), "member@example.com", "AUTO_SIGN_SUCCESS", expect.anything(), expect.anything());
+  });
+
+  it("marks the workflow failed and sends one final sign failure at the reservation deadline", async () => {
+    const workflow = {
+      id: "workflow-failed",
+      requested_by_user_id: "owner-user-id",
+      anchor_user_id: "owner-user-id",
+      official_reservation_id: "18660",
+      room_id: 2,
+      room_name_snapshot: "7E08",
+      date: "2026-06-02",
+      start_time: "09:00",
+      end_time: "10:00",
+      sign_scheduled_at: 1780375500000,
+      signout_scheduled_at: 1780379400000,
+      signout_advance_minutes: 10,
+      signout_status: "PENDING",
+    };
+    const participants = [{ user_id: "owner-user-id", participant_order: 1, sign_status: "DISABLED", real_name: "Owner" }];
+    const recipients = [{ id: "owner-user-id", email: "owner@example.com", real_name: "Owner" }];
+    const db = new FakeDB([], [], [workflow], participants, recipients);
+
+    await submitDueSignWorkflows(env(db), 1780380000000);
+
+    expect(db.updates.some((update) => update.sql.includes("SET status = 'FAILED', signout_status = 'DISABLED'"))).toBe(true);
+    expect(queueMail).toHaveBeenCalledWith(expect.anything(), "owner@example.com", "AUTO_SIGN_FAILED", expect.objectContaining({ reason: expect.any(String) }), expect.anything());
+  });
+
+  it("sends the final automatic signout result after official confirmation", async () => {
+    const workflow = {
+      id: "workflow-signout",
+      requested_by_user_id: "owner-user-id",
+      anchor_user_id: "owner-user-id",
+      official_reservation_id: "18660",
+      room_id: 2,
+      room_name_snapshot: "7E08",
+      date: "2026-06-02",
+      start_time: "09:00",
+      end_time: "10:00",
+      sign_scheduled_at: 1780375500000,
+      signout_scheduled_at: 1780379400000,
+      signout_advance_minutes: 10,
+      signout_status: "PENDING",
+    };
+    const participants = [{ user_id: "owner-user-id", participant_order: 1, sign_status: "SUCCESS", real_name: "Owner" }];
+    const recipients = [{ id: "owner-user-id", email: "owner@example.com", real_name: "Owner" }];
+    const db = new FakeDB([], [], [workflow], participants, recipients);
+    vi.mocked(fetchOfficialReservationHistory)
+      .mockResolvedValueOnce([reservationRecord(31)])
+      .mockResolvedValueOnce([reservationRecord(51)]);
+    vi.mocked(signOutOfficialReservation).mockResolvedValue();
+
+    await submitDueSignWorkflows(env(db), 1780379500000);
+
+    expect(queueMail).toHaveBeenCalledWith(expect.anything(), "owner@example.com", "AUTO_SIGNOUT_SUCCESS", expect.anything(), expect.anything());
+    expect(db.updates.some((update) => update.sql.includes("signout_status = 'SUCCESS'"))).toBe(true);
+  });
+
+  it("stops signout retries and sends failure when the reservation deadline passes", async () => {
+    const workflow = {
+      id: "workflow-signout-failed",
+      requested_by_user_id: "owner-user-id",
+      anchor_user_id: "owner-user-id",
+      official_reservation_id: "18660",
+      room_id: 2,
+      room_name_snapshot: "7E08",
+      date: "2026-06-02",
+      start_time: "09:00",
+      end_time: "10:00",
+      sign_scheduled_at: 1780375500000,
+      signout_scheduled_at: 1780379400000,
+      signout_advance_minutes: 10,
+      signout_status: "PENDING",
+    };
+    const participants = [{ user_id: "owner-user-id", participant_order: 1, sign_status: "SUCCESS", real_name: "Owner" }];
+    const recipients = [{ id: "owner-user-id", email: "owner@example.com", real_name: "Owner" }];
+    const db = new FakeDB([], [], [workflow], participants, recipients);
+    vi.mocked(fetchOfficialReservationHistory).mockResolvedValue([reservationRecord(31)]);
+    vi.mocked(signOutOfficialReservation).mockResolvedValue();
+
+    await submitDueSignWorkflows(env(db), 1780380000000);
+
+    expect(queueMail).toHaveBeenCalledWith(expect.anything(), "owner@example.com", "AUTO_SIGNOUT_FAILED", expect.objectContaining({ reason: expect.any(String) }), expect.anything());
+    expect(db.updates.some((update) => update.sql.includes("signout_status = 'FAILED'"))).toBe(true);
   });
 });

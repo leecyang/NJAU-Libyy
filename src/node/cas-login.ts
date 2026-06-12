@@ -31,6 +31,7 @@ type ActiveAttempt = {
 };
 
 type CasEntryState = "PASSWORD" | "SMS" | "AUTHENTICATED";
+export type CasSmsPageState = "AUTHENTICATED" | "ERROR" | "WAITING";
 
 const ACTIVE_STATUSES = "('QUEUED', 'RUNNING', 'SMS_REQUIRED')";
 const ATTEMPT_TTL_MS = 10 * 60_000;
@@ -76,6 +77,17 @@ async function visible(page: Page, selector: string): Promise<boolean> {
 export function isAbortedNavigation(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return message.includes("net::ERR_ABORTED") || message.includes("Navigation interrupted by another one");
+}
+
+export function classifyCasSmsPageState(input: {
+  url: string;
+  token: string | null;
+  inputVisible: boolean;
+  errorText: string;
+}): CasSmsPageState {
+  if (input.url.includes("/student/studentIndex") && input.token) return "AUTHENTICATED";
+  if (input.errorText.trim()) return "ERROR";
+  return "WAITING";
 }
 
 export class CasLoginManager implements CasAutomationAdapter {
@@ -164,12 +176,20 @@ export class CasLoginManager implements CasAutomationAdapter {
     const active = this.active.get(attemptId);
     if (!active?.smsResolver) throw new HttpError(409, "CAS_ATTEMPT_NOT_RUNNING", "认证任务已中断，请重新发起");
     await this.env.DB.prepare(
-      "UPDATE official_login_attempts SET sms_attempt_count = sms_attempt_count + 1, progress = ?, updated_at = ? WHERE id = ? AND status = 'SMS_REQUIRED'",
+      `UPDATE official_login_attempts
+          SET status = 'RUNNING', sms_attempt_count = sms_attempt_count + 1, progress = ?, sms_expires_at = NULL, updated_at = ?
+        WHERE id = ? AND status = 'SMS_REQUIRED'`,
     ).bind("正在校验短信验证码", Date.now(), attemptId).run();
     const resolver = active.smsResolver;
     active.smsResolver = undefined;
     resolver(code);
-    return publicAttempt({ ...row, sms_attempt_count: row.sms_attempt_count + 1, progress: "正在校验短信验证码" });
+    return publicAttempt({
+      ...row,
+      status: "RUNNING",
+      sms_attempt_count: row.sms_attempt_count + 1,
+      sms_expires_at: null,
+      progress: "正在校验短信验证码",
+    });
   }
 
   async removeUser(userId: string): Promise<void> {
@@ -329,7 +349,9 @@ export class CasLoginManager implements CasAutomationAdapter {
       const failedAttempt = await this.attempt(attemptId);
       if (failedAttempt?.purpose === "AUTO_RECOVERY") {
         const user = await this.env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(failedAttempt.user_id).first<{ email: string }>();
-        if (user) await queueMail(this.env, user.email, "OFFICIAL_REAUTH_REQUIRED", {});
+        if (user) await queueMail(this.env, user.email, "OFFICIAL_REAUTH_REQUIRED", {}, {
+          dedupeKey: `official-reauth:${failedAttempt.id}:${failedAttempt.user_id}`,
+        });
       }
       const detail = error instanceof CasAutomationError && error.internalDetail
         ? error.internalDetail
@@ -449,6 +471,52 @@ export class CasLoginManager implements CasAutomationAdapter {
     return page.locator(SMS_INPUT_SELECTOR).filter({ visible: true }).first();
   }
 
+  private async smsObservation(page: Page): Promise<{ state: CasSmsPageState; errorText: string; inputVisible: boolean }> {
+    const url = page.url();
+    const [token, inputVisible, errorText] = await Promise.all([
+      url.includes("/student/studentIndex")
+        ? page.evaluate(() => localStorage.getItem("reflushToken")).catch(() => null)
+        : Promise.resolve(null),
+      this.smsInput(page).isVisible().catch(() => false),
+      page.locator("#showErrorTip, .error, .el-message").first().textContent().catch(() => ""),
+    ]);
+    const normalizedError = errorText?.trim() ?? "";
+    return {
+      state: classifyCasSmsPageState({ url, token, inputVisible, errorText: normalizedError }),
+      errorText: normalizedError,
+      inputVisible,
+    };
+  }
+
+  private async waitForAuthentication(page: Page, timeout: number): Promise<boolean> {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      if ((await this.smsObservation(page)).state === "AUTHENTICATED") return true;
+      await page.waitForTimeout(200);
+    }
+    return false;
+  }
+
+  private async waitForSmsSubmissionOutcome(page: Page, previousError: string): Promise<{ state: "AUTHENTICATED" | "ERROR"; errorText: string }> {
+    const startedAt = Date.now();
+    const deadline = startedAt + 60_000;
+    while (Date.now() < deadline) {
+      const observation = await this.smsObservation(page);
+      if (observation.state === "AUTHENTICATED") return { state: "AUTHENTICATED", errorText: "" };
+      if (observation.state === "ERROR" && (
+        observation.errorText !== previousError
+        || (observation.inputVisible && Date.now() - startedAt >= 1_500)
+      )) {
+        return { state: "ERROR", errorText: observation.errorText };
+      }
+      await page.waitForTimeout(200);
+    }
+    throw new CasAutomationError(
+      "CAS_SMS_VERIFICATION_TIMEOUT",
+      "短信验证码已提交，但统一认证未在限定时间内返回结果，请重新发起认证",
+    );
+  }
+
   private async handleSms(attempt: AttemptRow, page: Page): Promise<void> {
     await this.waitForSmsInput(page);
     const send = page.locator("#getDynamicCode");
@@ -465,35 +533,45 @@ export class CasLoginManager implements CasAutomationAdapter {
     await this.progress(attempt.id, "SMS_REQUIRED", "请输入发送到绑定手机的 6 位短信验证码", smsExpiresAt);
     if (attempt.purpose === "AUTO_RECOVERY") {
       const user = await this.env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(attempt.user_id).first<{ email: string }>();
-      if (user) await queueMail(this.env, user.email, "OFFICIAL_REAUTH_REQUIRED", {});
+      if (user) await queueMail(this.env, user.email, "OFFICIAL_REAUTH_REQUIRED", {}, {
+        dedupeKey: `official-reauth:${attempt.id}:${attempt.user_id}`,
+      });
     }
 
     for (let index = 0; index < 3; index += 1) {
       const code = await codePromise;
-      const input = this.smsInput(page);
+      const previousError = (await this.smsObservation(page)).errorText;
+      let input = this.smsInput(page);
       try {
         await input.fill(code, { timeout: SMS_ACTION_TIMEOUT_MS });
       } catch (error) {
-        throw new CasAutomationError(
-          "CAS_SMS_INPUT_UNAVAILABLE",
-          "短信验证码输入框当前不可用，请重新发起认证",
-          error instanceof Error ? error.message : String(error),
-        );
+        await page.waitForTimeout(300);
+        if (await this.waitForAuthentication(page, 2_000)) return;
+        input = this.smsInput(page);
+        if (await input.isVisible().catch(() => false)) {
+          await input.fill(code, { timeout: SMS_ACTION_TIMEOUT_MS });
+        } else if (await this.waitForAuthentication(page, 8_000)) {
+          return;
+        } else {
+          throw new CasAutomationError(
+            "CAS_SMS_INPUT_UNAVAILABLE",
+            "短信验证码输入框当前不可用，请重新发起认证",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
       }
       const submit = page.locator("button.auth_login_btn.submit_btn:visible").first();
-      if (await submit.isVisible().catch(() => false)) await submit.click({ timeout: SMS_ACTION_TIMEOUT_MS });
-      else await input.press("Enter", { timeout: SMS_ACTION_TIMEOUT_MS });
-      const responseDeadline = Date.now() + 10_000;
-      while (Date.now() < responseDeadline) {
-        if (!page.url().includes("reAuthCheck") && !page.url().includes("reAuthLoginView") && !await this.smsInput(page).isVisible().catch(() => false)) return;
-        const currentError = (await page.locator("#showErrorTip, .error, .el-message").first().textContent().catch(() => ""))?.trim();
-        if (currentError) break;
-        await page.waitForTimeout(300);
+      try {
+        if (await submit.isVisible().catch(() => false)) await submit.click({ timeout: SMS_ACTION_TIMEOUT_MS });
+        else await input.press("Enter", { timeout: SMS_ACTION_TIMEOUT_MS });
+      } catch (error) {
+        if (!isAbortedNavigation(error) && !await this.waitForAuthentication(page, 5_000)) throw error;
       }
-      const errorText = (await page.locator("#showErrorTip, .error, .el-message").first().textContent().catch(() => ""))?.trim();
+      const outcome = await this.waitForSmsSubmissionOutcome(page, previousError);
+      if (outcome.state === "AUTHENTICATED") return;
       if (index < 2) {
         codePromise = this.waitForSmsCode(attempt.id, smsExpiresAt);
-        await this.progress(attempt.id, "SMS_REQUIRED", errorText || "短信验证码错误，请重新输入", smsExpiresAt);
+        await this.progress(attempt.id, "SMS_REQUIRED", outcome.errorText, smsExpiresAt);
       }
     }
     throw new CasAutomationError("CAS_SMS_ATTEMPTS_EXCEEDED", "短信验证码尝试次数已用完");

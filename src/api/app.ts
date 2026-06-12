@@ -25,6 +25,7 @@ import {
 } from "../lib/official";
 import {
   createSignWorkflow,
+  officialMemberSnapshot,
   localReservationStatus,
   parseSignDeviceMap,
   reservationStatusLabel,
@@ -35,6 +36,7 @@ import {
 import {
   assertPrimaryReservationScore,
   fetchReservationParticipantScores,
+  listReservationParticipants,
   resolveOrderedParticipants,
   type ReservationParticipant,
 } from "../lib/reservation-participants";
@@ -47,8 +49,17 @@ import {
   minutesBetween,
   type Room,
 } from "../lib/validation";
+import {
+  canonicalReservationSource,
+  claimReservationQuota,
+  moveReservationQuota,
+  readUserMetrics,
+  releaseReservationQuota,
+  reservationQuotas,
+} from "../lib/user-metrics";
 
 type JsonObject = Record<string, unknown>;
+type NotificationUser = { id: string; email: string; real_name: string | null };
 type DailyAvailability = {
   date: string;
   label: string;
@@ -273,46 +284,88 @@ async function executeReservationsRefresh(env: AppEnv, job: OfficialGatewayJob):
   return { snapshotKey: snapshot.key, version: snapshot.version, count: records.length };
 }
 
-async function buildReservationOptions(env: AppEnv, requester: User, payload: JsonObject): Promise<Array<Record<string, unknown>>> {
-  const roomId = requireInteger(payload.roomId, "roomId");
-  const participants = await resolveOrderedParticipants(env, requester, payload.participantUserIds);
-  const options: Array<Record<string, unknown>> = [];
-  const seen = new Set<string>();
-  for (const participant of participants) {
+async function buildReservationOptions(env: AppEnv, requester: User): Promise<Array<Record<string, unknown>>> {
+  const manageable = await listReservationParticipants(env, requester);
+  const manageableIds = new Set(manageable.map((participant) => participant.id));
+  const groups = new Map<string, {
+    id: string;
+    roomId: number;
+    roomName: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+    startTimestamp: number;
+    endTimestamp: number;
+    minSignTime: number | null;
+    maxSignTime: number | null;
+    reservationStatus: number;
+    participants: Array<{ userId: string; studentId: string; realName: string; participantOrder: number; isPrimary: boolean }>;
+    recordsByUser: Map<string, string>;
+  }>();
+  for (const participant of manageable) {
     const user = await userById(env, participant.id);
     const records = await syncOfficialReservationHistory(env, user);
     for (const record of records) {
-      if (record.roomId !== roomId || ![12, 21, 31].includes(record.reservationStatus) || record.endTime <= Date.now()) continue;
-      const key = `${participant.id}:${record.id}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
+      if (![12, 21, 31].includes(record.reservationStatus) || record.endTime <= Date.now()) continue;
       const start = shanghaiParts(record.startTime);
       const end = shanghaiParts(record.endTime);
-      options.push({
-        id: key,
-        ownerUserId: participant.id,
-        ownerName: participant.realName,
-        officialReservationId: String(record.id),
+      const members = await officialMemberSnapshot(env, record);
+      if (!members.length || members.some((member) => !member.localUserId || !manageableIds.has(member.localUserId))) continue;
+      const key = canonicalReservationSource({
         roomId: record.roomId,
-        roomName: record.roomName ?? `房间 ${record.roomId}`,
         date: start.date,
         startTime: start.time,
         endTime: end.time,
-        startTimestamp: record.startTime,
-        endTimestamp: record.endTime,
-        minSignTime: record.minSignTime ?? null,
-        maxSignTime: record.maxSignTime ?? null,
-        reservationStatus: record.reservationStatus,
+        studentIds: members.map((member) => member.userId),
       });
+      let group = groups.get(key);
+      if (!group) {
+        const ordered = [...members].sort((left, right) => Number(right.userType === 1) - Number(left.userType === 1));
+        group = {
+          id: key,
+          roomId: record.roomId,
+          roomName: record.roomName ?? `房间 ${record.roomId}`,
+          date: start.date,
+          startTime: start.time,
+          endTime: end.time,
+          startTimestamp: record.startTime,
+          endTimestamp: record.endTime,
+          minSignTime: record.minSignTime ?? null,
+          maxSignTime: record.maxSignTime ?? null,
+          reservationStatus: record.reservationStatus,
+          participants: ordered.map((member, index) => ({
+            userId: member.localUserId!,
+            studentId: member.userId,
+            realName: member.realName || manageable.find((item) => item.id === member.localUserId)?.realName || member.userId,
+            participantOrder: index + 1,
+            isPrimary: member.userType === 1 || index === 0,
+          })),
+          recordsByUser: new Map(),
+        };
+        groups.set(key, group);
+      }
+      group.recordsByUser.set(participant.id, String(record.id));
     }
   }
-  return options.sort((left, right) => Number(left.startTimestamp) - Number(right.startTimestamp));
+  return [...groups.values()].map((group) => {
+    const primary = group.participants.find((participant) => participant.isPrimary) ?? group.participants[0]!;
+    const anchor = group.recordsByUser.has(primary.userId)
+      ? primary
+      : group.participants.find((participant) => group.recordsByUser.has(participant.userId)) ?? primary;
+    return {
+      ...group,
+      recordsByUser: undefined,
+      ownerUserId: anchor.userId,
+      ownerName: anchor.realName,
+      officialReservationId: group.recordsByUser.get(anchor.userId),
+    };
+  }).filter((option) => option.officialReservationId).sort((left, right) => left.startTimestamp - right.startTimestamp);
 }
 
 async function executeReservationOptionsRefresh(env: AppEnv, job: OfficialGatewayJob): Promise<Record<string, unknown>> {
   if (!job.ownerUserId) throw new HttpError(400, "GATEWAY_JOB_OWNER_REQUIRED", "预约选项刷新任务缺少用户");
   const requester = await userById(env, job.ownerUserId);
-  return { options: await buildReservationOptions(env, requester, job.payload) };
+  return { options: await buildReservationOptions(env, requester) };
 }
 
 export function registerOfficialGatewayHandlers(env: AppEnv): void {
@@ -335,7 +388,14 @@ export async function reservationParticipants(env: AppEnv, request: Request): Pr
   const snapshot = await env.OFFICIAL_GATEWAY.readSnapshot<{ participants: Array<ReservationParticipant & { totalScore: number | null }> }>(
     `user:${requester.id}:reservation-participants`,
   );
-  return ok(snapshot?.value ?? { participants: [] });
+  const participants = snapshot?.value.participants ?? [];
+  const quotas = await reservationQuotas(env.DB, participants.map((participant) => participant.id));
+  return ok({
+    participants: participants.map((participant) => ({
+      ...participant,
+      reservationQuota: quotas.get(participant.id) ?? [],
+    })),
+  });
 }
 
 export async function refreshReservationParticipants(env: AppEnv, request: Request): Promise<Response> {
@@ -356,16 +416,13 @@ export async function refreshReservationParticipants(env: AppEnv, request: Reque
 
 export async function refreshReservationOptions(env: AppEnv, request: Request): Promise<Response> {
   const requester = await requireBoundUser(env, request);
-  const body = await readJsonBody<JsonObject>(request);
-  if (!env.OFFICIAL_GATEWAY) return ok({ options: await buildReservationOptions(env, requester, body) });
-  const roomId = requireInteger(body.roomId, "roomId");
-  const participants = await resolveOrderedParticipants(env, requester, body.participantUserIds);
+  if (!env.OFFICIAL_GATEWAY) return ok({ options: await buildReservationOptions(env, requester) });
   const job = await env.OFFICIAL_GATEWAY.enqueue({
     kind: "RESERVATION_OPTIONS_REFRESH",
     lane: "READ",
     ownerUserId: requester.id,
-    dedupeKey: `reservation-options:${requester.id}:${roomId}:${participants.map((participant) => participant.id).join(",")}`,
-    payload: { roomId, participantUserIds: participants.map((participant) => participant.id) },
+    dedupeKey: `reservation-options:${requester.id}`,
+    payload: {},
     priority: 20,
     maxAttempts: 1,
   });
@@ -375,45 +432,54 @@ export async function refreshReservationOptions(env: AppEnv, request: Request): 
 export async function createSignWorkflowTask(env: AppEnv, request: Request): Promise<Response> {
   const requester = await requireBoundUser(env, request);
   const body = await readJsonBody<JsonObject>(request);
-  const roomId = requireInteger(body.roomId, "roomId");
-  const anchorUserId = requireString(body.anchorUserId, "anchorUserId", 80);
-  const officialReservationId = requireString(body.officialReservationId, "officialReservationId", 80);
+  const reservationOptionId = requireString(body.reservationOptionId, "reservationOptionId", 500);
   const signAdvanceMinutes = requireInteger(body.signAdvanceMinutes, "signAdvanceMinutes");
   const signoutAdvanceMinutes = requireInteger(body.signoutAdvanceMinutes, "signoutAdvanceMinutes");
   if (signAdvanceMinutes < 0 || signAdvanceMinutes > 60 || signoutAdvanceMinutes < 0 || signoutAdvanceMinutes > 60) {
     throw new HttpError(400, "INVALID_ADVANCE_MINUTES", "提前时间必须在 0 到 60 分钟之间");
   }
-  const participants = await resolveOrderedParticipants(env, requester, body.participantUserIds);
-  if (!participants.some((participant) => participant.id === anchorUserId)) {
-    throw new HttpError(400, "ANCHOR_PARTICIPANT_REQUIRED", "所选预约必须属于任务成员");
-  }
+  const option = (await buildReservationOptions(env, requester)).find((candidate) => candidate.id === reservationOptionId) as {
+    id: string;
+    roomId: number;
+    roomName: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+    startTimestamp: number;
+    endTimestamp: number;
+    minSignTime: number | null;
+    ownerUserId: string;
+    officialReservationId: string;
+    participants: Array<{ userId: string }>;
+  } | undefined;
+  if (!option) throw new HttpError(409, "RESERVATION_NOT_AVAILABLE", "所选官方预约已失效，请重新刷新");
+  const anchorUserId = option.ownerUserId;
+  const officialReservationId = option.officialReservationId;
   const anchor = await userById(env, anchorUserId);
   const records = await syncOfficialReservationHistory(env, anchor);
   const record = records.find((candidate) => String(candidate.id) === officialReservationId);
-  if (!record || record.roomId !== roomId || ![12, 21, 31].includes(record.reservationStatus) || record.endTime <= Date.now()) {
-    throw new HttpError(409, "RESERVATION_NOT_AVAILABLE", "所选官方预约已失效或房间不匹配，请重新刷新");
+  if (!record || record.roomId !== option.roomId || ![12, 21, 31].includes(record.reservationStatus) || record.endTime <= Date.now()) {
+    throw new HttpError(409, "RESERVATION_NOT_AVAILABLE", "所选官方预约已失效，请重新刷新");
   }
   const local = await env.DB.prepare(
     "SELECT id FROM reservations WHERE owner_user_id = ? AND official_reservation_id = ?",
   ).bind(anchorUserId, officialReservationId).first<{ id: string }>();
-  const start = shanghaiParts(record.startTime);
-  const end = shanghaiParts(record.endTime);
   const workflowId = await createSignWorkflow(env, {
     reservationId: local?.id ?? null,
     requestedByUserId: requester.id,
     anchorUserId,
     officialReservationId,
-    roomId: record.roomId,
-    roomName: record.roomName ?? `房间 ${record.roomId}`,
-    date: start.date,
-    startTime: start.time,
-    endTime: end.time,
-    startTimestamp: record.startTime,
-    endTimestamp: record.endTime,
-    minSignTime: record.minSignTime,
+    roomId: option.roomId,
+    roomName: option.roomName,
+    date: option.date,
+    startTime: option.startTime,
+    endTime: option.endTime,
+    startTimestamp: option.startTimestamp,
+    endTimestamp: option.endTimestamp,
+    minSignTime: option.minSignTime,
     signAdvanceMinutes,
     signoutAdvanceMinutes,
-    participantUserIds: participants.map((participant) => participant.id),
+    participantUserIds: option.participants.map((participant) => participant.userId),
     replaceExisting: true,
   });
   await audit(env.DB, { actorUserId: requester.id, actorType: "USER", action: "SIGN_WORKFLOW_CREATED", targetType: "SIGN_WORKFLOW", targetId: workflowId, result: "SUCCESS" });
@@ -550,6 +616,7 @@ export async function me(env: AppEnv, request: Request): Promise<Response> {
       totalScore = null;
     }
   }
+  const metrics = (await readUserMetrics(env, [user.id])).get(user.id);
   return ok({
     user: {
       id: user.id,
@@ -559,7 +626,10 @@ export async function me(env: AppEnv, request: Request): Promise<Response> {
       realName: user.real_name,
       squareVisibility: user.square_visibility,
       totalScore,
+      scoreRefreshedAt: metrics?.scoreRefreshedAt ?? null,
+      reservationQuota: metrics?.reservationQuota ?? [],
     },
+    metrics: metrics ?? null,
     credential,
   });
 }
@@ -836,51 +906,65 @@ async function executeManualReservation(env: AppEnv, job: OfficialGatewayJob): P
     ?? await fetchOfficialRoomDetail(env, token, roomId, date);
   const duration = assertReservation(room, { date, startTime, endTime, memberCount: members.length }, true);
   await localReservationLimits(env, primary.id, date, duration);
-  if (!flag(env, "ENABLE_SINGLE_RESERVATION_SUBMISSION")) throw new HttpError(503, "RESERVATION_SUBMISSION_DISABLED", "单人预约提交当前保持关闭");
-  if (!await verifyOfficialRoomPolicy(env, token, profile.studentId, roomId, members.map((member) => member.userId))) {
-    throw new HttpError(409, "ROOM_POLICY_REJECTED", "官方房间规则不允许本次预约");
-  }
-  await judgeOfficialReservationUsers(env, token, profile.studentId, members.map((member) => member.userId), date, startTime);
-  await submitOfficialReservation(env, token, {
-    ownerStudentId: profile.studentId,
-    mobile: profile.mobile,
+  const quotaSource = canonicalReservationSource({
     roomId,
     date,
     startTime,
     endTime,
-    useDescription: "小组学习",
-    members,
+    studentIds: participants.map((participant) => participant.studentId),
   });
-  let records = await syncOfficialReservationHistory(env, primaryUser);
-  let matched = records.find((record) => {
-    const recordStart = shanghaiParts(record.startTime);
-    const recordEnd = shanghaiParts(record.endTime);
-    return record.roomId === roomId && recordStart.date === date && recordStart.time === startTime && recordEnd.time === endTime;
-  });
-  if (!matched) throw new HttpError(502, "RESERVATION_SYNC_FAILED", "官方已接收预约，但订单回读失败，请在预约历史中刷新");
-  const acceptance = await autoAcceptTeamMembers(env, String(matched.id), members);
-  if (acceptance.accepted) {
-    records = await syncOfficialReservationHistory(env, primaryUser);
-    matched = records.find((record) => record.id === matched!.id) ?? matched;
+  await claimReservationQuota(env, participants.map((participant) => participant.id), date, "MANUAL", quotaSource);
+  try {
+    if (!flag(env, "ENABLE_SINGLE_RESERVATION_SUBMISSION")) throw new HttpError(503, "RESERVATION_SUBMISSION_DISABLED", "单人预约提交当前保持关闭");
+    if (!await verifyOfficialRoomPolicy(env, token, profile.studentId, roomId, members.map((member) => member.userId))) {
+      throw new HttpError(409, "ROOM_POLICY_REJECTED", "官方房间规则不允许本次预约");
+    }
+    await judgeOfficialReservationUsers(env, token, profile.studentId, members.map((member) => member.userId), date, startTime);
+    await submitOfficialReservation(env, token, {
+      ownerStudentId: profile.studentId,
+      mobile: profile.mobile,
+      roomId,
+      date,
+      startTime,
+      endTime,
+      useDescription: "小组学习",
+      members,
+    });
+    let records = await syncOfficialReservationHistory(env, primaryUser);
+    let matched = records.find((record) => {
+      const recordStart = shanghaiParts(record.startTime);
+      const recordEnd = shanghaiParts(record.endTime);
+      return record.roomId === roomId && recordStart.date === date && recordStart.time === startTime && recordEnd.time === endTime;
+    });
+    if (!matched) throw new HttpError(502, "RESERVATION_SYNC_FAILED", "官方已接收预约，但订单回读失败，请在预约历史中刷新");
+    const acceptance = await autoAcceptTeamMembers(env, String(matched.id), members);
+    if (acceptance.accepted) {
+      records = await syncOfficialReservationHistory(env, primaryUser);
+      matched = records.find((record) => record.id === matched!.id) ?? matched;
+    }
+    const local = await env.DB.prepare(
+      "SELECT id, status FROM reservations WHERE owner_user_id = ? AND official_reservation_id = ?",
+    ).bind(primary.id, String(matched.id)).first<{ id: string; status: string }>();
+    if (local?.id) {
+      await env.DB.batch([
+        env.DB.prepare("UPDATE reservations SET requested_by_user_id = ? WHERE id = ?").bind(requester.id, local.id),
+        env.DB.prepare("UPDATE sign_workflows SET requested_by_user_id = ?, updated_at = ? WHERE reservation_id = ?")
+          .bind(requester.id, Date.now(), local.id),
+      ]);
+    }
+    await moveReservationQuota(env, "MANUAL", quotaSource, "RESERVATION", quotaSource);
+    await audit(env.DB, { actorUserId: requester.id, actorType: "USER", action: "MANUAL_RESERVATION_SUBMITTED", targetType: "RESERVATION", targetId: local?.id, result: "SUCCESS" });
+    return {
+      id: local?.id,
+      officialReservationId: String(matched.id),
+      status: local?.status ?? localReservationStatus(matched.reservationStatus),
+      teamMembersAutoAccepted: acceptance.accepted,
+      teamMembersPendingRetry: acceptance.failed,
+    };
+  } catch (error) {
+    await releaseReservationQuota(env, "MANUAL", quotaSource);
+    throw error;
   }
-  const local = await env.DB.prepare(
-    "SELECT id, status FROM reservations WHERE owner_user_id = ? AND official_reservation_id = ?",
-  ).bind(primary.id, String(matched.id)).first<{ id: string; status: string }>();
-  if (local?.id) {
-    await env.DB.batch([
-      env.DB.prepare("UPDATE reservations SET requested_by_user_id = ? WHERE id = ?").bind(requester.id, local.id),
-      env.DB.prepare("UPDATE sign_workflows SET requested_by_user_id = ?, updated_at = ? WHERE reservation_id = ?")
-        .bind(requester.id, Date.now(), local.id),
-    ]);
-  }
-  await audit(env.DB, { actorUserId: requester.id, actorType: "USER", action: "MANUAL_RESERVATION_SUBMITTED", targetType: "RESERVATION", targetId: local?.id, result: "SUCCESS" });
-  return {
-    id: local?.id,
-    officialReservationId: String(matched.id),
-    status: local?.status ?? localReservationStatus(matched.reservationStatus),
-    teamMembersAutoAccepted: acceptance.accepted,
-    teamMembersPendingRetry: acceptance.failed,
-  };
 }
 
 export async function manualReservation(env: AppEnv, request: Request): Promise<Response> {
@@ -1055,6 +1139,7 @@ export async function createTask(env: AppEnv, request: Request): Promise<Respons
 
   const taskId = crypto.randomUUID();
   const now = Date.now();
+  await claimReservationQuota(env, participants.map((participant) => participant.id), targetDate, "TASK", taskId);
   const statements = [
     env.DB.prepare(
       `INSERT INTO reservation_tasks
@@ -1074,7 +1159,12 @@ export async function createTask(env: AppEnv, request: Request): Promise<Respons
        VALUES (?, ?, 'TEAM', ?, NULL, ?, ?, ?, ?)`,
     ).bind(crypto.randomUUID(), taskId, member.id, member.studentId, member.realName, index + 2, now));
   });
-  await env.DB.batch(statements);
+  try {
+    await env.DB.batch(statements);
+  } catch (error) {
+    await releaseReservationQuota(env, "TASK", taskId);
+    throw error;
+  }
   await audit(env.DB, { actorUserId: requester.id, actorType: "USER", action: "RESERVATION_TASK_CREATED", targetType: "RESERVATION_TASK", targetId: taskId, result: "SUCCESS" });
   return ok({ id: taskId, status: "WAITING_WINDOW" });
 }
@@ -1133,6 +1223,7 @@ export async function changeTaskStatus(env: AppEnv, request: Request, taskId: st
     `UPDATE reservation_tasks SET status = ?, updated_at = ? WHERE id = ? AND (owner_user_id = ? OR requested_by_user_id = ?) AND status IN ${allowed}`,
   ).bind(nextStatus, Date.now(), taskId, user.id, user.id).run();
   if (result.meta.changes !== 1) throw new HttpError(409, "TASK_STATUS_CONFLICT", "当前任务状态不允许该操作");
+  if (action === "cancel") await releaseReservationQuota(env, "TASK", taskId);
   await audit(env.DB, { actorUserId: user.id, actorType: "USER", action: `RESERVATION_TASK_${action.toUpperCase()}`, targetType: "RESERVATION_TASK", targetId: taskId, result: "SUCCESS" });
   return ok({ id: taskId, status: nextStatus });
 }
@@ -1283,7 +1374,7 @@ export async function inviteTeamMember(env: AppEnv, request: Request, teamId: st
     teamName: team.name,
     confirmationUrl: `${env.APP_BASE_URL}/?teamInvitation=${encodeURIComponent(id)}&teamToken=${encodeURIComponent(token)}`,
     expiresAt,
-  });
+  }, { dedupeKey: `team-invitation:${id}:${invitee.id}` });
   await audit(env.DB, { actorUserId: leader.id, actorType: "USER", action: "TEAM_INVITATION_CREATED", targetType: "TEAM_INVITATION", targetId: id, result: "PENDING" });
   return ok({ id, status: "PENDING" });
 }
@@ -1311,8 +1402,26 @@ export async function respondTeamInvitation(env: AppEnv, request: Request, invit
   const body = await readJsonBody<JsonObject>(request);
   if (body.action !== "accept" && body.action !== "reject") throw new HttpError(400, "INVALID_FIELD", "action 格式错误");
   const invitation = await env.DB.prepare(
-    "SELECT id, team_id, invitee_user_id, action_token_hash, expires_at FROM team_invitations WHERE id = ? AND status = 'PENDING'",
-  ).bind(invitationId).first<{ id: string; team_id: string; invitee_user_id: string; action_token_hash: string; expires_at: number }>();
+    `SELECT invitation.id, invitation.team_id, invitation.invitee_user_id, invitation.action_token_hash, invitation.expires_at,
+            team.name AS team_name, leader.id AS leader_user_id, leader.email AS leader_email,
+            invitee.real_name AS invitee_name, invitee.email AS invitee_email
+       FROM team_invitations invitation
+       JOIN teams team ON team.id = invitation.team_id
+       JOIN users leader ON leader.id = team.leader_user_id
+       JOIN users invitee ON invitee.id = invitation.invitee_user_id
+      WHERE invitation.id = ? AND invitation.status = 'PENDING'`,
+  ).bind(invitationId).first<{
+    id: string;
+    team_id: string;
+    invitee_user_id: string;
+    action_token_hash: string;
+    expires_at: number;
+    team_name: string;
+    leader_user_id: string;
+    leader_email: string;
+    invitee_name: string | null;
+    invitee_email: string;
+  }>();
   if (!invitation || invitation.expires_at <= Date.now()) throw new HttpError(409, "INVITATION_NOT_PENDING", "邀请已失效或已处理");
   const user = await currentUser(env, request);
   const token = typeof body.token === "string" ? body.token : "";
@@ -1321,29 +1430,71 @@ export async function respondTeamInvitation(env: AppEnv, request: Request, invit
   }
   if (body.action === "accept") await acceptTeamInvitation(env, invitationId, invitation);
   else await env.DB.prepare("UPDATE team_invitations SET status = 'REJECTED', responded_at = ? WHERE id = ? AND status = 'PENDING'").bind(Date.now(), invitationId).run();
+  await queueMail(env, invitation.leader_email, body.action === "accept" ? "TEAM_INVITATION_ACCEPTED" : "TEAM_INVITATION_REJECTED", {
+    teamName: invitation.team_name,
+    memberName: invitation.invitee_name ?? invitation.invitee_email,
+  }, { dedupeKey: `team-invitation:${invitationId}:${body.action}:${invitation.leader_user_id}` });
   await audit(env.DB, { actorUserId: invitation.invitee_user_id, actorType: "USER", action: `TEAM_INVITATION_${String(body.action).toUpperCase()}`, targetType: "TEAM_INVITATION", targetId: invitationId, result: "SUCCESS" });
   return ok({ id: invitationId, status: body.action === "accept" ? "ACCEPTED" : "REJECTED" });
 }
 
 export async function leaveTeam(env: AppEnv, request: Request, teamId: string): Promise<Response> {
   const user = await requireBoundUser(env, request);
+  const team = await env.DB.prepare(
+    `SELECT team.name, leader.id AS leader_user_id, leader.email AS leader_email
+       FROM teams team JOIN users leader ON leader.id = team.leader_user_id
+      WHERE team.id = ?`,
+  ).bind(teamId).first<{ name: string; leader_user_id: string; leader_email: string }>();
   const result = await env.DB.prepare("DELETE FROM team_members WHERE team_id = ? AND user_id = ?").bind(teamId, user.id).run();
   if (result.meta.changes !== 1) throw new HttpError(404, "TEAM_MEMBERSHIP_NOT_FOUND", "未加入该小队");
+  if (team) {
+    await queueMail(env, team.leader_email, "TEAM_MEMBER_LEFT", {
+      teamName: team.name,
+      memberName: user.real_name ?? user.email,
+    }, { dedupeKey: `team-member-left:${teamId}:${user.id}` });
+  }
   return ok({ left: true });
 }
 
 export async function removeTeamMember(env: AppEnv, request: Request, teamId: string, memberUserId: string): Promise<Response> {
   const leader = await requireBoundUser(env, request);
-  const team = await env.DB.prepare("SELECT id FROM teams WHERE id = ? AND leader_user_id = ?").bind(teamId, leader.id).first();
+  const team = await env.DB.prepare("SELECT id, name, leader_user_id FROM teams WHERE id = ? AND leader_user_id = ?").bind(teamId, leader.id).first<{ id: string; name: string; leader_user_id: string }>();
   if (!team) throw new HttpError(404, "TEAM_NOT_FOUND", "未找到自己创建的小队");
-  await env.DB.prepare("DELETE FROM team_members WHERE team_id = ? AND user_id = ?").bind(teamId, memberUserId).run();
+  if (memberUserId === team.leader_user_id) throw new HttpError(400, "TEAM_LEADER_CANNOT_BE_REMOVED", "不能将队长移出小队");
+  const member = await env.DB.prepare(
+    `SELECT user.id, user.email, user.real_name
+       FROM team_members member JOIN users user ON user.id = member.user_id
+      WHERE member.team_id = ? AND member.user_id = ?`,
+  ).bind(teamId, memberUserId).first<NotificationUser>();
+  const result = await env.DB.prepare("DELETE FROM team_members WHERE team_id = ? AND user_id = ?").bind(teamId, memberUserId).run();
+  if (result.meta.changes !== 1) throw new HttpError(404, "TEAM_MEMBERSHIP_NOT_FOUND", "该用户不在小队中");
+  if (member) {
+    await queueMail(env, member.email, "TEAM_MEMBER_REMOVED", {
+      teamName: team.name,
+      operatorName: leader.real_name ?? leader.email,
+    }, { dedupeKey: `team-member-removed:${teamId}:${memberUserId}` });
+  }
   return ok({ removed: true });
 }
 
 export async function deleteTeam(env: AppEnv, request: Request, teamId: string): Promise<Response> {
   const leader = await requireBoundUser(env, request);
+  const team = await env.DB.prepare("SELECT id, name FROM teams WHERE id = ? AND leader_user_id = ?")
+    .bind(teamId, leader.id).first<{ id: string; name: string }>();
+  if (!team) throw new HttpError(404, "TEAM_NOT_FOUND", "未找到自己创建的小队");
+  const members = await env.DB.prepare(
+    `SELECT user.id, user.email, user.real_name
+       FROM team_members member JOIN users user ON user.id = member.user_id
+      WHERE member.team_id = ? AND user.status = 'ACTIVE'`,
+  ).bind(teamId).all<NotificationUser>();
   const result = await env.DB.prepare("DELETE FROM teams WHERE id = ? AND leader_user_id = ?").bind(teamId, leader.id).run();
   if (result.meta.changes !== 1) throw new HttpError(404, "TEAM_NOT_FOUND", "未找到自己创建的小队");
+  for (const member of members.results) {
+    await queueMail(env, member.email, "TEAM_DISBANDED", {
+      teamName: team.name,
+      operatorName: leader.real_name ?? leader.email,
+    }, { dedupeKey: `team-disbanded:${teamId}:${member.id}` });
+  }
   return ok({ deleted: true });
 }
 
@@ -1537,7 +1688,7 @@ export async function adminCollection(env: AppEnv, request: Request, collection:
     "team-invitations": "SELECT id, team_id, inviter_user_id, invitee_user_id, status, expires_at, responded_at, created_at FROM team_invitations ORDER BY created_at DESC LIMIT 200",
     "sign-tasks": "SELECT id, reservation_id, scheduled_at, status, attempt_count, executed_at FROM sign_tasks ORDER BY scheduled_at DESC LIMIT 200",
     "signout-tasks": "SELECT id, reservation_id, official_reservation_id, scheduled_at, status, attempt_count, executed_at FROM signout_tasks ORDER BY scheduled_at DESC LIMIT 200",
-    emails: "SELECT id, recipient_email, template, status, attempt_count, next_attempt_at, last_error_message, created_at, sent_at FROM email_outbox ORDER BY created_at DESC LIMIT 200",
+    emails: "SELECT id, recipient_email, template, dedupe_key, status, attempt_count, next_attempt_at, last_error_message, created_at, sent_at FROM email_outbox ORDER BY created_at DESC LIMIT 200",
     "audit-logs": "SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 300",
     "gateway-jobs": "SELECT id, kind, lane, owner_user_id, status, priority, attempt_count, max_attempts, error_code, error_message, created_at, started_at, finished_at FROM official_gateway_jobs ORDER BY created_at DESC LIMIT 300",
     "gateway-snapshots": "SELECT cache_key, scope, owner_user_id, kind, version, fresh_until, stale_until, refreshed_at, refresh_job_id, last_error_code, last_error_message FROM official_gateway_snapshots ORDER BY updated_at DESC LIMIT 300",

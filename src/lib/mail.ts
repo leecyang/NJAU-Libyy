@@ -13,12 +13,22 @@ export async function queueMail(
   recipientEmail: string,
   template: string,
   payload: Record<string, unknown>,
-): Promise<void> {
-  await env.DB.prepare(
-    `INSERT INTO email_outbox
-      (id, recipient_email, template, payload_json, status, next_attempt_at, created_at)
-     VALUES (?, ?, ?, ?, 'PENDING', ?, ?)`,
-  ).bind(crypto.randomUUID(), recipientEmail, template, await encryptSecret(JSON.stringify(payload), env.TOKEN_ENCRYPTION_KEY), Date.now(), Date.now()).run();
+  options: { dedupeKey?: string } = {},
+): Promise<boolean> {
+  const result = await env.DB.prepare(
+    `INSERT OR IGNORE INTO email_outbox
+      (id, recipient_email, template, payload_json, status, next_attempt_at, created_at, dedupe_key)
+     VALUES (?, ?, ?, ?, 'PENDING', ?, ?, ?)`,
+  ).bind(
+    crypto.randomUUID(),
+    recipientEmail,
+    template,
+    await encryptSecret(JSON.stringify(payload), env.TOKEN_ENCRYPTION_KEY),
+    Date.now(),
+    Date.now(),
+    options.dedupeKey ?? null,
+  ).run();
+  return result.meta.changes === 1;
 }
 
 type OutboxRow = {

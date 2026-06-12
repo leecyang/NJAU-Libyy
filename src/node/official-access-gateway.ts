@@ -1,5 +1,6 @@
 import type { AppEnv } from "../config";
 import { HttpError } from "../lib/http";
+import { recoverExpiredOfficialLogin } from "../lib/credentials";
 import type {
   EnqueueOfficialGatewayJob,
   OfficialAccessGateway,
@@ -379,6 +380,7 @@ export class NodeOfficialAccessGateway implements OfficialAccessGateway {
           WHERE id = ? AND status = 'RUNNING'`,
       ).bind(JSON.stringify(result ?? null), now, now, job.id).run();
     } catch (error) {
+      if (job.ownerUserId) await recoverExpiredOfficialLogin(this.env, job.ownerUserId, error);
       const code = error instanceof HttpError ? error.code : "OFFICIAL_GATEWAY_JOB_FAILED";
       const message = error instanceof HttpError ? error.message : "官方访问任务执行失败";
       const latest = await this.getJob(job.id);

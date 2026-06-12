@@ -271,3 +271,16 @@ export async function refreshCredential(
     return false;
   }
 }
+
+export async function recoverExpiredOfficialLogin(env: AppEnv, userId: string, error: unknown): Promise<boolean> {
+  if (!(error instanceof HttpError) || error.code !== "OFFICIAL_REAUTH_REQUIRED") return false;
+  await env.DB.prepare(
+    `UPDATE official_credentials
+        SET credential_status = 'REAUTH_REQUIRED', refresh_lock_until = NULL,
+            refresh_failure_count = refresh_failure_count + 1,
+            last_error_code = 2003, last_error_message = ?, updated_at = ?
+      WHERE user_id = ?`,
+  ).bind("官方登录已失效，正在自动恢复", Date.now(), userId).run();
+  await env.CAS_AUTOMATION?.startRecovery(userId);
+  return true;
+}

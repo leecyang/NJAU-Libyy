@@ -50,7 +50,15 @@
 .slot-wall .uptime-kuma-heartbeat.available {
   border: 1px solid var(--hairline) !important;
   border-radius: 999px !important;
-  background: var(--canvas) !important;
+  background: #fff !important;
+  box-shadow: none !important;
+}
+
+.room-card .availability-history .uptime-kuma-heartbeat.expired,
+.slot-wall .uptime-kuma-heartbeat.expired {
+  border: 1px solid #a1a1aa !important;
+  border-radius: 999px !important;
+  background: #a1a1aa !important;
   box-shadow: none !important;
 }
 

@@ -3,6 +3,7 @@ import type { User } from "./auth";
 import { getAccessToken } from "./credentials";
 import { HttpError } from "./http";
 import { fetchOfficialUserScore } from "./official";
+import { readUserMetrics, userScoreSnapshotKey, type ReservationQuota } from "./user-metrics";
 
 export type ReservationParticipant = {
   id: string;
@@ -15,6 +16,8 @@ export type ReservationParticipant = {
 
 export type ReservationParticipantScore = ReservationParticipant & {
   totalScore: number | null;
+  scoreRefreshedAt: number | null;
+  reservationQuota: ReservationQuota[];
 };
 
 export async function listReservationParticipants(
@@ -81,27 +84,62 @@ export async function fetchReservationParticipantScores(
 ): Promise<ReservationParticipantScore[]> {
   const participants = await listReservationParticipants(env, requester);
   const token = await getAccessToken(env, requester.id);
+  const existingMetrics = await readUserMetrics(env, participants.map((participant) => participant.id));
   const scores: ReservationParticipantScore[] = [];
   for (const participant of participants) {
-    let totalScore: number | null = null;
+    const previous = existingMetrics.get(participant.id);
+    let totalScore = previous?.totalScore ?? null;
+    let scoreRefreshedAt = previous?.scoreRefreshedAt ?? null;
     try {
-      totalScore = (await fetchOfficialUserScore(env, token, participant.studentId)).totalScore;
+      const score = await fetchOfficialUserScore(env, token, participant.studentId);
+      totalScore = score.totalScore;
+      scoreRefreshedAt = Date.now();
+      if (env.OFFICIAL_GATEWAY) {
+        const snapshot = await env.OFFICIAL_GATEWAY.writeSnapshot({
+          key: userScoreSnapshotKey(participant.id),
+          scope: "USER",
+          ownerUserId: participant.id,
+          kind: "USER_SCORE",
+          value: score,
+          freshForMs: 10 * 60_000,
+          staleForMs: 6 * 60 * 60_000,
+        });
+        scoreRefreshedAt = snapshot.refreshedAt;
+      }
     } catch {
-      totalScore = null;
+      // Keep the last successful score snapshot instead of replacing it with an unknown value.
     }
-    scores.push({ ...participant, totalScore });
+    scores.push({
+      ...participant,
+      totalScore,
+      scoreRefreshedAt,
+      reservationQuota: previous?.reservationQuota ?? [],
+    });
   }
   return scores;
 }
 
 export async function assertPrimaryReservationScore(env: AppEnv, primary: ReservationParticipant): Promise<void> {
-  let totalScore: number | null = null;
+  const previous = (await readUserMetrics(env, [primary.id])).get(primary.id);
+  let totalScore = previous?.totalScore ?? null;
   try {
-    totalScore = (await fetchOfficialUserScore(env, await getAccessToken(env, primary.id), primary.studentId)).totalScore;
+    const score = await fetchOfficialUserScore(env, await getAccessToken(env, primary.id), primary.studentId);
+    totalScore = score.totalScore;
+    if (env.OFFICIAL_GATEWAY) {
+      await env.OFFICIAL_GATEWAY.writeSnapshot({
+        key: userScoreSnapshotKey(primary.id),
+        scope: "USER",
+        ownerUserId: primary.id,
+        kind: "USER_SCORE",
+        value: score,
+        freshForMs: 10 * 60_000,
+        staleForMs: 6 * 60 * 60_000,
+      });
+    }
   } catch {
-    totalScore = null;
+    // A stale successful score is still more useful than discarding it during a transient failure.
   }
-  if (totalScore === null || totalScore < 2) {
-    throw new HttpError(409, "PRIMARY_SCORE_INSUFFICIENT", "主预约人剩余积分不足 2 分或暂时无法获取");
+  if (totalScore === null || totalScore <= 0) {
+    throw new HttpError(409, "PRIMARY_SCORE_INSUFFICIENT", "主预约人积分必须大于 0，当前积分暂不可用或已用尽");
   }
 }
