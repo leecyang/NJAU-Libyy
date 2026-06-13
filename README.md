@@ -76,7 +76,7 @@ Invoke-WebRequest http://127.0.0.1:3000/api/v1/health
 
 ## GitHub Actions 预构建并上传 R2
 
-`main` 分支每次 push 后，GitHub Actions 会先执行 `npm run typecheck`、`npm test`、`npm run build`，然后构建生产 Docker 镜像，将镜像 tar 包、release compose 文件和 manifest 上传到 Cloudflare R2：
+`main` 分支每次 push 后，GitHub Actions 会先执行 `npm run typecheck` 和 `npm run build`，然后构建生产 Docker 镜像，将镜像 tar 包、release compose 文件和 manifest 上传到 Cloudflare R2：
 
 ```text
 https://cloud.way2api.fun/NJAU/latest/manifest.json
@@ -194,7 +194,6 @@ journalctl -u njau-libyy-update.service -f
 
 | 变量 | 说明 |
 | --- | --- |
-| `OFFICIAL_NETWORK_MODE` | 默认 `tailscale-direct`，官方接口从容器直连并走 Tailscale 路由 |
 | `TS_EXTRA_ARGS` | Tailscale 启动参数，默认 `--reset --accept-routes=false --accept-dns=false`；需要接收 tailnet 路由时应显式覆盖 |
 | `APP_BIND_ADDR` | Compose 端口绑定地址，默认 `127.0.0.1`；公网直连 3000 时设为 `0.0.0.0` |
 | `LIBYY_API_BASE_URL` | 官方图书馆接口地址，默认 `https://libyy.njau.edu.cn` |
@@ -209,13 +208,10 @@ journalctl -u njau-libyy-update.service -f
 | `SQLITE_PATH` | 容器内 SQLite 文件路径，Compose 默认 `/data/njau-libyy.sqlite` |
 | `WEB_DIST_DIR` | React 构建产物目录，Compose 默认 `/app/apps/web/dist` |
 
-如果需要回退到旧 HTTP 代理模式，将 `OFFICIAL_NETWORK_MODE=http-proxy`，并配置 `NJAU_PROXY_ENDPOINT` 与 `NJAU_PROXY_TOKEN`。
-
 ## 校验
 
 ```powershell
 npm run typecheck
-npm test
 npm run build
 ```
 

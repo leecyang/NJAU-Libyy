@@ -43,20 +43,6 @@ type OfficialError = {
   msg?: string;
 };
 
-type OfficialProxyError = {
-  error?: {
-    code?: string;
-  };
-};
-
-type OfficialProxyResponse = {
-  ok?: boolean;
-  status?: number;
-  headers?: Record<string, unknown>;
-  body?: string;
-  contentType?: string;
-};
-
 type OfficialOperation =
   | "refresh-token"
   | "identity"
@@ -95,27 +81,10 @@ const OFFICIAL_BROWSER_HEADERS = {
   "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 };
 
-const OFFICIAL_PROXY_TIMEOUT_MS = 30_000;
-const OFFICIAL_WORKER_FETCH_TIMEOUT_MS = 18_000;
+const OFFICIAL_FETCH_TIMEOUT_MS = 30_000;
 
 function officialUrl(env: AppEnv, path: string): URL {
   return new URL(path, env.LIBYY_API_BASE_URL);
-}
-
-function proxyEndpoint(env: AppEnv): URL {
-  if (!env.NJAU_PROXY_ENDPOINT || !env.NJAU_PROXY_TOKEN) {
-    throw new HttpError(503, "OFFICIAL_PROXY_NOT_CONFIGURED", "校园网代理尚未配置");
-  }
-  const url = new URL(env.NJAU_PROXY_ENDPOINT);
-  if (url.protocol !== "https:") {
-    throw new HttpError(503, "OFFICIAL_PROXY_NOT_CONFIGURED", "校园网代理配置错误");
-  }
-  return url;
-}
-
-function officialNetworkMode(env: AppEnv): "tailscale-direct" | "http-proxy" {
-  if (env.OFFICIAL_NETWORK_MODE) return env.OFFICIAL_NETWORK_MODE;
-  return env.NJAU_PROXY_ENDPOINT && env.NJAU_PROXY_TOKEN ? "http-proxy" : "tailscale-direct";
 }
 
 function officialHeaders(authorization: string, accept = "application/json"): Record<string, string> {
@@ -209,37 +178,6 @@ async function officialResponseDiagnostic(response: Response, operation: Officia
   };
 }
 
-function proxyFailure(response: Response, body: unknown, operation: OfficialOperation): HttpError {
-  const detail = body && typeof body === "object" ? body as OfficialProxyError : {};
-  console.error(JSON.stringify({
-    level: "error",
-    event: "official_proxy_request_failed",
-    operation,
-    status: response.status,
-    errorCode: detail.error?.code ?? null,
-  }));
-  return new HttpError(502, "OFFICIAL_PROXY_REQUEST_FAILED", `校园网代理请求失败 (${response.status})`);
-}
-
-function proxyResponseHeaders(result: OfficialProxyResponse): Headers {
-  const headers = new Headers();
-  const contentType = typeof result.contentType === "string"
-    ? result.contentType
-    : typeof result.headers?.["content-type"] === "string"
-      ? result.headers["content-type"]
-      : "";
-  if (contentType) headers.set("content-type", contentType);
-  return headers;
-}
-
-function headerRecord(init?: HeadersInit): Record<string, string> {
-  const result: Record<string, string> = {};
-  new Headers(init).forEach((value, name) => {
-    result[name] = value;
-  });
-  return result;
-}
-
 const OFFICIAL_WRITE_OPERATIONS = new Set<OfficialOperation>([
   "refresh-token",
   "reservation",
@@ -271,74 +209,15 @@ function officialRequestKey(url: URL, operation: OfficialOperation, init: Reques
 }
 
 async function rawOfficialFetch(
-  env: AppEnv,
   url: URL,
-  operation: OfficialOperation,
   init: RequestInit = {},
 ): Promise<Response> {
-  if (init.body !== undefined && typeof init.body !== "string") {
-    throw new Error("Official proxy only supports string request bodies");
-  }
-
-  if (officialNetworkMode(env) === "tailscale-direct") {
-    try {
-      const signal = AbortSignal.timeout(OFFICIAL_PROXY_TIMEOUT_MS);
-      return await fetch(url, { ...init, signal });
-    } catch (error) {
-      const code = error instanceof Error && error.name === "TimeoutError" ? "OFFICIAL_API_TIMEOUT" : "OFFICIAL_API_UNAVAILABLE";
-      throw new HttpError(502, code, code === "OFFICIAL_API_TIMEOUT" ? "官方接口请求超时" : "官方接口暂时不可用");
-    }
-  }
-
-  let response: Response;
   try {
-    const signal = AbortSignal.timeout(OFFICIAL_WORKER_FETCH_TIMEOUT_MS);
-    response = await fetch(proxyEndpoint(env), {
-      method: "POST",
-      signal,
-      headers: {
-        authorization: `Bearer ${env.NJAU_PROXY_TOKEN}`,
-        "content-type": "application/json",
-        accept: "application/json",
-      },
-      body: JSON.stringify({
-        url: url.href,
-        method: init.method ?? "GET",
-        headers: headerRecord(init.headers),
-        ...(init.body === undefined ? {} : { body: init.body }),
-        timeoutMs: OFFICIAL_PROXY_TIMEOUT_MS,
-      }),
-    });
+    return await fetch(url, { ...init, signal: AbortSignal.timeout(OFFICIAL_FETCH_TIMEOUT_MS) });
   } catch (error) {
-    const code = error instanceof Error && error.name === "TimeoutError" ? "OFFICIAL_PROXY_TIMEOUT" : "OFFICIAL_PROXY_UNAVAILABLE";
-    throw new HttpError(502, code, code === "OFFICIAL_PROXY_TIMEOUT" ? "校园网代理请求超时" : "校园网代理暂时不可用");
+    const code = error instanceof Error && error.name === "TimeoutError" ? "OFFICIAL_API_TIMEOUT" : "OFFICIAL_API_UNAVAILABLE";
+    throw new HttpError(502, code, code === "OFFICIAL_API_TIMEOUT" ? "官方接口请求超时" : "官方接口暂时不可用");
   }
-
-  let body: unknown;
-  try {
-    body = await readBoundedJson(response, 524_288);
-  } catch {
-    throw new HttpError(502, "OFFICIAL_PROXY_INVALID_RESPONSE", "校园网代理返回格式异常");
-  }
-  if (!response.ok) throw proxyFailure(response, body, operation);
-  if (!body || typeof body !== "object") {
-    throw new HttpError(502, "OFFICIAL_PROXY_INVALID_RESPONSE", "校园网代理返回格式异常");
-  }
-
-  const result = body as OfficialProxyResponse;
-  if (
-    result.ok !== true ||
-    !Number.isInteger(result.status) ||
-    Number(result.status) < 200 ||
-    Number(result.status) > 599 ||
-    typeof result.body !== "string"
-  ) {
-    throw new HttpError(502, "OFFICIAL_PROXY_INVALID_RESPONSE", "校园网代理返回格式异常");
-  }
-  return new Response(result.body, {
-    status: result.status,
-    headers: proxyResponseHeaders(result),
-  });
 }
 
 async function officialFetch(
@@ -350,7 +229,7 @@ async function officialFetch(
   if (!env.OFFICIAL_GATEWAY) {
     throw new HttpError(503, "OFFICIAL_GATEWAY_UNAVAILABLE", "官方访问网关尚未启动");
   }
-  const execute = () => rawOfficialFetch(env, url, operation, init);
+  const execute = () => rawOfficialFetch(url, init);
   return env.OFFICIAL_GATEWAY.runOfficialRequest(
     officialRequestKey(url, operation, init),
     OFFICIAL_WRITE_OPERATIONS.has(operation) ? "WRITE" : "READ",

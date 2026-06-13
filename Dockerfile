@@ -7,7 +7,6 @@ FROM deps AS build
 COPY tsconfig.json tsconfig.server.json ./
 COPY apps ./apps
 COPY src ./src
-COPY worker-configuration.d.ts ./
 RUN npm run build
 
 FROM node:22-bookworm-slim AS runtime

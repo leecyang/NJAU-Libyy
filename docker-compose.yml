@@ -33,7 +33,6 @@ services:
       SQLITE_PATH: /data/njau-libyy.sqlite
       WEB_DIST_DIR: /app/apps/web/dist
       MIGRATIONS_DIR: /app/migrations
-      OFFICIAL_NETWORK_MODE: tailscale-direct
       PLAYWRIGHT_PROFILE_DIR: /data/playwright-profiles
     volumes:
       - app-data:/data

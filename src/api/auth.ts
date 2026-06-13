@@ -1,5 +1,5 @@
 import type { AppEnv } from "../config";
-import { flag, integerVar } from "../config";
+import { integerVar } from "../config";
 import { createSession, hashClientIp, revokeSession } from "../lib/auth";
 import { audit } from "../lib/audit";
 import { hashPassword, randomDigits, sha256, verifyPassword } from "../lib/crypto";
@@ -37,7 +37,7 @@ async function sendCode(env: AppEnv, purpose: "REGISTER" | "RESET_PASSWORD", ema
      VALUES (?, ?, ?, ?, ?, ?)`,
   ).bind(crypto.randomUUID(), email, await codeHash(env, email, purpose, code), purpose, now + ttlSeconds * 1000, now).run();
   await queueMail(env, email, purpose === "REGISTER" ? "REGISTER_CODE" : "RESET_PASSWORD_CODE", { code, expiresInSeconds: ttlSeconds });
-  return ok(flag(env, "DEV_EXPOSE_VERIFICATION_CODES") ? { queued: true, devCode: code } : { queued: true });
+  return ok({ queued: true });
 }
 
 async function findCode(env: AppEnv, email: string, purpose: string, code: string): Promise<{ id: string }> {

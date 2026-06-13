@@ -199,6 +199,3 @@ export async function refreshTeamMemberMetrics(env: AppEnv, request: Request, te
     headers: { "content-type": "application/json; charset=utf-8" },
   });
 }
-
-export const teamMemberScores = teamMemberMetrics;
-export const refreshTeamMemberScores = refreshTeamMemberMetrics;

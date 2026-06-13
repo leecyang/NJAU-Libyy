@@ -11,7 +11,6 @@ import {
   acceptOfficialReservation,
   cancelOfficialReservation,
   createOfficialQrSignCheckCode,
-  fetchOfficialReservationDates,
   fetchOfficialReservationHistory,
   fetchOfficialRoomDetail,
   fetchOfficialRooms,
@@ -26,7 +25,6 @@ import {
 } from "../lib/official";
 import {
   createSignWorkflow,
-  officialMemberSnapshot,
   localReservationStatus,
   parseSignDeviceMap,
   reservationStatusLabel,
@@ -72,9 +70,7 @@ type RoomsSnapshot = {
   rooms: Array<Room & { reservable: boolean; dailyAvailability: DailyAvailability[] }>;
 };
 type ResolvedMember = OfficialMember & {
-  source: "TEAM" | "CONTACT";
-  localUserId?: string;
-  contactId?: string;
+  localUserId: string;
 };
 
 type ReservationListRow = {
@@ -95,11 +91,6 @@ type ReservationListRow = {
   created_at: number;
 };
 
-const memberSourcePriority: Record<ResolvedMember["source"], number> = {
-  CONTACT: 0,
-  TEAM: 1,
-};
-
 function isObject(value: unknown): value is JsonObject {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -107,11 +98,6 @@ function isObject(value: unknown): value is JsonObject {
 function requireInteger(value: unknown, field: string): number {
   if (!Number.isInteger(value)) throw new HttpError(400, "INVALID_FIELD", `${field} 格式错误`);
   return Number(value);
-}
-
-function requireArray(value: unknown, field: string, max = 20): unknown[] {
-  if (!Array.isArray(value) || value.length > max) throw new HttpError(400, "INVALID_FIELD", `${field} 格式错误`);
-  return value;
 }
 
 function publicRoom(room: Room): Room & { reservable: boolean } {
@@ -127,36 +113,6 @@ function requireSecret(value: unknown, field: string, maxLength: number): string
     throw new HttpError(400, "INVALID_FIELD", `${field} 格式错误`);
   }
   return value;
-}
-
-function previewRoomRanges(dateIndex: number): Array<Array<{ startTime: string; endTime: string }>> {
-  return [
-    [
-      [{ startTime: "09:00", endTime: "11:00" }, { startTime: "14:00", endTime: "16:00" }],
-      [{ startTime: "10:00", endTime: "12:00" }, { startTime: "16:30", endTime: "18:30" }],
-      [{ startTime: "08:30", endTime: "10:30" }, { startTime: "13:00", endTime: "15:00" }],
-    ],
-    [
-      [{ startTime: "08:00", endTime: "10:00" }, { startTime: "15:00", endTime: "17:00" }],
-      [{ startTime: "09:30", endTime: "11:30" }, { startTime: "14:30", endTime: "16:30" }],
-      [{ startTime: "11:00", endTime: "13:00" }, { startTime: "18:00", endTime: "20:00" }],
-    ],
-    [
-      [{ startTime: "10:00", endTime: "12:00" }, { startTime: "16:00", endTime: "18:00" }],
-      [{ startTime: "08:30", endTime: "09:30" }, { startTime: "13:30", endTime: "15:30" }],
-      [{ startTime: "09:00", endTime: "11:00" }, { startTime: "15:30", endTime: "17:30" }],
-    ],
-  ][dateIndex] ?? [];
-}
-
-function previewRoomsForDate(date: string): Array<Room & { reservable: boolean; availableRanges: Array<{ startTime: string; endTime: string }> }> {
-  const dateIndex = threeDayWindow().findIndex((item) => item.date === date);
-  const rangeSets = previewRoomRanges(dateIndex < 0 ? 0 : dateIndex);
-  return [
-    { id: 2, name: "7E08", roomLocation: "七楼东区", minReservationNum: 1, maxNum: 6, status: 0, availableRanges: rangeSets[0] ?? [], reservable: true },
-    { id: 3, name: "7E10", roomLocation: "七楼东区", minReservationNum: 1, maxNum: 8, status: 0, availableRanges: rangeSets[1] ?? [], reservable: true },
-    { id: 4, name: "8A03", roomLocation: "八楼 A 区", minReservationNum: 2, maxNum: 10, status: 0, availableRanges: rangeSets[2] ?? [], reservable: true },
-  ];
 }
 
 function shanghaiDate(offset = 0, now = new Date()): string {
@@ -633,48 +589,10 @@ function maskStudentId(value: string | null): string | null {
   return `${value.slice(0, 2)}****${value.slice(-2)}`;
 }
 
-async function resolveMembers(env: AppEnv, owner: User, teamMemberUserIds: unknown, contactIds: unknown, autoJoinUserIds: unknown, allowContacts: boolean): Promise<ResolvedMember[]> {
-  const teamIds = [...new Set(requireArray(teamMemberUserIds ?? [], "teamMemberUserIds", 20).map((value) => requireString(value, "teamMemberUserIds", 80)))];
-  const recentIds = [...new Set(requireArray(contactIds ?? [], "contactIds", 20).map((value) => requireString(value, "contactIds", 80)))];
-  const autoJoinIds = [...new Set(requireArray(autoJoinUserIds ?? [], "autoJoinUserIds", 20).map((value) => requireString(value, "autoJoinUserIds", 80)))];
-  if (autoJoinIds.length) throw new HttpError(400, "AUTO_JOIN_REMOVED", "站内自动联约已停用，请使用小队成员");
-  if (!allowContacts && recentIds.length) throw new HttpError(400, "CONTACTS_NOT_ALLOWED", "自动预约只能选择小队成员");
-  if (teamIds.includes(owner.id)) throw new HttpError(400, "INVALID_MEMBERS", "主预约人不能作为副预约人");
-  const members: ResolvedMember[] = [];
-  if (teamIds.length) {
-    const placeholders = teamIds.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
-      `SELECT u.id, u.student_id, u.real_name
-         FROM teams t
-         JOIN team_members m ON m.team_id = t.id
-         JOIN users u ON u.id = m.user_id
-        WHERE t.leader_user_id = ? AND u.id IN (${placeholders}) AND u.status = 'ACTIVE'`,
-    ).bind(owner.id, ...teamIds).all<{ id: string; student_id: string; real_name: string }>();
-    if (rows.results.length !== teamIds.length) throw new HttpError(403, "TEAM_MEMBER_REQUIRED", "只能自动联约自己带领小队中的成员");
-    members.push(...rows.results.map((row) => ({ userId: row.student_id, userName: row.real_name, source: "TEAM" as const, localUserId: row.id })));
-  }
-  if (recentIds.length) {
-    const placeholders = recentIds.map(() => "?").join(",");
-    const rows = await env.DB.prepare(
-      `SELECT id, official_student_id, official_real_name FROM recent_contacts
-        WHERE owner_user_id = ? AND id IN (${placeholders})`,
-    ).bind(owner.id, ...recentIds).all<{ id: string; official_student_id: string; official_real_name: string }>();
-    if (rows.results.length !== recentIds.length) throw new HttpError(400, "INVALID_CONTACTS", "最近联系人不存在");
-    members.push(...rows.results.map((row) => ({ userId: row.official_student_id, userName: row.official_real_name, source: "CONTACT" as const, contactId: row.id })));
-  }
-  const deduped = new Map<string, ResolvedMember>();
-  for (const member of members) {
-    const current = deduped.get(member.userId);
-    if (!current || memberSourcePriority[member.source] > memberSourcePriority[current.source]) deduped.set(member.userId, member);
-  }
-  return [...deduped.values()];
-}
-
 async function autoAcceptTeamMembers(env: AppEnv, officialReservationId: string, members: ResolvedMember[]): Promise<{ accepted: number; failed: number }> {
   let accepted = 0;
   let failed = 0;
   for (const member of members) {
-    if (member.source !== "TEAM" || !member.localUserId) continue;
     try {
       await acceptOfficialReservation(env, await getAccessToken(env, member.localUserId), officialReservationId);
       accepted += 1;
@@ -751,8 +669,6 @@ export async function health(env: AppEnv): Promise<Response> {
     config: {
       officialApiConfigured: Boolean(env.LIBYY_APP_SECRET),
       officialGatewayEnabled: Boolean(env.OFFICIAL_GATEWAY),
-      officialNetworkMode: env.OFFICIAL_NETWORK_MODE ?? "tailscale-direct",
-      officialProxyConfigured: Boolean(env.NJAU_PROXY_ENDPOINT && env.NJAU_PROXY_TOKEN),
       tailscaleExitNodeConfigured: String(env.TS_EXTRA_ARGS ?? "").includes("--exit-node"),
       smtpConfigured: Boolean(env.SMTP_PASSWORD),
       emailDeliveryEnabled: flag(env, "EMAIL_DELIVERY_ENABLED"),
@@ -763,7 +679,6 @@ export async function health(env: AppEnv): Promise<Response> {
       signRoomSystemMacMapConfigured,
       room2SignDeviceConfigured,
       autoSignSubmissionEnabled: flag(env, "ENABLE_AUTO_SIGN_SUBMISSION"),
-      signParameterIngestEnabled: flag(env, "ENABLE_SIGN_PARAMETER_INGEST"),
       signoutSubmissionEnabled: flag(env, "ENABLE_SIGNOUT_SUBMISSION"),
     },
   });
@@ -832,23 +747,6 @@ export async function getCredentialStatus(env: AppEnv, request: Request): Promis
 export async function rooms(env: AppEnv, request: Request): Promise<Response> {
   const requestedDate = new URL(request.url).searchParams.get("date");
   const date = requestedDate ? requireString(requestedDate, "date", 10) : null;
-  if (flag(env, "PREVIEW_DEMO_ROOMS")) {
-    if (date) {
-      assertThreeDayWindow(date);
-      return ok({ date, rooms: previewRoomsForDate(date) });
-    }
-    const dates = threeDayWindow();
-    return ok({
-      dates,
-      rooms: previewRoomsForDate(dates[0]!.date).map((room, roomIndex) => ({
-        ...room,
-        dailyAvailability: dates.map((item, dateIndex) => ({
-          ...item,
-          availableRanges: previewRoomRanges(dateIndex)[roomIndex] ?? [],
-        })),
-      })),
-    });
-  }
   const user = await requireBoundUser(env, request);
   if (env.OFFICIAL_GATEWAY) {
     const snapshot = await env.OFFICIAL_GATEWAY.readSnapshot<RoomsSnapshot>(roomsSnapshotKey());
@@ -990,7 +888,6 @@ async function executeManualReservation(env: AppEnv, job: OfficialGatewayJob): P
   const members: ResolvedMember[] = participants.slice(1).map((participant) => ({
     userId: participant.studentId,
     userName: participant.realName,
-    source: "TEAM",
     localUserId: participant.id,
   }));
   if (members.length && !flag(env, "ENABLE_MULTIMEMBER_RESERVATION_SUBMISSION")) {
@@ -1889,12 +1786,6 @@ export async function openReservationDoor(env: AppEnv, request: Request, reserva
     maxAttempts: 1,
   });
   return gatewayJobResponse(env, job, 3000);
-}
-
-export async function submitSignParameters(env: AppEnv, request: Request, taskId: string): Promise<Response> {
-  await requireBoundUser(env, request);
-  void taskId;
-  throw new HttpError(410, "SIGN_PARAMETER_INGEST_DEPRECATED", "现场参数注入已停用，系统会即时生成短效签到码");
 }
 
 export async function signoutTasks(env: AppEnv, request: Request): Promise<Response> {

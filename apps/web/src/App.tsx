@@ -358,10 +358,6 @@ function visibleTeamMembers(team: Team): Array<{ id: string; name: string; role:
   ];
 }
 
-function toggleValue(values: string[], value: string): string[] {
-  return values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
-}
-
 function reservationEndTimestamp(item: Reservation): number {
   return new Date(`${item.date}T${item.end_time}:00+08:00`).valueOf();
 }
@@ -980,13 +976,11 @@ function CredentialLockPage({
   session,
   refresh,
   toast,
-  navigate,
   onLogout,
 }: {
   session: Session;
   refresh: () => Promise<void>;
   toast: (message: string, error?: boolean) => void;
-  navigate: (path: string) => void;
   onLogout: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -1123,12 +1117,10 @@ function RoomsPage({ toast, navigate }: { toast: (message: string, error?: boole
 
 function RoomDetailPage({
   roomId,
-  session,
   toast,
   navigate,
 }: {
   roomId: number;
-  session: Session;
   toast: (message: string, error?: boolean) => void;
   navigate: (path: string) => void;
 }) {
@@ -2155,7 +2147,7 @@ export function App() {
   if (session.credential.credential_status !== "ACTIVE" || session.credential.setup_required === true) {
     return (
       <>
-        <CredentialLockPage session={session} refresh={refreshMe} toast={toast} navigate={navigate} onLogout={logout} />
+        <CredentialLockPage session={session} refresh={refreshMe} toast={toast} onLogout={logout} />
         <Toast message={message} error={isError} />
       </>
     );
@@ -2165,7 +2157,7 @@ export function App() {
     <Shell session={session} page={route.page} navigate={navigate} onLogout={logout}>
       <main className="content">
         {route.page === "rooms" && !route.roomId ? <RoomsPage toast={toast} navigate={navigate} /> : null}
-        {route.page === "rooms" && route.roomId ? <RoomDetailPage roomId={route.roomId} session={session} toast={toast} navigate={navigate} /> : null}
+        {route.page === "rooms" && route.roomId ? <RoomDetailPage roomId={route.roomId} toast={toast} navigate={navigate} /> : null}
         {route.page === "tasks" ? <TasksPage toast={toast} navigate={navigate} mode={route.taskMode ?? "list"} /> : null}
         {route.page === "teams" && route.teamId && route.teamMemberId ? <TeamMemberReservationsPage teamId={route.teamId} memberId={route.teamMemberId} toast={toast} navigate={navigate} /> : null}
         {route.page === "teams" && route.teamId && !route.teamMemberId ? <TeamDetailPage teamId={route.teamId} toast={toast} navigate={navigate} /> : null}

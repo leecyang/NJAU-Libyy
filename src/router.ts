@@ -50,14 +50,13 @@ import {
   signoutReservation,
   signoutTasks,
   submitCredentialSms,
-  submitSignParameters,
   syncReservationHistory,
   taskDetail,
   teamInvitationPreview,
   updateTask,
   updateTeam,
 } from "./api/app";
-import { refreshTeamMemberMetrics, refreshTeamMemberScores, teamMemberMetrics, teamMemberScores } from "./api/team-scores";
+import { refreshTeamMemberMetrics, teamMemberMetrics } from "./api/team-scores";
 import { openTeamDoor, teamDoorOptions } from "./api/team-door";
 import { login, logout, register, resetPassword, sendRegisterCode, sendResetCode } from "./api/auth";
 import { json } from "./lib/http";
@@ -165,9 +164,6 @@ export async function routeApi(env: AppEnv, request: Request): Promise<Response>
     return refreshTeamMemberReservations(env, request, teamMemberReservationsRefreshMatch[1], teamMemberReservationsRefreshMatch[2]);
   }
 
-  const teamScoresMatch = /^\/api\/v1\/teams\/([^/]+)\/member-scores$/.exec(url.pathname);
-  if (request.method === "GET" && teamScoresMatch?.[1]) return teamMemberScores(env, request, teamScoresMatch[1]);
-  if (request.method === "POST" && teamScoresMatch?.[1]) return refreshTeamMemberScores(env, request, teamScoresMatch[1]);
   const teamMetricsMatch = /^\/api\/v1\/teams\/([^/]+)\/member-metrics$/.exec(url.pathname);
   if (request.method === "GET" && teamMetricsMatch?.[1]) return teamMemberMetrics(env, request, teamMetricsMatch[1]);
   if (request.method === "POST" && teamMetricsMatch?.[1]) return refreshTeamMemberMetrics(env, request, teamMetricsMatch[1]);
@@ -176,9 +172,6 @@ export async function routeApi(env: AppEnv, request: Request): Promise<Response>
   if (request.method === "POST" && invitationAction?.[1] && (invitationAction[2] === "accept" || invitationAction[2] === "reject")) {
     return respondInvitation(env, request, invitationAction[1], invitationAction[2]);
   }
-
-  const signParameterMatch = /^\/api\/v1\/sign-tasks\/([^/]+)\/parameters$/.exec(url.pathname);
-  if (request.method === "POST" && signParameterMatch?.[1]) return submitSignParameters(env, request, signParameterMatch[1]);
 
   const signWorkflowCancelMatch = /^\/api\/v1\/sign-workflows\/([^/]+)\/cancel$/.exec(url.pathname);
   if (request.method === "POST" && signWorkflowCancelMatch?.[1]) return cancelSignWorkflow(env, request, signWorkflowCancelMatch[1]);
