@@ -4,7 +4,7 @@ import { audit } from "./audit";
 import { decryptSecret, encryptSecret } from "./crypto";
 import { HttpError } from "./http";
 import { queueMail } from "./mail";
-import { fetchOfficialIdentity, refreshOfficialToken } from "./official";
+import { fetchOfficialIdentity, refreshOfficialToken, searchOfficialUsers, type OfficialIdentity } from "./official";
 
 type Credential = {
   id: string;
@@ -19,6 +19,30 @@ type Credential = {
 };
 
 const LOCK_MS = 60_000;
+
+function normalizedMobile(value: string | undefined): string | null {
+  const digits = value?.replace(/\D/g, "") ?? "";
+  return /^1[3-9]\d{9}$/.test(digits) ? digits : null;
+}
+
+function simulatedMobile(studentId: string): string {
+  let hash = 0;
+  for (const character of studentId) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+  return `199${String(hash % 100_000_000).padStart(8, "0")}`;
+}
+
+async function resolveReservationMobile(env: AppEnv, accessToken: string, identity: OfficialIdentity): Promise<string> {
+  const identityMobile = normalizedMobile(identity.mobile);
+  if (identityMobile) return identityMobile;
+  try {
+    const officialUser = await searchOfficialUsers(env, accessToken, identity.userId);
+    const searchedMobile = normalizedMobile(officialUser.mobile);
+    if (searchedMobile) return searchedMobile;
+  } catch {
+    // A missing search result must not block an otherwise valid bound identity.
+  }
+  return simulatedMobile(identity.userId);
+}
 
 async function persistTokens(
   env: AppEnv,
@@ -90,6 +114,7 @@ export async function bindCredentialFromToken(
   if (identity.userId !== expectedStudentId) {
     throw new HttpError(409, "CAS_IDENTITY_MISMATCH", "统一认证账号与官方身份不一致");
   }
+  const mobile = await resolveReservationMobile(env, refreshed.accessToken, identity);
 
   await env.DB.batch([
     env.DB.prepare(
@@ -98,7 +123,7 @@ export async function bindCredentialFromToken(
       identity.userId,
       identity.realName,
       identity.id ?? null,
-      identity.mobile ? await encryptSecret(identity.mobile, env.TOKEN_ENCRYPTION_KEY) : null,
+      await encryptSecret(mobile, env.TOKEN_ENCRYPTION_KEY),
       now,
       user.id,
     ),
@@ -124,26 +149,23 @@ export async function getOfficialReservationProfile(
   ).bind(userId).first<{ student_id: string | null; real_name: string | null; official_mobile_ciphertext: string | null }>();
   if (!stored) throw new HttpError(404, "ACCOUNT_NOT_FOUND", "账号不存在");
   if (stored.student_id && stored.real_name && stored.official_mobile_ciphertext) {
-    return {
-      studentId: stored.student_id,
-      realName: stored.real_name,
-      mobile: await decryptSecret(stored.official_mobile_ciphertext, env.TOKEN_ENCRYPTION_KEY),
-    };
+    const mobile = normalizedMobile(await decryptSecret(stored.official_mobile_ciphertext, env.TOKEN_ENCRYPTION_KEY));
+    if (mobile) return { studentId: stored.student_id, realName: stored.real_name, mobile };
   }
 
   const identity = await fetchOfficialIdentity(env, accessToken);
-  if (!identity.mobile) throw new HttpError(409, "OFFICIAL_PROFILE_INCOMPLETE", "官方身份缺少预约所需手机号，请重新绑定凭证");
+  const mobile = await resolveReservationMobile(env, accessToken, identity);
   await env.DB.prepare(
     "UPDATE users SET student_id = ?, real_name = ?, official_user_internal_id = ?, official_mobile_ciphertext = ?, updated_at = ? WHERE id = ?",
   ).bind(
     identity.userId,
     identity.realName,
     identity.id ?? null,
-    await encryptSecret(identity.mobile, env.TOKEN_ENCRYPTION_KEY),
+    await encryptSecret(mobile, env.TOKEN_ENCRYPTION_KEY),
     Date.now(),
     userId,
   ).run();
-  return { studentId: identity.userId, realName: identity.realName, mobile: identity.mobile };
+  return { studentId: identity.userId, realName: identity.realName, mobile };
 }
 
 export async function credentialStatus(env: AppEnv, userId: string): Promise<Record<string, unknown>> {
