@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppEnv } from "../src/config";
+import type { OfficialAccessGateway } from "../src/lib/official-gateway-types";
 import {
   cancelOfficialReservation,
   createOfficialQrSignCheckCode,
@@ -13,12 +14,15 @@ import {
   submitOfficialReservation,
 } from "../src/lib/official";
 
+const runOfficialRequest = vi.fn(async <T>(_key: string, _mode: "READ" | "WRITE", operation: () => Promise<T>): Promise<T> => operation());
+
 const env = {
   LIBYY_API_BASE_URL: "https://libyy.njau.edu.cn",
   LIBYY_APP_ID: "app-id",
   LIBYY_APP_SECRET: "app-secret",
   NJAU_PROXY_ENDPOINT: "https://proxy.example/proxy/fetch",
   NJAU_PROXY_TOKEN: "proxy-token",
+  OFFICIAL_GATEWAY: { runOfficialRequest } as unknown as OfficialAccessGateway,
 } as unknown as AppEnv;
 
 function proxyResponse(status: number, body: string, contentType = "application/json"): Response {
@@ -34,6 +38,10 @@ function proxyResponse(status: number, body: string, contentType = "application/
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+});
+
+beforeEach(() => {
+  runOfficialRequest.mockClear();
 });
 
 describe("official API adapter", () => {
@@ -101,6 +109,8 @@ describe("official API adapter", () => {
     await searchOfficialUsers(env, "access-token", "student-id");
 
     expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(runOfficialRequest).toHaveBeenCalledTimes(4);
+    expect(runOfficialRequest.mock.calls.map(([, mode]) => mode)).toEqual(["READ", "READ", "WRITE", "READ"]);
     expect(fetchMock.mock.calls.map(([url]) => String(url))).toEqual([
       "https://proxy.example/proxy/fetch",
       "https://proxy.example/proxy/fetch",
@@ -113,6 +123,18 @@ describe("official API adapter", () => {
       "/api/studyroom/v1.1/reservation/reservation",
       "/api/studyroom/v1/user/pageUser",
     ]);
+  });
+
+  it("refuses to call the official network without the gateway", async () => {
+    const fetchMock = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", fetchMock);
+    const envWithoutGateway = { ...env, OFFICIAL_GATEWAY: undefined } as AppEnv;
+
+    await expect(refreshOfficialToken(envWithoutGateway, "old-reflush-token")).rejects.toMatchObject({
+      status: 503,
+      code: "OFFICIAL_GATEWAY_UNAVAILABLE",
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("searches official users with the browser-confirmed pageUser query", async () => {

@@ -347,8 +347,10 @@ async function officialFetch(
   operation: OfficialOperation,
   init: RequestInit = {},
 ): Promise<Response> {
+  if (!env.OFFICIAL_GATEWAY) {
+    throw new HttpError(503, "OFFICIAL_GATEWAY_UNAVAILABLE", "官方访问网关尚未启动");
+  }
   const execute = () => rawOfficialFetch(env, url, operation, init);
-  if (!env.OFFICIAL_GATEWAY) return execute();
   return env.OFFICIAL_GATEWAY.runOfficialRequest(
     officialRequestKey(url, operation, init),
     OFFICIAL_WRITE_OPERATIONS.has(operation) ? "WRITE" : "READ",

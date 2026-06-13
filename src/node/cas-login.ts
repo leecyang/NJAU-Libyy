@@ -246,10 +246,10 @@ export class CasLoginManager implements CasAutomationAdapter {
   }
 
   private async run(attemptId: string): Promise<void> {
-    if (this.env.OFFICIAL_GATEWAY) {
-      return this.env.OFFICIAL_GATEWAY.runPlaywright(`cas:${attemptId}`, () => this.runAttempt(attemptId));
+    if (!this.env.OFFICIAL_GATEWAY) {
+      throw new CasAutomationError("OFFICIAL_GATEWAY_UNAVAILABLE", "官方访问网关尚未启动");
     }
-    return this.runAttempt(attemptId);
+    return this.env.OFFICIAL_GATEWAY.runPlaywright(`cas:${attemptId}`, () => this.runAttempt(attemptId));
   }
 
   private async runAttempt(attemptId: string): Promise<void> {
