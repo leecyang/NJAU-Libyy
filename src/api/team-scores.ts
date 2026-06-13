@@ -100,6 +100,38 @@ async function fetchTeamMetrics(env: AppEnv, requester: User, team: TeamRow): Pr
   return { teamId: team.id, teamName: team.name, members };
 }
 
+async function cachedTeamMetrics(env: AppEnv, requester: User, team: TeamRow): Promise<{ teamId: string; teamName: string; members: TeamMetricMember[] }> {
+  const rows = await env.DB.prepare(
+    `SELECT u.id, u.student_id, u.real_name,
+            CASE WHEN u.id = ? THEN 1 ELSE 0 END AS is_leader
+       FROM users u
+      WHERE u.id = ? OR u.id IN (SELECT user_id FROM team_members WHERE team_id = ?)
+      ORDER BY is_leader DESC, u.real_name`,
+  ).bind(team.leader_user_id, team.leader_user_id, team.id).all<{
+    id: string;
+    student_id: string | null;
+    real_name: string | null;
+    is_leader: number;
+  }>();
+  const eligible = rows.results.filter((row): row is typeof row & { student_id: string } => Boolean(row.student_id));
+  const metrics = await readUserMetrics(env, eligible.map((row) => row.id));
+  return {
+    teamId: team.id,
+    teamName: team.name,
+    members: eligible.map((row) => ({
+      localUserId: row.id,
+      userId: row.student_id,
+      studentId: row.student_id,
+      realName: row.real_name ?? row.student_id,
+      totalScore: metrics.get(row.id)?.totalScore ?? null,
+      scoreRefreshedAt: metrics.get(row.id)?.scoreRefreshedAt ?? null,
+      reservationQuota: metrics.get(row.id)?.reservationQuota ?? [],
+      isCurrentUser: row.id === requester.id,
+      isLeader: row.is_leader === 1,
+    })),
+  };
+}
+
 export async function teamMemberMetrics(env: AppEnv, request: Request, teamId: string): Promise<Response> {
   const requester = await requireBoundUser(env, request);
   const team = await requireTeamMember(env, requester.id, teamId);
@@ -117,7 +149,7 @@ export async function teamMemberMetrics(env: AppEnv, request: Request, teamId: s
       });
     }
   }
-  return ok(await fetchTeamMetrics(env, requester, team));
+  return ok(await cachedTeamMetrics(env, requester, team));
 }
 
 async function executeTeamMetricsRefresh(env: AppEnv, job: OfficialGatewayJob): Promise<Record<string, unknown>> {

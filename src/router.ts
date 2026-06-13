@@ -9,6 +9,7 @@ import {
   cancelSignWorkflow,
   changeTaskStatus,
   createInvitation,
+  openReservationDoor,
   createSignLink,
   createSignWorkflowTask,
   createTask,
@@ -23,6 +24,9 @@ import {
   invitableUsers,
   leaveTeam,
   listMyTeams,
+  teamDetail,
+  teamMemberReservations,
+  refreshTeamMemberReservations,
   listSignWorkflows,
   listTasks,
   manualReservation,
@@ -51,6 +55,7 @@ import {
   taskDetail,
   teamInvitationPreview,
   updateTask,
+  updateTeam,
 } from "./api/app";
 import { refreshTeamMemberMetrics, refreshTeamMemberScores, teamMemberMetrics, teamMemberScores } from "./api/team-scores";
 import { openTeamDoor, teamDoorOptions } from "./api/team-door";
@@ -81,6 +86,7 @@ const routes = new Map<string, Handler>([
   ["POST /api/v1/reservations/sync", syncReservationHistory],
   ["GET /api/v1/reservation-participants", reservationParticipants],
   ["POST /api/v1/reservation-participants/refresh", refreshReservationParticipants],
+  ["GET /api/v1/reservation-options", refreshReservationOptions],
   ["POST /api/v1/reservation-options/refresh", refreshReservationOptions],
   ["POST /api/v1/reservation-tasks", createTask],
   ["GET /api/v1/reservation-tasks", listTasks],
@@ -125,6 +131,8 @@ export async function routeApi(env: AppEnv, request: Request): Promise<Response>
   if (request.method === "POST" && reservationSignLinkMatch?.[1]) return createSignLink(env, request, reservationSignLinkMatch[1]);
   const reservationSignoutMatch = /^\/api\/v1\/reservations\/([^/]+)\/signout$/.exec(url.pathname);
   if (request.method === "POST" && reservationSignoutMatch?.[1]) return signoutReservation(env, request, reservationSignoutMatch[1]);
+  const reservationOpenDoorMatch = /^\/api\/v1\/reservations\/([^/]+)\/open-door$/.exec(url.pathname);
+  if (request.method === "POST" && reservationOpenDoorMatch?.[1]) return openReservationDoor(env, request, reservationOpenDoorMatch[1]);
 
   const roomDetailMatch = /^\/api\/v1\/rooms\/([^/]+)$/.exec(url.pathname);
   if (request.method === "GET" && roomDetailMatch?.[1]) return roomDetail(env, request, roomDetailMatch[1]);
@@ -135,6 +143,8 @@ export async function routeApi(env: AppEnv, request: Request): Promise<Response>
   if (request.method === "POST" && teamInvitationRespondMatch?.[1]) return respondTeamInvitation(env, request, teamInvitationRespondMatch[1]);
 
   const teamMatch = /^\/api\/v1\/teams\/([^/]+)$/.exec(url.pathname);
+  if (request.method === "GET" && teamMatch?.[1]) return teamDetail(env, request, teamMatch[1]);
+  if (request.method === "PATCH" && teamMatch?.[1]) return updateTeam(env, request, teamMatch[1]);
   if (request.method === "DELETE" && teamMatch?.[1]) return deleteTeam(env, request, teamMatch[1]);
   const teamInviteMatch = /^\/api\/v1\/teams\/([^/]+)\/invitations$/.exec(url.pathname);
   if (request.method === "POST" && teamInviteMatch?.[1]) return inviteTeamMember(env, request, teamInviteMatch[1]);
@@ -146,6 +156,14 @@ export async function routeApi(env: AppEnv, request: Request): Promise<Response>
   if (request.method === "DELETE" && teamLeaveMatch?.[1]) return leaveTeam(env, request, teamLeaveMatch[1]);
   const teamMemberMatch = /^\/api\/v1\/teams\/([^/]+)\/members\/([^/]+)$/.exec(url.pathname);
   if (request.method === "DELETE" && teamMemberMatch?.[1] && teamMemberMatch[2]) return removeTeamMember(env, request, teamMemberMatch[1], teamMemberMatch[2]);
+  const teamMemberReservationsMatch = /^\/api\/v1\/teams\/([^/]+)\/members\/([^/]+)\/reservations$/.exec(url.pathname);
+  if (request.method === "GET" && teamMemberReservationsMatch?.[1] && teamMemberReservationsMatch[2]) {
+    return teamMemberReservations(env, request, teamMemberReservationsMatch[1], teamMemberReservationsMatch[2]);
+  }
+  const teamMemberReservationsRefreshMatch = /^\/api\/v1\/teams\/([^/]+)\/members\/([^/]+)\/reservations\/refresh$/.exec(url.pathname);
+  if (request.method === "POST" && teamMemberReservationsRefreshMatch?.[1] && teamMemberReservationsRefreshMatch[2]) {
+    return refreshTeamMemberReservations(env, request, teamMemberReservationsRefreshMatch[1], teamMemberReservationsRefreshMatch[2]);
+  }
 
   const teamScoresMatch = /^\/api\/v1\/teams\/([^/]+)\/member-scores$/.exec(url.pathname);
   if (request.method === "GET" && teamScoresMatch?.[1]) return teamMemberScores(env, request, teamScoresMatch[1]);

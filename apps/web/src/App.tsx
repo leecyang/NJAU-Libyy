@@ -15,7 +15,6 @@ import {
   Shield,
   UserMinus,
   UsersRound,
-  X,
 } from "lucide-react";
 import { api, ApiError, type GatewayJob, waitForGatewayJob } from "./api";
 
@@ -26,6 +25,8 @@ type Route = {
   taskMode?: "list" | "new";
   teamMode?: "list" | "new";
   teamInviteId?: string;
+  teamId?: string;
+  teamMemberId?: string;
   adminCollection?: string;
 };
 type Session = {
@@ -91,7 +92,24 @@ type TimeSelection = {
   startTime: string;
   endTime: string;
 };
-type Reservation = Record<string, string | number | boolean | null>;
+export type Reservation = {
+  id: string;
+  official_reservation_id?: string | null;
+  owner_user_id?: string;
+  room_name_snapshot: string;
+  room_id: number;
+  date: string;
+  start_time: string;
+  end_time: string;
+  status: string;
+  statusLabel?: string;
+  status_label?: string;
+  canCancel?: boolean;
+  can_cancel?: boolean;
+  canOpenDoor?: boolean;
+  can_open_door?: boolean;
+  created_at?: number;
+};
 type Task = Record<string, string | number | null>;
 type ReservationParticipant = {
   id: string;
@@ -163,6 +181,26 @@ type Team = {
   is_leader?: boolean | number;
   members?: TeamMember[] | string | null;
 };
+type TeamDetailMember = {
+  id: string;
+  email: string;
+  studentId: string | null;
+  realName: string;
+  isLeader: boolean;
+  mobileBound: boolean;
+  credentialStatus: string | null;
+  totalScore: number | null;
+  scoreRefreshedAt: number | null;
+  scoreStatus: "FRESH" | "STALE" | "EXPIRED" | "MISS";
+  reservationQuota: Array<{ date: string; used: number; remaining: number; limit: number }>;
+};
+type TeamDetail = {
+  id: string;
+  name: string;
+  description: string;
+  leader_user_id: string;
+  members: TeamDetailMember[];
+};
 type TeamInvitation = {
   id: string;
   team_id: string;
@@ -171,25 +209,6 @@ type TeamInvitation = {
   created_at: number;
   team_name: string;
   inviter_name?: string;
-};
-type TeamDoorOption = {
-  id: string;
-  roomId: number;
-  roomName: string;
-  date: string;
-  startTime: string;
-  endTime: string;
-  signedInMembers: Array<{ id: string; studentId: string; realName: string }>;
-};
-type TeamDoorOptionsResult = {
-  options: TeamDoorOption[];
-  warnings: Array<{ userId: string; realName: string; message: string }>;
-};
-type TeamDoorResult = {
-  roomId: number;
-  roomName: string;
-  openedByUserId: string;
-  openedByName: string;
 };
 type InvitableUser = {
   id: string;
@@ -343,6 +362,45 @@ function toggleValue(values: string[], value: string): string[] {
   return values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
 }
 
+function reservationEndTimestamp(item: Reservation): number {
+  return new Date(`${item.date}T${item.end_time}:00+08:00`).valueOf();
+}
+
+export function isActiveReservation(item: Reservation, now = Date.now()): boolean {
+  if (["SIGNED_OUT", "CANCELLED"].includes(item.status)) return false;
+  return item.status === "SIGNED_IN" || reservationEndTimestamp(item) > now;
+}
+
+export function sortReservations(items: Reservation[], now = Date.now()): Reservation[] {
+  return [...items].sort((left, right) => {
+    const active = Number(isActiveReservation(right, now)) - Number(isActiveReservation(left, now));
+    if (active) return active;
+    const leftId = Number(left.official_reservation_id ?? Number.NEGATIVE_INFINITY);
+    const rightId = Number(right.official_reservation_id ?? Number.NEGATIVE_INFINITY);
+    if (Number.isFinite(leftId) && Number.isFinite(rightId) && leftId !== rightId) return rightId - leftId;
+    return reservationEndTimestamp(right) - reservationEndTimestamp(left) || Number(right.created_at ?? 0) - Number(left.created_at ?? 0);
+  });
+}
+
+function activeTask(task: Task): boolean {
+  return ["DRAFT", "WAITING_WINDOW", "WAITING_MEMBERS", "READY", "SUBMITTING"].includes(String(task.status));
+}
+
+function sortTasks(items: Task[]): Task[] {
+  return [...items].sort((left, right) => Number(activeTask(right)) - Number(activeTask(left))
+    || String(right.target_date ?? "").localeCompare(String(left.target_date ?? ""))
+    || String(right.start_time ?? "").localeCompare(String(left.start_time ?? "")));
+}
+
+function activeWorkflow(workflow: SignWorkflow): boolean {
+  return workflow.status === "ACTIVE" && !["SUCCESS", "DISABLED", "CANCELLED"].includes(workflow.signout_status);
+}
+
+function sortWorkflows(items: SignWorkflow[]): SignWorkflow[] {
+  return [...items].sort((left, right) => Number(activeWorkflow(right)) - Number(activeWorkflow(left))
+    || right.sign_scheduled_at - left.sign_scheduled_at);
+}
+
 function Toast({ message, error }: { message: string; error?: boolean }) {
   if (!message) return null;
   return <div className={error ? "toast error" : "toast"}>{message}</div>;
@@ -395,11 +453,19 @@ function routeFromPath(pathname: string): Route {
   const normalized = pathname.replace(/\/+$/, "") || "/";
   const roomMatch = normalized.match(/^\/rooms\/(\d+)$/);
   const adminMatch = normalized.match(/^\/admin\/([a-z-]+)$/);
+  const teamMemberReservationsMatch = normalized.match(/^\/teams\/([^/]+)\/members\/([^/]+)\/reservations$/);
   const teamInviteMatch = normalized.match(/^\/teams\/([^/]+)\/invite$/);
+  const teamDetailMatch = normalized.match(/^\/teams\/([^/]+)$/);
   if (roomMatch) return { page: "rooms", roomId: Number(roomMatch[1]) };
   if (normalized === "/tasks/new") return { page: "tasks", taskMode: "new" };
   if (normalized === "/tasks") return { page: "tasks" };
+  if (teamMemberReservationsMatch?.[1] && teamMemberReservationsMatch[2]) return {
+    page: "teams",
+    teamId: decodeURIComponent(teamMemberReservationsMatch[1]),
+    teamMemberId: decodeURIComponent(teamMemberReservationsMatch[2]),
+  };
   if (teamInviteMatch?.[1]) return { page: "teams", teamInviteId: decodeURIComponent(teamInviteMatch[1]) };
+  if (teamDetailMatch?.[1] && teamDetailMatch[1] !== "new") return { page: "teams", teamId: decodeURIComponent(teamDetailMatch[1]) };
   if (normalized === "/teams/new") return { page: "teams", teamMode: "new" };
   if (normalized === "/teams") return { page: "teams" };
   if (normalized === "/history") return { page: "history" };
@@ -441,9 +507,9 @@ type TrackerBlock = {
   disabled?: boolean;
 };
 
-function slotExpired(date: string, slot: string, now = Date.now()): boolean {
-  const end = minutesToTime(timeToMinutes(slot) + 30);
-  return new Date(`${date}T${end}:00+08:00`).valueOf() <= now;
+export function slotExpired(date: string, slot: string, now = Date.now()): boolean {
+  const start = new Date(`${date}T${slot}:00+08:00`).valueOf();
+  return start < now + 15 * 60_000;
 }
 
 function slotAvailable(ranges: AvailabilityRange[], slot: string): boolean {
@@ -478,6 +544,7 @@ function UptimeKumaTimeline({
   const segments = Array.from({ length: Math.ceil(data.length / 4) }, (_, index) => data.slice(index * 4, index * 4 + 4));
   const pointerActive = useRef(false);
   const suppressClick = useRef(false);
+  const gesture = useRef<{ pointerId: number; startX: number; startY: number; anchor: number; dragged: boolean } | null>(null);
 
   function pointerIndex(clientX: number, clientY: number): number | null {
     const element = document.elementFromPoint(clientX, clientY)?.closest<HTMLElement>("[data-time-index]");
@@ -494,25 +561,36 @@ function UptimeKumaTimeline({
         const index = pointerIndex(event.clientX, event.clientY);
         if (index === null || data[index]?.disabled) return;
         pointerActive.current = true;
-        suppressClick.current = true;
+        gesture.current = { pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, anchor: index, dragged: false };
         event.currentTarget.setPointerCapture(event.pointerId);
-        onDragStart(index);
       } : undefined}
       onPointerMove={onDragMove ? (event) => {
-        if (!pointerActive.current) return;
+        const current = gesture.current;
+        if (!pointerActive.current || !current || current.pointerId !== event.pointerId) return;
+        if (!current.dragged && Math.hypot(event.clientX - current.startX, event.clientY - current.startY) < 5) return;
+        if (!current.dragged) {
+          current.dragged = true;
+          onDragStart?.(current.anchor);
+        }
         const index = pointerIndex(event.clientX, event.clientY);
         if (index !== null && !data[index]?.disabled) onDragMove(index);
       } : undefined}
       onPointerUp={onDragEnd ? (event) => {
-        if (!pointerActive.current) return;
+        const current = gesture.current;
+        if (!pointerActive.current || !current || current.pointerId !== event.pointerId) return;
         pointerActive.current = false;
         event.currentTarget.releasePointerCapture(event.pointerId);
-        onDragEnd();
+        gesture.current = null;
+        suppressClick.current = true;
+        if (current.dragged) onDragEnd();
+        else onSelect?.(current.anchor);
       } : undefined}
       onPointerCancel={onDragEnd ? () => {
         if (!pointerActive.current) return;
         pointerActive.current = false;
-        onDragEnd();
+        const dragged = gesture.current?.dragged;
+        gesture.current = null;
+        if (dragged) onDragEnd();
       } : undefined}
     >
       {segments.map((segment, segmentIndex) => (
@@ -1071,9 +1149,9 @@ function RoomDetailPage({
       if (refresh) {
         const job = await api<GatewayJob>("/api/v1/rooms/refresh", { method: "POST" });
         await waitForGatewayJob(job);
+        const participantRefresh = await api<GatewayJob | { participants: ReservationParticipant[] }>("/api/v1/reservation-participants/refresh", { method: "POST" });
+        if ("jobId" in participantRefresh) await waitForGatewayJob(participantRefresh);
       }
-      const participantRefresh = await api<GatewayJob | { participants: ReservationParticipant[] }>("/api/v1/reservation-participants/refresh", { method: "POST" });
-      if ("jobId" in participantRefresh) await waitForGatewayJob(participantRefresh);
       const [response, participantData] = await Promise.all([
         api<RoomsResponse>("/api/v1/rooms"),
         api<{ participants: ReservationParticipant[] }>(`/api/v1/reservation-participants?${fallbackDates.map((date) => `date=${encodeURIComponent(date)}`).join("&")}`),
@@ -1220,10 +1298,12 @@ function TasksPage({
   }), [targetDate]);
   const selectedReservationOption = reservationOptions.find((option) => option.id === reservationOptionId) ?? null;
 
-  async function load() {
+  async function load(refresh = false) {
     try {
-      const participantRefresh = await api<GatewayJob | { participants: ReservationParticipant[] }>("/api/v1/reservation-participants/refresh", { method: "POST" });
-      if ("jobId" in participantRefresh) await waitForGatewayJob(participantRefresh);
+      if (refresh) {
+        const participantRefresh = await api<GatewayJob | { participants: ReservationParticipant[] }>("/api/v1/reservation-participants/refresh", { method: "POST" });
+        if ("jobId" in participantRefresh) await waitForGatewayJob(participantRefresh);
+      }
       const [reservationTasks, signWorkflows, roomResponse, participantResponse] = await Promise.all([
         api<Task[]>("/api/v1/reservation-tasks"),
         api<SignWorkflow[]>("/api/v1/sign-workflows").catch(() => []),
@@ -1293,16 +1373,22 @@ function TasksPage({
     }
   }
 
-  async function refreshOptions() {
+  async function refreshOptions(refresh = true) {
     setOptionBusy(true);
     try {
-      const response = await api<GatewayJob<{ options: ReservationOption[] }> | { options: ReservationOption[] }>("/api/v1/reservation-options/refresh", {
-        method: "POST",
-      });
+      type ReservationOptionsResult = { options: ReservationOption[]; warnings: Array<{ userId: string; realName: string; message: string }> };
+      const response = await api<GatewayJob<ReservationOptionsResult> | ReservationOptionsResult>(
+        refresh ? "/api/v1/reservation-options/refresh" : "/api/v1/reservation-options",
+        refresh ? { method: "POST" } : undefined,
+      );
       const result = "jobId" in response ? await waitForGatewayJob(response) : response;
       setReservationOptions(result.options);
       setReservationOptionId(result.options[0]?.id ?? "");
-      toast(result.options.length ? `找到 ${result.options.length} 条进行中的预约` : "没有找到可管理的预约", !result.options.length);
+      if (result.warnings.length) {
+        toast(`已跳过 ${result.warnings.map((warning) => `${warning.realName}：${warning.message}`).join("；")}`, true);
+      } else {
+        toast(result.options.length ? `找到 ${result.options.length} 条进行中的预约` : "没有找到可管理的预约", !result.options.length);
+      }
     } catch (error) {
       toast(error instanceof Error ? error.message : "查找预约失败", true);
     } finally {
@@ -1345,7 +1431,7 @@ function TasksPage({
               setReservationOptions([]);
               setReservationOptionId("");
               setTaskTimeSelection(null);
-              if (next === "sign") void refreshOptions();
+              if (next === "sign") void refreshOptions(false);
             }}>
               <option value="reservation">开放后尝试预约</option>
               <option value="sign">按时签到与签退</option>
@@ -1368,7 +1454,7 @@ function TasksPage({
             <>
               <div className="form-grid-wide reservation-option-panel">
                 <div className="toolbar">
-                  <Button type="button" variant="secondary" busy={optionBusy} onClick={() => void refreshOptions()}><RefreshCw size={16} />查找已有预约</Button>
+                  <Button type="button" variant="secondary" busy={optionBusy} onClick={() => void refreshOptions(true)}><RefreshCw size={16} />更新已有预约</Button>
                 </div>
                 <Field label="已有预约">
                   <select value={reservationOptionId} onChange={(event) => setReservationOptionId(event.target.value)} required>
@@ -1407,15 +1493,15 @@ function TasksPage({
       <Card title="我的提前安排" icon={<History size={20} />}>
         <div className="toolbar page-toolbar">
           <Button type="button" onClick={() => navigate("/tasks/new")}><ClipboardList size={16} />新增安排</Button>
-          <Button type="button" variant="secondary" onClick={load}><RefreshCw size={16} />更新安排</Button>
+          <Button type="button" variant="secondary" onClick={() => void load(true)}><RefreshCw size={16} />更新安排</Button>
         </div>
         <div className="task-sections">
           <section className="task-section">
             <div className="section-subtitle"><strong>预约开放后提交</strong><span>{tasks.length} 项</span></div>
             <div className="list">
-              {tasks.map((task) => (
-                <article className="list-row" key={String(task.id)}>
-                  <div><strong>{String(task.target_date)} {String(task.start_time)}-{String(task.end_time)}</strong><span>{statusText(task.status as string | number | null | undefined)} · {taskCandidateText(task)}</span></div>
+              {sortTasks(tasks).map((task) => (
+                <article className={`list-row${activeTask(task) ? " active-record" : ""}`} key={String(task.id)}>
+                  <div><strong>{String(task.target_date)} {String(task.start_time)}-{String(task.end_time)}{activeTask(task) ? <em className="active-badge">进行中</em> : null}</strong><span>{statusText(task.status as string | number | null | undefined)} · {taskCandidateText(task)}</span></div>
                   <div className="row-actions">
                     {["DRAFT", "WAITING_WINDOW", "WAITING_MEMBERS", "READY"].includes(String(task.status)) ? <Button variant="ghost" onClick={() => action(String(task.id), "cancel")}>取消</Button> : null}
                   </div>
@@ -1427,10 +1513,10 @@ function TasksPage({
           <section className="task-section">
             <div className="section-subtitle"><strong>签到签退</strong><span>{workflows.length} 项</span></div>
             <div className="list">
-              {workflows.map((workflow) => (
-                <article className="list-row" key={workflow.id}>
+              {sortWorkflows(workflows).map((workflow) => (
+                <article className={`list-row${activeWorkflow(workflow) ? " active-record" : ""}`} key={workflow.id}>
                   <div>
-                    <strong>{workflow.room_name_snapshot} · {workflow.date} {workflow.start_time}-{workflow.end_time}</strong>
+                    <strong>{workflow.room_name_snapshot} · {workflow.date} {workflow.start_time}-{workflow.end_time}{activeWorkflow(workflow) ? <em className="active-badge">进行中</em> : null}</strong>
                     <span>{statusText(workflow.status)} · 签到 {formatTimestamp(workflow.sign_scheduled_at)} · 签退 {formatTimestamp(workflow.signout_scheduled_at)}</span>
                     <span>{workflow.participants.map((participant) => `${participant.realName}: ${statusText(participant.signStatus)}`).join(" · ")} · 签退 {statusText(workflow.signout_status)}</span>
                   </div>
@@ -1443,6 +1529,177 @@ function TasksPage({
             </div>
           </section>
         </div>
+      </Card>
+    </div>
+  );
+}
+
+function TeamMemberReservationsPage({
+  teamId,
+  memberId,
+  toast,
+  navigate,
+}: {
+  teamId: string;
+  memberId: string;
+  toast: (message: string, error?: boolean) => void;
+  navigate: (path: string) => void;
+}) {
+  const [items, setItems] = useState<Reservation[]>([]);
+  const [memberName, setMemberName] = useState("队员");
+  const [cache, setCache] = useState<{ status: string; refreshedAt: number | null }>({ status: "MISS", refreshedAt: null });
+  const [busy, setBusy] = useState(false);
+
+  async function load(refresh = false) {
+    setBusy(true);
+    try {
+      const base = `/api/v1/teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(memberId)}/reservations`;
+      if (refresh) {
+        const response = await api<GatewayJob>(`${base}/refresh`, { method: "POST" });
+        if ("jobId" in response) await waitForGatewayJob(response);
+      }
+      const result = await api<{ member: { id: string; realName: string }; reservations: Reservation[]; cache: { status: string; refreshedAt: number | null } }>(base);
+      setItems(result.reservations);
+      setMemberName(result.member.realName);
+      setCache(result.cache);
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "加载预约记录失败", true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  useEffect(() => { void load(); }, [teamId, memberId]);
+
+  async function action(id: string, actionName: ReservationAction) {
+    try {
+      const response = await api<GatewayJob<{ roomName?: string }> | { roomName?: string }>(`/api/v1/reservations/${id}/${actionName}`, { method: "POST" });
+      const result = "jobId" in response ? await waitForGatewayJob(response) : response;
+      toast(actionName === "open-door" ? `${result.roomName ?? "研讨间"} 开门成功` : "预约已更新");
+      await load();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "操作失败", true);
+    }
+  }
+
+  return (
+    <div className="compact-page">
+      <button className="back-button" type="button" onClick={() => navigate(`/teams/${encodeURIComponent(teamId)}`)}><ChevronLeft size={18} />返回小队详情</button>
+      <Card title={`${memberName}的预约记录`} icon={<History size={20} />}>
+        <div className="toolbar page-toolbar">
+          <small className={`cache-status ${cache.status.toLowerCase()}`}>{cache.refreshedAt ? `缓存更新于 ${formatTimestamp(cache.refreshedAt)}` : "尚无预约缓存"}</small>
+          <Button type="button" variant="secondary" busy={busy} onClick={() => void load(true)}><RefreshCw size={16} />更新预约记录</Button>
+        </div>
+        <ReservationRecords items={sortReservations(items)} onAction={(id, name) => void action(id, name)} emptyText="该队员还没有预约记录。" />
+      </Card>
+    </div>
+  );
+}
+
+function TeamDetailPage({
+  teamId,
+  toast,
+  navigate,
+}: {
+  teamId: string;
+  toast: (message: string, error?: boolean) => void;
+  navigate: (path: string) => void;
+}) {
+  const [team, setTeam] = useState<TeamDetail | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function load(refresh = false) {
+    setBusy(true);
+    try {
+      if (refresh) {
+        const response = await api<GatewayJob | { members: unknown[] }>(`/api/v1/teams/${encodeURIComponent(teamId)}/member-metrics`, { method: "POST" });
+        if ("jobId" in response) await waitForGatewayJob(response);
+      }
+      setTeam(await api<TeamDetail>(`/api/v1/teams/${encodeURIComponent(teamId)}`));
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "加载小队详情失败", true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  useEffect(() => { void load(); }, [teamId]);
+
+  async function save(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    try {
+      await api(`/api/v1/teams/${encodeURIComponent(teamId)}`, { method: "PATCH", body: JSON.stringify(formData(event.currentTarget)) });
+      toast("小队资料已更新");
+      await load();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "保存失败", true);
+    }
+  }
+
+  async function removeMember(member: TeamDetailMember) {
+    if (!window.confirm(`确认将 ${member.realName} 移出小队？`)) return;
+    try {
+      await api(`/api/v1/teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(member.id)}`, { method: "DELETE" });
+      toast("队员已移出");
+      await load();
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "操作失败", true);
+    }
+  }
+
+  async function deleteCurrentTeam() {
+    if (!team || !window.confirm(`确认解散小队“${team.name}”？`)) return;
+    try {
+      await api(`/api/v1/teams/${encodeURIComponent(teamId)}`, { method: "DELETE" });
+      toast("小队已解散");
+      navigate("/teams");
+    } catch (error) {
+      toast(error instanceof Error ? error.message : "解散失败", true);
+    }
+  }
+
+  return (
+    <div className="compact-page">
+      <button className="back-button" type="button" onClick={() => navigate("/teams")}><ChevronLeft size={18} />返回同行成员</button>
+      <Card title="小队详情" icon={<UsersRound size={20} />}>
+        {!team && busy ? <Empty>正在加载小队详情</Empty> : null}
+        {team ? (
+          <div className="team-detail-layout">
+            <form className="form-grid team-detail-form" onSubmit={save}>
+              <Field label="小队名称"><input name="name" defaultValue={team.name} required maxLength={40} /></Field>
+              <Field label="小队简介"><input name="description" defaultValue={team.description} maxLength={240} /></Field>
+              <div className="row-actions form-grid-wide">
+                <Button type="button" variant="secondary" busy={busy} onClick={() => void load(true)}><RefreshCw size={16} />更新成员信息</Button>
+                <Button type="submit">保存资料</Button>
+                <Button type="button" variant="ghost" onClick={() => void deleteCurrentTeam()}>解散小队</Button>
+              </div>
+            </form>
+            <div className="section-subtitle"><strong>队员详情</strong><span>{team.members.length} 人</span></div>
+            <div className="team-member-grid">
+              {team.members.map((member) => {
+                const quota = member.reservationQuota.find((item) => item.date === today());
+                return (
+                  <article className={`team-member-card detail ${member.isLeader ? "leader" : ""}`} key={member.id}>
+                    <button type="button" className="team-member-open" onClick={() => navigate(`/teams/${encodeURIComponent(teamId)}/members/${encodeURIComponent(member.id)}/reservations`)}>
+                      <div className="team-member-avatar" aria-hidden="true">{member.realName.trim().slice(0, 1).toUpperCase()}</div>
+                      <div className="team-member-info">
+                        <div className="team-member-name"><strong>{member.realName}</strong><span>{member.isLeader ? "队长" : "队友"}</span></div>
+                        <small>{member.studentId ?? "学号待同步"} · {member.email}</small>
+                        <small>{member.mobileBound ? "手机号已绑定" : "手机号未绑定，预约功能受限"}</small>
+                        <small>{member.totalScore == null ? "积分待确认" : `${member.totalScore} 分`}{quota ? ` · 今日剩余 ${quota.remaining}/${quota.limit} 次` : ""} · {member.scoreRefreshedAt ? formatTimestamp(member.scoreRefreshedAt) : "未缓存"}</small>
+                      </div>
+                    </button>
+                    {!member.isLeader ? <button type="button" className="team-member-action" aria-label={`将 ${member.realName} 移出小队`} onClick={() => void removeMember(member)}><UserMinus size={15} /></button> : null}
+                  </article>
+                );
+              })}
+              <button type="button" className="team-member-card invite-card" onClick={() => navigate(`/teams/${encodeURIComponent(teamId)}/invite`)}>
+                <div className="team-member-avatar"><Mail size={17} /></div>
+                <div className="team-member-info"><strong>邀请成员</strong><small>添加新的同行队友</small></div>
+              </button>
+            </div>
+          </div>
+        ) : null}
       </Card>
     </div>
   );
@@ -1468,9 +1725,6 @@ function TeamsPage({
     totalScore: number | null;
     reservationQuota: Array<{ date: string; remaining: number; limit: number }>;
   }>>>({});
-  const [doorBusyTeamId, setDoorBusyTeamId] = useState("");
-  const [openingOptionId, setOpeningOptionId] = useState("");
-  const [doorSelection, setDoorSelection] = useState<{ team: Team; options: TeamDoorOption[] } | null>(null);
 
   async function load(refreshScores = false) {
     try {
@@ -1502,7 +1756,7 @@ function TeamsPage({
       toast(error instanceof Error ? error.message : "加载失败", true);
     }
   }
-  useEffect(() => { void load(true); }, []);
+  useEffect(() => { void load(false); }, []);
 
   async function create(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1546,52 +1800,6 @@ function TeamsPage({
       await load(true);
     } catch (error) {
       toast(error instanceof Error ? error.message : "操作失败", true);
-    }
-  }
-
-  async function resolveGatewayResult<T>(response: GatewayJob<T> | T): Promise<T> {
-    return response && typeof response === "object" && "jobId" in response
-      ? waitForGatewayJob(response as GatewayJob<T>)
-      : response as T;
-  }
-
-  async function openDoor(team: Team, option: TeamDoorOption) {
-    setOpeningOptionId(option.id);
-    try {
-      const response = await api<GatewayJob<TeamDoorResult> | TeamDoorResult>(`/api/v1/teams/${encodeURIComponent(team.id)}/open-door`, {
-        method: "POST",
-        body: JSON.stringify({ optionId: option.id }),
-      });
-      const result = await resolveGatewayResult(response);
-      setDoorSelection(null);
-      toast(`${result.roomName} 开门成功，使用了 ${result.openedByName} 的已签到预约`);
-    } catch (error) {
-      toast(error instanceof Error ? error.message : "开门失败", true);
-    } finally {
-      setOpeningOptionId("");
-    }
-  }
-
-  async function findDoorOptions(team: Team) {
-    setDoorBusyTeamId(team.id);
-    try {
-      const response = await api<GatewayJob<TeamDoorOptionsResult> | TeamDoorOptionsResult>(`/api/v1/teams/${encodeURIComponent(team.id)}/door-options`, {
-        method: "POST",
-      });
-      const result = await resolveGatewayResult(response);
-      if (!result.options.length) {
-        toast(result.warnings.length ? "没有可开门的预约，部分成员预约读取失败" : "当前没有已签到且正在进行的预约", true);
-        return;
-      }
-      if (result.options.length === 1) {
-        await openDoor(team, result.options[0]!);
-        return;
-      }
-      setDoorSelection({ team, options: result.options });
-    } catch (error) {
-      toast(error instanceof Error ? error.message : "查询可开门预约失败", true);
-    } finally {
-      setDoorBusyTeamId("");
     }
   }
 
@@ -1690,25 +1898,17 @@ function TeamsPage({
               <div className="team-card-content">
                 <div className="team-card-heading">
                   <div>
-                    <strong>{team.name}</strong>
+                    {isTeamLeader(team) ? <button type="button" className="team-title-button" onClick={() => navigate(`/teams/${encodeURIComponent(team.id)}`)}><strong>{team.name}</strong></button> : <strong>{team.name}</strong>}
                     <span>{team.description || "暂未填写小队说明"} · {visibleTeamMembers(team).length} 人 · {isTeamLeader(team) ? "由我创建" : "我已加入"}</span>
                   </div>
                   <div className="row-actions team-actions">
-                    {isTeamLeader(team) ? <Button type="button" busy={doorBusyTeamId === team.id} onClick={() => void findDoorOptions(team)}><DoorOpen size={16} />开门</Button> : null}
-                    {isTeamLeader(team) ? <Button type="button" variant="secondary" onClick={() => navigate(`/teams/${encodeURIComponent(team.id)}/invite`)}>邀请成员</Button> : null}
-                    {isTeamLeader(team) ? (
-                      <Button type="button" variant="ghost" onClick={() => void manageTeam(
-                        `/api/v1/teams/${encodeURIComponent(team.id)}`,
-                        `确认解散小队“${team.name}”？`,
-                        "小队已解散",
-                      )}>解散小队</Button>
-                    ) : (
+                    {!isTeamLeader(team) ? (
                       <Button type="button" variant="ghost" onClick={() => void manageTeam(
                         `/api/v1/teams/${encodeURIComponent(team.id)}/members/me`,
                         `确认退出小队“${team.name}”？`,
                         "已退出小队",
                       )}>退出小队</Button>
-                    )}
+                    ) : null}
                   </div>
                 </div>
                 <div className="team-member-grid">
@@ -1733,6 +1933,12 @@ function TeamsPage({
                       </article>
                     );
                   })}
+                  {isTeamLeader(team) ? (
+                    <button type="button" className="team-member-card invite-card" onClick={() => navigate(`/teams/${encodeURIComponent(team.id)}/invite`)}>
+                      <div className="team-member-avatar"><Mail size={17} /></div>
+                      <div className="team-member-info"><strong>邀请成员</strong><small>添加新的同行队友</small></div>
+                    </button>
+                  ) : null}
                 </div>
               </div>
             </article>
@@ -1740,30 +1946,41 @@ function TeamsPage({
           {!teams.length ? <Empty>这里还没有同行成员。新建一个小队，邀请经常一起预约的同学加入。</Empty> : null}
         </div>
       </Card>
-      {doorSelection ? (
-        <div className="dialog-backdrop" role="presentation" onMouseDown={(event) => {
-          if (event.target === event.currentTarget && !openingOptionId) setDoorSelection(null);
-        }}>
-          <section className="door-dialog" role="dialog" aria-modal="true" aria-labelledby="door-dialog-title">
-            <div className="door-dialog-head">
-              <div><span className="eyebrow">{doorSelection.team.name}</span><h3 id="door-dialog-title">选择要打开的预约</h3></div>
-              <button type="button" className="dialog-close" aria-label="关闭" disabled={Boolean(openingOptionId)} onClick={() => setDoorSelection(null)}><X size={18} /></button>
+    </div>
+  );
+}
+
+type ReservationAction = "cancel" | "signout" | "open-door";
+
+function ReservationRecords({
+  items,
+  onAction,
+  emptyText,
+}: {
+  items: Reservation[];
+  onAction: (id: string, action: ReservationAction) => void;
+  emptyText: string;
+}) {
+  return (
+    <div className="list">
+      {items.map((item) => {
+        const active = isActiveReservation(item);
+        const signedIn = item.status === "SIGNED_IN";
+        return (
+          <article className={`list-row${active ? " active-record" : ""}`} key={item.id}>
+            <div>
+              <strong>{item.room_name_snapshot} · {item.date} {item.start_time}-{item.end_time}{active ? <em className="active-badge">进行中</em> : null}</strong>
+              <span>{String(item.statusLabel ?? item.status_label ?? item.status)} · 预约编号 {String(item.official_reservation_id ?? "正在获取")}</span>
             </div>
-            <div className="door-option-list">
-              {doorSelection.options.map((option) => (
-                <article className="door-option" key={option.id}>
-                  <div>
-                    <strong>{option.roomName}</strong>
-                    <span>{option.date} · {option.startTime}-{option.endTime}</span>
-                    <small>已签到：{option.signedInMembers.map((member) => member.realName).join("、")}</small>
-                  </div>
-                  <Button type="button" busy={openingOptionId === option.id} disabled={Boolean(openingOptionId)} onClick={() => void openDoor(doorSelection.team, option)}><DoorOpen size={16} />开门</Button>
-                </article>
-              ))}
+            <div className="row-actions">
+              {signedIn ? <Button onClick={() => onAction(item.id, "open-door")}><DoorOpen size={16} />开门</Button> : null}
+              {signedIn ? <Button variant="secondary" onClick={() => onAction(item.id, "signout")}>签退</Button> : null}
+              {!signedIn && (item.canCancel || item.can_cancel) ? <Button variant="ghost" onClick={() => onAction(item.id, "cancel")}>取消</Button> : null}
             </div>
-          </section>
-        </div>
-      ) : null}
+          </article>
+        );
+      })}
+      {!items.length ? <Empty>{emptyText}</Empty> : null}
     </div>
   );
 }
@@ -1787,16 +2004,17 @@ function HistoryPage({ toast }: { toast: (message: string, error?: boolean) => v
   }
   useEffect(() => { void load(); }, []);
 
-  const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+  const sortedItems = sortReservations(items);
+  const totalPages = Math.max(1, Math.ceil(sortedItems.length / pageSize));
   const currentPage = Math.min(page, totalPages);
-  const visibleItems = items.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const visibleItems = sortedItems.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
-  async function action(id: string, actionName: "cancel" | "signout") {
+  async function action(id: string, actionName: ReservationAction) {
     try {
-      const job = await api<GatewayJob<{ url?: string }>>(`/api/v1/reservations/${id}/${actionName}`, { method: "POST" });
-      const result = await waitForGatewayJob(job);
+      const response = await api<GatewayJob<{ url?: string; roomName?: string }> | { url?: string; roomName?: string }>(`/api/v1/reservations/${id}/${actionName}`, { method: "POST" });
+      const result = "jobId" in response ? await waitForGatewayJob(response) : response;
       if (result.url) window.open(result.url, "_blank", "noopener,noreferrer");
-      toast("预约已更新");
+      toast(actionName === "open-door" ? `${result.roomName ?? "研讨间"} 开门成功` : "预约已更新");
       await load();
     } catch (error) {
       toast(error instanceof Error ? error.message : "操作失败", true);
@@ -1806,21 +2024,7 @@ function HistoryPage({ toast }: { toast: (message: string, error?: boolean) => v
   return (
     <Card title="我的预约" icon={<History size={20} />}>
       <div className="toolbar desktop-only-toolbar"><Button type="button" variant="secondary" onClick={() => load(true)}><RefreshCw size={16} />更新预约记录</Button></div>
-      <div className="list">
-        {visibleItems.map((item) => (
-          <article className="list-row" key={String(item.id)}>
-            <div>
-              <strong>{item.room_name_snapshot} · {item.date} {item.start_time}-{item.end_time}</strong>
-              <span>{String(item.statusLabel ?? item.status_label ?? item.status)} · 预约编号 {String(item.official_reservation_id ?? "正在获取")}</span>
-            </div>
-            <div className="row-actions">
-              {item.status === "SIGNED_IN" ? <Button variant="secondary" onClick={() => action(String(item.id), "signout")}>签退</Button> : null}
-              {item.canCancel || item.can_cancel ? <Button variant="ghost" onClick={() => action(String(item.id), "cancel")}>取消</Button> : null}
-            </div>
-          </article>
-        ))}
-        {!items.length ? <Empty>还没有预约记录。从研讨间页面选择一个空闲时段开始吧。</Empty> : null}
-      </div>
+      <ReservationRecords items={visibleItems} onAction={(id, name) => void action(id, name)} emptyText="还没有预约记录。从研讨间页面选择一个空闲时段开始吧。" />
       {items.length > pageSize ? (
         <div className="pagination">
           <Button type="button" variant="secondary" disabled={currentPage <= 1} onClick={() => setPage((value) => Math.max(1, value - 1))}>上一页</Button>
@@ -1963,7 +2167,9 @@ export function App() {
         {route.page === "rooms" && !route.roomId ? <RoomsPage toast={toast} navigate={navigate} /> : null}
         {route.page === "rooms" && route.roomId ? <RoomDetailPage roomId={route.roomId} session={session} toast={toast} navigate={navigate} /> : null}
         {route.page === "tasks" ? <TasksPage toast={toast} navigate={navigate} mode={route.taskMode ?? "list"} /> : null}
-        {route.page === "teams" ? <TeamsPage toast={toast} navigate={navigate} mode={route.teamMode ?? "list"} inviteTeamId={route.teamInviteId} /> : null}
+        {route.page === "teams" && route.teamId && route.teamMemberId ? <TeamMemberReservationsPage teamId={route.teamId} memberId={route.teamMemberId} toast={toast} navigate={navigate} /> : null}
+        {route.page === "teams" && route.teamId && !route.teamMemberId ? <TeamDetailPage teamId={route.teamId} toast={toast} navigate={navigate} /> : null}
+        {route.page === "teams" && !route.teamId ? <TeamsPage toast={toast} navigate={navigate} mode={route.teamMode ?? "list"} inviteTeamId={route.teamInviteId} /> : null}
         {route.page === "history" ? <HistoryPage toast={toast} /> : null}
         {route.page === "admin" ? <AdminPage toast={toast} navigate={navigate} collection={route.adminCollection ?? "users"} /> : null}
       </main>

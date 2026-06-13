@@ -898,6 +898,24 @@ input:focus, textarea:focus, select:focus { border-color: var(--ink); box-shadow
   border-radius: var(--radius-md);
   background: var(--canvas);
 }
+.list-row.active-record {
+  border-color: #a7f3d0;
+  background: #f0fdf4;
+  box-shadow: inset 3px 0 0 #10b981;
+}
+.active-badge {
+  display: inline-flex;
+  align-items: center;
+  margin-left: 8px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #d1fae5;
+  color: #047857;
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 700;
+  vertical-align: middle;
+}
 .list-row > div:first-child { display: grid; gap: 4px; min-width: 0; }
 .row-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
 .team-card { display: block; padding: 20px; }
@@ -906,6 +924,9 @@ input:focus, textarea:focus, select:focus { border-color: var(--ink); box-shadow
 .team-card-heading > div:first-child { display: grid; gap: 5px; min-width: 0; }
 .team-card-heading > div:first-child > strong { font-size: 17px; }
 .team-card-heading > div:first-child > span { color: var(--muted); line-height: 1.45; }
+.team-title-button { width: fit-content; padding: 0; border: 0; background: transparent; color: var(--ink); text-align: left; }
+.team-title-button strong { font-size: 17px; }
+.team-title-button:hover, .team-title-button:focus-visible { text-decoration: underline; text-underline-offset: 4px; }
 .team-member-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
 .team-member-card {
   position: relative;
@@ -922,6 +943,13 @@ input:focus, textarea:focus, select:focus { border-color: var(--ink); box-shadow
 }
 .team-member-card:hover { border-color: #d4d4d8; background: #fafafa; }
 .team-member-card.leader { border-color: #d4d4d8; background: var(--canvas); }
+.team-member-card.invite-card { cursor: pointer; border-style: dashed; color: var(--ink); text-align: left; }
+.team-member-card.invite-card:hover { border-color: var(--ink); }
+.team-member-card.detail { grid-template-columns: minmax(0, 1fr) auto; padding: 0; overflow: hidden; }
+.team-member-open { min-width: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 11px; padding: 14px 10px 14px 14px; border: 0; background: transparent; color: inherit; text-align: left; }
+.team-member-card.detail .team-member-action { margin-right: 10px; }
+.team-detail-layout { display: grid; gap: 22px; }
+.team-detail-form { padding-bottom: 20px; border-bottom: 1px solid var(--hairline); }
 .team-member-avatar { width: 38px; height: 38px; display: grid; place-items: center; border-radius: 50%; background: var(--ink); color: #fff; font-size: 14px; font-weight: 700; }
 .team-member-card:not(.leader) .team-member-avatar { background: #e4e4e7; color: var(--ink); }
 .team-member-info { display: grid; gap: 5px; min-width: 0; }

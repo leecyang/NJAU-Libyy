@@ -45,6 +45,7 @@ vi.mock("../src/lib/official", () => ({
   judgeOfficialReservationUsers: vi.fn(),
   searchOfficialUsers: vi.fn(),
   signOutOfficialReservation: vi.fn(),
+  submitOfficialSign: vi.fn(),
   submitOfficialReservation: vi.fn(),
   verifyOfficialRoomPolicy: vi.fn(),
 }));
