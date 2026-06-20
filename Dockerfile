@@ -31,6 +31,7 @@ RUN groupadd --gid 1001 appuser \
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/apps/web/dist ./apps/web/dist
 COPY migrations ./migrations
+COPY scripts/promote-admin.mjs ./scripts/promote-admin.mjs
 COPY scripts/docker-entrypoint.sh /usr/local/bin/njau-libyy-entrypoint
 RUN chmod +x /usr/local/bin/njau-libyy-entrypoint \
     && mkdir -p /data/playwright-profiles && chown -R appuser:appuser /app /data

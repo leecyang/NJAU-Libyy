@@ -10,6 +10,7 @@
     "build:server": "esbuild src/node/server.ts --bundle --minify --platform=node --format=esm --target=node22 --outfile=dist/server/node/server.js --external:better-sqlite3 --external:dotenv --external:playwright --external:playwright-core",
     "build": "npm run build:web && npm run build:server",
     "start": "node dist/server/node/server.js",
+    "admin:promote": "node scripts/promote-admin.mjs",
     "typecheck": "tsc --noEmit && tsc -p apps/web/tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit",
     "check": "npm run typecheck && npm run build"
   },

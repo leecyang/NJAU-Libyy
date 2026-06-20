@@ -74,6 +74,18 @@ docker compose up -d --build
 Invoke-WebRequest http://127.0.0.1:3000/api/v1/health
 ```
 
+首次注册的账号会自动成为管理员。已有数据库升级时，如果当前没有任何管理员，迁移会把最早创建的活跃用户提升为管理员。需要手动指定某个账号为管理员时：
+
+```bash
+docker compose exec app node scripts/promote-admin.mjs --email user@example.com
+```
+
+本地开发也可以直接操作指定 SQLite 文件：
+
+```powershell
+npm run admin:promote -- --email user@example.com --db .local-data/njau-libyy-preview.sqlite
+```
+
 ## GitHub Actions 预构建并上传 R2
 
 `main` 分支每次 push 后，GitHub Actions 会先执行 `npm run typecheck` 和 `npm run build`，然后构建生产 Docker 镜像，将镜像 tar 包、release compose 文件和 manifest 上传到 Cloudflare R2：

@@ -83,8 +83,8 @@ export async function register(env: AppEnv, request: Request): Promise<Response>
   try {
     await env.DB.batch([
       env.DB.prepare(
-        `INSERT INTO users (id, email, email_verified_at, password_hash, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO users (id, email, email_verified_at, password_hash, role, created_at, updated_at)
+         VALUES (?, ?, ?, ?, CASE WHEN NOT EXISTS (SELECT 1 FROM users) THEN 'ADMIN' ELSE 'USER' END, ?, ?)`,
       ).bind(userId, email, now, passwordHash, now, now),
       consumeCode(env, verificationCode.id, now),
     ]);
@@ -93,7 +93,16 @@ export async function register(env: AppEnv, request: Request): Promise<Response>
     if (existing) throw new HttpError(409, "EMAIL_ALREADY_REGISTERED", "该邮箱已注册");
     throw error;
   }
-  await audit(env.DB, { actorUserId: userId, actorType: "USER", action: "ACCOUNT_REGISTERED", targetType: "USER", targetId: userId, result: "SUCCESS" });
+  const registeredUser = await env.DB.prepare("SELECT role FROM users WHERE id = ?").bind(userId).first<{ role: "USER" | "ADMIN" }>();
+  await audit(env.DB, {
+    actorUserId: userId,
+    actorType: registeredUser?.role === "ADMIN" ? "ADMIN" : "USER",
+    action: "ACCOUNT_REGISTERED",
+    targetType: "USER",
+    targetId: userId,
+    result: "SUCCESS",
+    metadata: { role: registeredUser?.role ?? "USER" },
+  });
   return ok({ registered: true });
 }
 
