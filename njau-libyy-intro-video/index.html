@@ -1,0 +1,557 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1920, height=1080" />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+      }
+
+      html,
+      body {
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background: #f7f7f6;
+        color: #18181b;
+        font-family: "Segoe UI", sans-serif;
+      }
+
+      #root {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        overflow: hidden;
+        background:
+          linear-gradient(135deg, rgba(255,255,255,0.94), rgba(244,244,245,0.96)),
+          repeating-linear-gradient(90deg, rgba(24,24,27,0.035) 0 1px, transparent 1px 96px);
+      }
+
+      .scene {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        display: grid;
+        grid-template-columns: 430px minmax(0, 1fr);
+        gap: 48px;
+        padding: 72px 92px;
+        align-items: center;
+        overflow: hidden;
+      }
+
+      .scene.full {
+        grid-template-columns: 1fr;
+        padding: 78px 100px 64px;
+      }
+
+      .scene.dark {
+        background: #18181b;
+        color: #ffffff;
+      }
+
+      .copy {
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 22px;
+        z-index: 3;
+      }
+
+      .brand {
+        display: inline-flex;
+        width: max-content;
+        align-items: center;
+        gap: 10px;
+        color: #18181b;
+        font-size: 16px;
+        font-weight: 800;
+        letter-spacing: 0;
+      }
+
+      .brand::before {
+        width: 11px;
+        height: 11px;
+        border-radius: 50%;
+        background: #18181b;
+        content: "";
+      }
+
+      .dark .brand,
+      .dark .eyebrow,
+      .dark h1,
+      .dark h2 {
+        color: #ffffff;
+      }
+
+      .dark .brand::before {
+        background: #ffffff;
+      }
+
+      .eyebrow {
+        color: #71717a;
+        font-size: 14px;
+        font-weight: 750;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        max-width: 720px;
+        color: #18181b;
+        font-size: 66px;
+        font-weight: 760;
+        line-height: 0.98;
+        letter-spacing: 0;
+      }
+
+      h2 {
+        color: #18181b;
+        font-size: 48px;
+        font-weight: 740;
+        line-height: 1.08;
+        letter-spacing: 0;
+      }
+
+      p {
+        max-width: 520px;
+        color: #52525b;
+        font-size: 25px;
+        line-height: 1.48;
+      }
+
+      .dark p {
+        color: #d4d4d8;
+      }
+
+      .points {
+        display: grid;
+        gap: 12px;
+        margin-top: 8px;
+        color: #3f3f46;
+        font-size: 20px;
+        line-height: 1.35;
+        list-style: none;
+      }
+
+      .points li {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .points li::before {
+        width: 7px;
+        height: 7px;
+        flex: 0 0 auto;
+        border-radius: 50%;
+        background: #18181b;
+        content: "";
+      }
+
+      .dark .points {
+        color: #e4e4e7;
+      }
+
+      .dark .points li::before {
+        background: #ffffff;
+      }
+
+      .stage {
+        display: inline-flex;
+        width: max-content;
+        align-items: center;
+        border: 1px solid #e4e4e7;
+        border-radius: 999px;
+        background: rgba(255,255,255,0.82);
+        padding: 10px 16px;
+        color: #18181b;
+        font-size: 15px;
+        font-weight: 760;
+      }
+
+      .shot-wrap {
+        position: relative;
+        min-width: 0;
+        z-index: 2;
+      }
+
+      .browser {
+        position: relative;
+        width: 100%;
+        border: 1px solid rgba(24,24,27,0.11);
+        border-radius: 18px;
+        background: #ffffff;
+        box-shadow: 0 24px 72px rgba(24,24,27,0.14);
+        overflow: hidden;
+      }
+
+      .browser.large {
+        width: 1540px;
+        margin: 0 auto;
+      }
+
+      .browser-bar {
+        height: 46px;
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        padding: 0 18px;
+        border-bottom: 1px solid #e4e4e7;
+        background: #ffffff;
+      }
+
+      .dot {
+        width: 11px;
+        height: 11px;
+        border-radius: 50%;
+        background: #d4d4d8;
+      }
+
+      .url {
+        flex: 1;
+        height: 24px;
+        border-radius: 999px;
+        background: #f4f4f5;
+        color: #71717a;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 13px;
+        font-weight: 650;
+      }
+
+      .screen {
+        width: 100%;
+        aspect-ratio: 16 / 9;
+        display: block;
+        object-fit: cover;
+        background: #f7f7f6;
+      }
+
+      .focus-ring {
+        position: absolute;
+        border: 4px solid #18181b;
+        border-radius: 14px;
+        box-shadow: 0 0 0 8px rgba(24,24,27,0.1);
+        pointer-events: none;
+      }
+
+      .caption {
+        position: absolute;
+        right: 72px;
+        bottom: 54px;
+        max-width: 520px;
+        border: 1px solid #e4e4e7;
+        border-radius: 14px;
+        background: rgba(255,255,255,0.94);
+        padding: 20px 24px;
+        box-shadow: 0 18px 54px rgba(24,24,27,0.12);
+        color: #18181b;
+        font-size: 25px;
+        font-weight: 760;
+        line-height: 1.32;
+        z-index: 5;
+      }
+
+      .caption small {
+        display: block;
+        margin-top: 8px;
+        color: #71717a;
+        font-size: 17px;
+        font-weight: 550;
+        line-height: 1.35;
+      }
+
+      .cursor {
+        position: absolute;
+        width: 32px;
+        height: 32px;
+        border-radius: 999px;
+        background: #18181b;
+        box-shadow: 0 0 0 9px rgba(24,24,27,0.14);
+        z-index: 7;
+      }
+
+      .cursor::after {
+        position: absolute;
+        inset: 10px;
+        border-radius: inherit;
+        background: #ffffff;
+        content: "";
+      }
+
+      .timeline {
+        position: absolute;
+        left: 100px;
+        right: 100px;
+        bottom: 40px;
+        height: 3px;
+        overflow: hidden;
+        border-radius: 999px;
+        background: #e4e4e7;
+        z-index: 9;
+      }
+
+      .timeline span {
+        display: block;
+        width: 100%;
+        height: 100%;
+        transform-origin: left center;
+        transform: scaleX(0);
+        background: #18181b;
+      }
+
+      .end-panel {
+        width: min(920px, 100%);
+        margin: 0 auto;
+        display: grid;
+        gap: 26px;
+        text-align: center;
+        justify-items: center;
+      }
+
+      .end-panel h1 {
+        max-width: 900px;
+      }
+
+      .end-grid {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 14px;
+        width: 900px;
+        margin-top: 18px;
+      }
+
+      .end-grid span {
+        min-height: 66px;
+        display: grid;
+        place-items: center;
+        border: 1px solid rgba(255,255,255,0.16);
+        border-radius: 12px;
+        background: rgba(255,255,255,0.08);
+        color: #ffffff;
+        font-size: 18px;
+        font-weight: 720;
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="root"
+      data-composition-id="main"
+      data-start="0"
+      data-duration="50"
+      data-width="1920"
+      data-height="1080"
+    >
+      <section id="scene-1" class="clip scene" data-start="0" data-duration="4.95" data-track-index="1">
+        <div class="copy">
+          <span class="brand">NJAU Libyy</span>
+          <h1>研讨间预约，从登录开始</h1>
+          <p>按照页面提示登录账号，进入研讨间预约首页。</p>
+          <ul class="points">
+            <li>先登录并连接校园统一认证</li>
+            <li>查看未来三天的可预约时段</li>
+            <li>选择成员后提交或提前安排</li>
+          </ul>
+        </div>
+        <div class="shot-wrap">
+          <div class="browser">
+            <div class="browser-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="url">/</span></div>
+            <img class="screen" src="assets/screens/01-login.png" alt="登录入口" />
+          </div>
+        </div>
+      </section>
+
+      <section id="scene-2" class="clip scene" data-start="5" data-duration="4.95" data-track-index="1">
+        <div class="copy">
+          <span class="stage">账号入口</span>
+          <h2>没有账号时，先完成邮箱验证</h2>
+          <p>注册、登录和重置密码都在入口页完成，按提示填写邮箱、验证码和密码即可。</p>
+        </div>
+        <div class="shot-wrap">
+          <div class="browser">
+            <div class="browser-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="url">/register</span></div>
+            <img class="screen" src="assets/screens/02-register.png" alt="注册账号" />
+          </div>
+          <div class="cursor" style="left: 70%; top: 62%;"></div>
+        </div>
+      </section>
+
+      <section id="scene-3" class="clip scene" data-start="10" data-duration="4.95" data-track-index="1">
+        <div class="copy">
+          <span class="stage">校园账号</span>
+          <h2>首次使用，连接校园统一认证</h2>
+          <p>输入学号和统一认证密码，完成连接后就能查询房间、提交预约和处理签到签退。</p>
+        </div>
+        <div class="shot-wrap">
+          <div class="browser">
+            <div class="browser-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="url">/credentials</span></div>
+            <img class="screen" src="assets/screens/05-campus-bind.png" alt="连接校园统一认证" />
+          </div>
+          <div class="focus-ring" style="left: 52%; top: 47%; width: 38%; height: 22%;"></div>
+        </div>
+      </section>
+
+      <section id="scene-4" class="clip scene full" data-start="15" data-duration="5.95" data-track-index="1">
+        <div class="browser large">
+          <div class="browser-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="url">/rooms</span></div>
+          <img class="screen" src="assets/screens/06-rooms.png" alt="研讨间列表" />
+        </div>
+        <div class="caption" data-layout-allow-occlusion>先看未来三天的房间状态<small>每张房间卡片都会展示日期、位置、人数要求和可用时间。</small></div>
+      </section>
+
+      <section id="scene-5" class="clip scene full" data-start="21" data-duration="5.95" data-track-index="1">
+        <div class="browser large">
+          <div class="browser-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="url">/rooms/101</span></div>
+          <img class="screen" src="assets/screens/07-room-detail-selection.png" alt="选择预约时间和成员" />
+        </div>
+        <div class="caption" data-layout-allow-occlusion>选择连续时间段，再选择同行成员<small>第一位成员会作为主预约人，提交前请确认人数和剩余积分。</small></div>
+        <div class="cursor" style="left: 61%; top: 71%;"></div>
+      </section>
+
+      <section id="scene-6" class="clip scene full" data-start="27" data-duration="4.95" data-track-index="1">
+        <div class="browser large">
+          <div class="browser-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="url">/tasks</span></div>
+          <img class="screen" src="assets/screens/08-tasks.png" alt="我的提前安排" />
+        </div>
+        <div class="caption" data-layout-allow-occlusion>需要抢开放时间时，使用提前安排<small>预约、签到和签退任务会集中显示，方便随时查看进度。</small></div>
+      </section>
+
+      <section id="scene-7" class="clip scene full" data-start="32" data-duration="4.95" data-track-index="1">
+        <div class="browser large">
+          <div class="browser-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="url">/tasks/new</span></div>
+          <img class="screen" src="assets/screens/09-task-new.png" alt="新增提前安排" />
+        </div>
+        <div class="caption" data-layout-allow-occlusion>新增安排时，照常选择房间、时间和成员<small>确认后保存，页面会在列表里展示后续状态。</small></div>
+      </section>
+
+      <section id="scene-8" class="clip scene full" data-start="37" data-duration="4.95" data-track-index="1">
+        <div class="browser large">
+          <div class="browser-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="url">/teams</span></div>
+          <img class="screen" src="assets/screens/10-teams.png" alt="同行成员" />
+        </div>
+        <div class="caption" data-layout-allow-occlusion>常一起预约的人，可以加入同行小队<small>小队页会显示成员积分、剩余次数和邀请入口。</small></div>
+      </section>
+
+      <section id="scene-9" class="clip scene full" data-start="42" data-duration="4.95" data-track-index="1">
+        <div class="browser large">
+          <div class="browser-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="url">/history</span></div>
+          <img class="screen" src="assets/screens/12-history.png" alt="我的预约" />
+        </div>
+        <div class="caption" data-layout-allow-occlusion>预约完成后，在我的预约里处理后续操作<small>正在进行的预约会优先显示，可按状态开门、签退或取消。</small></div>
+      </section>
+
+      <section id="scene-end" class="clip scene dark full" data-start="47" data-duration="3" data-track-index="1">
+        <div class="end-panel">
+          <span class="brand">NJAU Libyy</span>
+          <h1>按步骤完成预约</h1>
+          <p>登录、连接校园账号、查看房间、选择成员、提前安排和查看预约记录，照着页面提示即可完成。</p>
+          <div class="end-grid">
+            <span>登录账号</span>
+            <span>选择房间</span>
+            <span>确认成员</span>
+            <span>查看记录</span>
+          </div>
+        </div>
+      </section>
+
+      <div class="timeline" data-layout-ignore><span id="progress"></span></div>
+    </div>
+
+    <script>
+      window.__timelines = window.__timelines || {};
+      const tl = gsap.timeline({ paused: true });
+      document.querySelectorAll(".screen").forEach((element) => element.setAttribute("data-layout-allow-overflow", ""));
+      const scenes = [
+        ["#scene-1", 0],
+        ["#scene-2", 5],
+        ["#scene-3", 10],
+        ["#scene-4", 15],
+        ["#scene-5", 21],
+        ["#scene-6", 27],
+        ["#scene-7", 32],
+        ["#scene-8", 37],
+        ["#scene-9", 42],
+      ];
+
+      function fromIfFound(selector, vars, at) {
+        if (document.querySelector(selector)) tl.from(selector, vars, at);
+      }
+
+      function fromToIfFound(selector, fromVars, toVars, at) {
+        if (document.querySelector(selector)) tl.fromTo(selector, fromVars, toVars, at);
+      }
+
+      function toIfFound(selector, vars, at) {
+        if (document.querySelector(selector)) tl.to(selector, vars, at);
+      }
+
+      scenes.forEach(([selector, at]) => {
+        fromIfFound(`${selector} .copy, ${selector} .caption`, {
+          y: 34,
+          opacity: 0,
+          duration: 0.7,
+          ease: "power3.out",
+        }, at + 0.15);
+        fromIfFound(`${selector} .browser`, {
+          y: 36,
+          scale: 0.985,
+          opacity: 0,
+          duration: 0.8,
+          ease: "power3.out",
+        }, at + 0.05);
+        toIfFound(`${selector} .screen`, {
+          scale: 1.028,
+          duration: 4.6,
+          ease: "none",
+        }, at + 0.25);
+        fromToIfFound(`${selector} .cursor`, {
+          scale: 0.5,
+          opacity: 0,
+        }, {
+          scale: 1,
+          opacity: 1,
+          duration: 0.35,
+          ease: "back.out(1.8)",
+        }, at + 1.3);
+        toIfFound(`${selector} .cursor`, {
+          x: 20,
+          y: 12,
+          scale: 0.86,
+          duration: 0.45,
+          yoyo: true,
+          repeat: 1,
+          ease: "power2.inOut",
+        }, at + 2.05);
+        fromIfFound(`${selector} .focus-ring`, {
+          opacity: 0,
+          scale: 0.96,
+          duration: 0.45,
+          ease: "power2.out",
+        }, at + 1.2);
+      });
+
+      tl.from("#scene-end .end-panel > *", {
+        y: 32,
+        opacity: 0,
+        stagger: 0.12,
+        duration: 0.75,
+        ease: "power3.out",
+      }, 47.15);
+
+      tl.to("#progress", {
+        scaleX: 1,
+        duration: 50,
+        ease: "none",
+      }, 0);
+
+      window.__timelines["main"] = tl;
+    </script>
+  </body>
+</html>

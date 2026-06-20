@@ -6,7 +6,7 @@ services:
       TS_AUTHKEY: ${TS_AUTHKEY:-}
       TS_STATE_DIR: /var/lib/tailscale
       TS_USERSPACE: "false"
-      TS_EXTRA_ARGS: ${TS_EXTRA_ARGS:---reset --accept-routes=false --accept-dns=false}
+      TS_EXTRA_ARGS: "--reset --accept-routes=false --accept-dns=false${TS_EXTRA_ARGS:+ ${TS_EXTRA_ARGS}}"
     volumes:
       - tailscale-state:/var/lib/tailscale
     devices:

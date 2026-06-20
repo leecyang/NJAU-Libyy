@@ -908,6 +908,43 @@ async function executeManualReservation(env: AppEnv, job: OfficialGatewayJob): P
     studentIds: participants.map((participant) => participant.studentId),
   });
   await claimReservationQuota(env, participants.map((participant) => participant.id), date, "MANUAL", quotaSource);
+  let officialSubmitted = false;
+  const postSubmitWarning = async (error: unknown): Promise<Record<string, unknown>> => {
+    const code = error instanceof HttpError ? error.code : "RESERVATION_POST_SUBMIT_SYNC_FAILED";
+    const message = error instanceof Error ? error.message : "官方已接收预约，但本地同步暂未完成，请稍后刷新预约历史";
+    console.error(JSON.stringify({
+      level: "error",
+      event: "manual_reservation_post_submit_failed",
+      requesterId: requester.id,
+      primaryUserId: primary.id,
+      roomId,
+      date,
+      startTime,
+      endTime,
+      code,
+    }));
+    try {
+      await audit(env.DB, {
+        actorUserId: requester.id,
+        actorType: "USER",
+        action: "MANUAL_RESERVATION_SUBMITTED",
+        targetType: "RESERVATION",
+        result: "SUCCESS",
+        metadata: { warningCode: code },
+      });
+    } catch {
+      // The official side already accepted the reservation; audit failures must not flip the job to failed.
+    }
+    return {
+      id: null,
+      officialReservationId: null,
+      status: "SUBMITTED_UNVERIFIED",
+      teamMembersAutoAccepted: 0,
+      teamMembersPendingRetry: members.length,
+      warning: message,
+      warningCode: code,
+    };
+  };
   try {
     if (!flag(env, "ENABLE_SINGLE_RESERVATION_SUBMISSION")) throw new HttpError(503, "RESERVATION_SUBMISSION_DISABLED", "单人预约提交当前保持关闭");
     if (!await verifyOfficialRoomPolicy(env, token, profile.studentId, roomId, members.map((member) => member.userId))) {
@@ -924,38 +961,44 @@ async function executeManualReservation(env: AppEnv, job: OfficialGatewayJob): P
       useDescription: "小组学习",
       members,
     });
-    let records = await syncOfficialReservationHistory(env, primaryUser);
-    let matched = records.find((record) => {
-      const recordStart = shanghaiParts(record.startTime);
-      const recordEnd = shanghaiParts(record.endTime);
-      return record.roomId === roomId && recordStart.date === date && recordStart.time === startTime && recordEnd.time === endTime;
-    });
-    if (!matched) throw new HttpError(502, "RESERVATION_SYNC_FAILED", "官方已接收预约，但订单回读失败，请在预约历史中刷新");
-    const acceptance = await autoAcceptTeamMembers(env, String(matched.id), members);
-    if (acceptance.accepted) {
-      records = await syncOfficialReservationHistory(env, primaryUser);
-      matched = records.find((record) => record.id === matched!.id) ?? matched;
-    }
-    const local = await env.DB.prepare(
-      "SELECT id, status FROM reservations WHERE owner_user_id = ? AND official_reservation_id = ?",
-    ).bind(primary.id, String(matched.id)).first<{ id: string; status: string }>();
-    if (local?.id) {
-      await env.DB.batch([
-        env.DB.prepare("UPDATE reservations SET requested_by_user_id = ? WHERE id = ?").bind(requester.id, local.id),
-        env.DB.prepare("UPDATE sign_workflows SET requested_by_user_id = ?, updated_at = ? WHERE reservation_id = ?")
-          .bind(requester.id, Date.now(), local.id),
-      ]);
-    }
+    officialSubmitted = true;
     await moveReservationQuota(env, "MANUAL", quotaSource, "RESERVATION", quotaSource);
-    await audit(env.DB, { actorUserId: requester.id, actorType: "USER", action: "MANUAL_RESERVATION_SUBMITTED", targetType: "RESERVATION", targetId: local?.id, result: "SUCCESS" });
-    return {
-      id: local?.id,
-      officialReservationId: String(matched.id),
-      status: local?.status ?? localReservationStatus(matched.reservationStatus),
-      teamMembersAutoAccepted: acceptance.accepted,
-      teamMembersPendingRetry: acceptance.failed,
-    };
+    try {
+      let records = await syncOfficialReservationHistory(env, primaryUser);
+      let matched = records.find((record) => {
+        const recordStart = shanghaiParts(record.startTime);
+        const recordEnd = shanghaiParts(record.endTime);
+        return record.roomId === roomId && recordStart.date === date && recordStart.time === startTime && recordEnd.time === endTime;
+      });
+      if (!matched) throw new HttpError(502, "RESERVATION_SYNC_FAILED", "官方已接收预约，但订单回读失败，请在预约历史中刷新");
+      const acceptance = await autoAcceptTeamMembers(env, String(matched.id), members);
+      if (acceptance.accepted) {
+        records = await syncOfficialReservationHistory(env, primaryUser);
+        matched = records.find((record) => record.id === matched!.id) ?? matched;
+      }
+      const local = await env.DB.prepare(
+        "SELECT id, status FROM reservations WHERE owner_user_id = ? AND official_reservation_id = ?",
+      ).bind(primary.id, String(matched.id)).first<{ id: string; status: string }>();
+      if (local?.id) {
+        await env.DB.batch([
+          env.DB.prepare("UPDATE reservations SET requested_by_user_id = ? WHERE id = ?").bind(requester.id, local.id),
+          env.DB.prepare("UPDATE sign_workflows SET requested_by_user_id = ?, updated_at = ? WHERE reservation_id = ?")
+            .bind(requester.id, Date.now(), local.id),
+        ]);
+      }
+      await audit(env.DB, { actorUserId: requester.id, actorType: "USER", action: "MANUAL_RESERVATION_SUBMITTED", targetType: "RESERVATION", targetId: local?.id, result: "SUCCESS" });
+      return {
+        id: local?.id,
+        officialReservationId: String(matched.id),
+        status: local?.status ?? localReservationStatus(matched.reservationStatus),
+        teamMembersAutoAccepted: acceptance.accepted,
+        teamMembersPendingRetry: acceptance.failed,
+      };
+    } catch (error) {
+      return await postSubmitWarning(error);
+    }
   } catch (error) {
+    if (officialSubmitted) return await postSubmitWarning(error);
     await releaseReservationQuota(env, "MANUAL", quotaSource);
     throw error;
   }

@@ -5,8 +5,8 @@
 ## 架构
 
 - `app`：Node 22 服务，托管 `apps/web/dist` 静态前端和 `/api/v1/*` API。
-- `tailscale`：官方 `tailscale/tailscale` 镜像，接收 tailnet 中的校园网路由。
-- Tailscale 默认启动参数为 `--reset --accept-routes=false --accept-dns=false`，启动时清理旧 prefs，且不接收 tailnet 路由或 DNS 配置。可通过 `.env` 中的 `TS_EXTRA_ARGS` 覆盖。
+- `tailscale`：官方 `tailscale/tailscale` 镜像，用作 `app` 的共享 network namespace。
+- Compose 固定向 Tailscale 注入 `--reset --accept-routes=false --accept-dns=false`，启动时清理旧 prefs，且不接收 tailnet 路由或 DNS 配置，避免 `app` 的公网出站被 tailnet 路由或 MagicDNS 接管。`.env` 中的 `TS_EXTRA_ARGS` 只用于追加额外参数。
 - `app` 使用 Playwright 官方 Chromium 的非 root 沙箱；Compose 加载 `docker/playwright-seccomp.json` 以允许 Chromium 创建隔离的 user namespace。
 - `SQLite`：默认数据文件 `/data/njau-libyy.sqlite`，由 Compose volume 持久化。
 - `Official Access Gateway`：所有官方 HTTP 和 Playwright 自动化统一经过该层；SQLite 保存分层快照与持久化 job，进程内执行器提供 SingleFlight、分读写通道限流和短暂等待。
@@ -143,6 +143,7 @@ R2_PUBLIC_BASE_URL=https://cloud.way2api.fun/NJAU \
 - 执行 `docker load`
 - 先启动/保持 `tailscale`，再使用新镜像强制重建 `app` 容器
 - 检查 `/api/v1/health`
+- 健康检查成功后清理旧 Docker 镜像 tag 和旧镜像下载包；默认保留最近 2 个版本，可通过 `IMAGE_RETENTION_COUNT` 调整
 - 健康检查成功后写入 `.deployed-version`，后续同版本会跳过
 
 ### systemd 定时自动更新
@@ -194,7 +195,8 @@ journalctl -u njau-libyy-update.service -f
 
 | 变量 | 说明 |
 | --- | --- |
-| `TS_EXTRA_ARGS` | Tailscale 启动参数，默认 `--reset --accept-routes=false --accept-dns=false`；需要接收 tailnet 路由时应显式覆盖 |
+| `TS_EXTRA_ARGS` | 追加的 Tailscale 启动参数；Compose 已固定注入 `--reset --accept-routes=false --accept-dns=false`，通常保持为空 |
+| `IMAGE_RETENTION_COUNT` | 自动更新脚本保留的 `njau-libyy-app:<commit>` 镜像版本数量，默认 `2` |
 | `APP_BIND_ADDR` | Compose 端口绑定地址，默认 `127.0.0.1`；公网直连 3000 时设为 `0.0.0.0` |
 | `LIBYY_API_BASE_URL` | 官方图书馆接口地址，默认 `https://libyy.njau.edu.cn` |
 | `CAS_CREDENTIAL_ENCRYPTION_KEY` | 加密统一认证密码的独立 32 字节 base64url 密钥，必须配置且不得与 token 密钥相同 |

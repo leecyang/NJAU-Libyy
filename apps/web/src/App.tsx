@@ -1197,7 +1197,7 @@ function RoomDetailPage({
     }
     setSubmitting(true);
     try {
-      const job = await api<GatewayJob>("/api/v1/reservations/manual", {
+      const job = await api<GatewayJob<{ warning?: string }>>("/api/v1/reservations/manual", {
         method: "POST",
         body: JSON.stringify({
           date: selection.date,
@@ -1208,8 +1208,8 @@ function RoomDetailPage({
           participantUserIds: selectedParticipantIds,
         }),
       });
-      await waitForGatewayJob(job);
-      toast("预约已提交");
+      const result = await waitForGatewayJob<{ warning?: string }>(job);
+      toast(result.warning ?? "预约已提交");
       setSelection(null);
       setSelectedParticipantIds([]);
       await loadRoom();

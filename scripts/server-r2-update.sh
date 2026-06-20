@@ -5,6 +5,7 @@ APP_DIR="${APP_DIR:-/opt/NJAU-Libyy}"
 R2_PUBLIC_BASE_URL="${R2_PUBLIC_BASE_URL:-https://cloud.way2api.fun/NJAU}"
 CHANNEL="${CHANNEL:-latest}"
 ARIA2_CONNECTIONS="${ARIA2_CONNECTIONS:-16}"
+IMAGE_RETENTION_COUNT="${IMAGE_RETENTION_COUNT:-2}"
 
 for command in aria2c curl docker gzip; do
   if ! command -v "$command" >/dev/null 2>&1; then
@@ -53,6 +54,98 @@ download() {
     "$url"
 }
 
+normalize_image_retention_count() {
+  if ! printf '%s\n' "$IMAGE_RETENTION_COUNT" | grep -Eq '^[0-9]+$'; then
+    echo "[deploy] Invalid IMAGE_RETENTION_COUNT=$IMAGE_RETENTION_COUNT, using 2" >&2
+    IMAGE_RETENTION_COUNT=2
+  fi
+
+  if [ "$IMAGE_RETENTION_COUNT" -lt 1 ]; then
+    IMAGE_RETENTION_COUNT=1
+  fi
+}
+
+cleanup_old_docker_images() {
+  normalize_image_retention_count
+
+  local keep_tags
+  local kept_count
+  local tag
+  local removed_count
+
+  keep_tags=" $VERSION "
+  kept_count=1
+  while IFS= read -r tag; do
+    [ -n "$tag" ] || continue
+    [ "$tag" != "$VERSION" ] || continue
+
+    if [ "$kept_count" -lt "$IMAGE_RETENTION_COUNT" ]; then
+      keep_tags="${keep_tags}${tag} "
+      kept_count=$((kept_count + 1))
+    fi
+  done < <(docker image ls njau-libyy-app --format '{{.Tag}}' | grep -E '^[0-9a-f]{12}$' || true)
+
+  removed_count=0
+  while IFS= read -r tag; do
+    [ -n "$tag" ] || continue
+    case "$keep_tags" in
+      *" $tag "*) continue ;;
+    esac
+
+    echo "[deploy] Removing old Docker image tag njau-libyy-app:$tag"
+    if docker image rm "njau-libyy-app:$tag"; then
+      removed_count=$((removed_count + 1))
+    else
+      echo "[deploy] Could not remove njau-libyy-app:$tag; it may still be in use" >&2
+    fi
+  done < <(docker image ls njau-libyy-app --format '{{.Tag}}' | grep -E '^[0-9a-f]{12}$' || true)
+
+  echo "[deploy] Removed $removed_count old Docker image tag(s)"
+}
+
+cleanup_old_release_archives() {
+  normalize_image_retention_count
+
+  local archive
+  local basename
+  local version
+  local keep_versions
+  local kept_count
+  local removed_count
+
+  keep_versions=" $VERSION "
+  kept_count=1
+  while IFS= read -r archive; do
+    [ -n "$archive" ] || continue
+    basename="$(basename "$archive")"
+    version="${basename#njau-libyy-app-}"
+    version="${version%.tar.gz}"
+    [ "$version" != "$VERSION" ] || continue
+
+    if [ "$kept_count" -lt "$IMAGE_RETENTION_COUNT" ]; then
+      keep_versions="${keep_versions}${version} "
+      kept_count=$((kept_count + 1))
+    fi
+  done < <(find "$APP_DIR/releases" -maxdepth 1 -type f -name 'njau-libyy-app-*.tar.gz' -printf '%T@ %p\n' | sort -nr | cut -d' ' -f2-)
+
+  removed_count=0
+  while IFS= read -r archive; do
+    [ -n "$archive" ] || continue
+    basename="$(basename "$archive")"
+    version="${basename#njau-libyy-app-}"
+    version="${version%.tar.gz}"
+    case "$keep_versions" in
+      *" $version "*) continue ;;
+    esac
+
+    echo "[deploy] Removing old release archive $archive"
+    rm -f "$archive" "$archive.aria2"
+    removed_count=$((removed_count + 1))
+  done < <(find "$APP_DIR/releases" -maxdepth 1 -type f -name 'njau-libyy-app-*.tar.gz' -printf '%T@ %p\n' | sort -nr | cut -d' ' -f2-)
+
+  echo "[deploy] Removed $removed_count old release archive(s)"
+}
+
 rm -f "$MANIFEST_PATH" "$MANIFEST_PATH.aria2"
 download "$MANIFEST_URL" "$MANIFEST_PATH"
 
@@ -85,6 +178,8 @@ fi
 
 if [ "$CURRENT_VERSION" = "$VERSION" ] && curl --http1.1 -4 -fsS --connect-timeout 5 --max-time 15 http://127.0.0.1:3000/api/v1/health >/dev/null 2>&1; then
   echo "[deploy] Already running $VERSION"
+  cleanup_old_docker_images
+  cleanup_old_release_archives
   exit 0
 fi
 
@@ -126,4 +221,6 @@ docker compose ps
 curl --http1.1 -4 -fsS http://127.0.0.1:3000/api/v1/health
 echo
 printf '%s\n' "$VERSION" > "$APP_DIR/.deployed-version"
+cleanup_old_docker_images
+cleanup_old_release_archives
 echo "[deploy] Updated to $VERSION"
