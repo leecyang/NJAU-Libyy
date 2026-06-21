@@ -41,6 +41,7 @@ export type OfficialReservationRequest = {
 type OfficialError = {
   code?: number;
   msg?: string;
+  message?: string;
 };
 
 type OfficialOperation =
@@ -73,6 +74,13 @@ type OfficialResponseDiagnostic = {
   bodyPrefixTruncated: boolean;
   redirected: boolean;
   responsePath: string;
+};
+
+type OfficialFetchSnapshot = {
+  status: number;
+  statusText: string;
+  headers: [string, string][];
+  body: ArrayBuffer;
 };
 
 const OFFICIAL_BROWSER_HEADERS = {
@@ -220,6 +228,26 @@ async function rawOfficialFetch(
   }
 }
 
+async function rawOfficialFetchSnapshot(url: URL, init: RequestInit = {}): Promise<OfficialFetchSnapshot> {
+  const response = await rawOfficialFetch(url, init);
+  const headers: [string, string][] = [];
+  response.headers.forEach((value, name) => headers.push([name, value]));
+  return {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+    body: await response.arrayBuffer(),
+  };
+}
+
+function snapshotResponse(snapshot: OfficialFetchSnapshot): Response {
+  return new Response(snapshot.body.slice(0), {
+    status: snapshot.status,
+    statusText: snapshot.statusText,
+    headers: snapshot.headers,
+  });
+}
+
 async function officialFetch(
   env: AppEnv,
   url: URL,
@@ -229,12 +257,13 @@ async function officialFetch(
   if (!env.OFFICIAL_GATEWAY) {
     throw new HttpError(503, "OFFICIAL_GATEWAY_UNAVAILABLE", "官方访问网关尚未启动");
   }
-  const execute = () => rawOfficialFetch(url, init);
-  return env.OFFICIAL_GATEWAY.runOfficialRequest(
+  const execute = () => rawOfficialFetchSnapshot(url, init);
+  const snapshot = await env.OFFICIAL_GATEWAY.runOfficialRequest(
     officialRequestKey(url, operation, init),
     OFFICIAL_WRITE_OPERATIONS.has(operation) ? "WRITE" : "READ",
     execute,
   );
+  return snapshotResponse(snapshot);
 }
 
 async function officialJson(response: Response, operation: OfficialOperation): Promise<unknown> {
@@ -266,6 +295,9 @@ async function officialText(response: Response, operation: OfficialOperation): P
 
 function officialFailure(response: Response, body: unknown): HttpError {
   const detail = body && typeof body === "object" ? body as OfficialError : {};
+  if (isDailyReservationLimitError(officialErrorText(body))) {
+    return new HttpError(409, "DAILY_RESERVATION_LIMIT", "今日无可用预约次数");
+  }
   if (detail.code === 2003 || detail.code === 2008) {
     return new HttpError(401, "OFFICIAL_REAUTH_REQUIRED", "官方登录已失效，请重新绑定凭证");
   }
@@ -279,6 +311,29 @@ function officialFailure(response: Response, body: unknown): HttpError {
   }));
   const suffix = officialCode === null ? "" : `, 官方错误码: ${officialCode}`;
   return new HttpError(502, "OFFICIAL_REQUEST_FAILED", `官方接口请求失败 (${response.status}${suffix})`);
+}
+
+function officialErrorText(body: unknown): string {
+  if (typeof body === "string") return body;
+  if (!body || typeof body !== "object") return "";
+  const detail = body as Record<string, unknown>;
+  return [detail.msg, detail.message, detail.error, detail.reason]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ");
+}
+
+function isDailyReservationLimitError(message: string): boolean {
+  const normalized = message.replace(/\s+/g, "");
+  if (!normalized) return false;
+  return (
+    normalized.includes("今日无可用预约次数") ||
+    normalized.includes("当日已达到") ||
+    normalized.includes("当日预约次数") ||
+    normalized.includes("今日预约次数") ||
+    normalized.includes("预约次数已用完") ||
+    normalized.includes("已达到2次预约上限") ||
+    normalized.includes("已达到两次预约上限")
+  );
 }
 
 export async function refreshOfficialToken(env: AppEnv, reflushToken: string): Promise<OfficialRefreshResult> {
@@ -554,8 +609,17 @@ export async function submitOfficialSign(env: AppEnv, accessToken: string, roomI
     headers: { ...officialHeaders(accessToken), "content-type": "application/json;charset=UTF-8" },
     body: JSON.stringify({ systemMac, roomId, qrSignCheckCode }),
   });
-  const body = await officialJson(response, "reservation-sign");
+  const text = await officialText(response, "reservation-sign");
+  let body: unknown = text;
+  try {
+    body = text ? JSON.parse(text) : "";
+  } catch {
+    // Some official errors are returned as plain text.
+  }
   if (!response.ok) throw officialFailure(response, body);
+  if (isDailyReservationLimitError(officialErrorText(body))) {
+    throw new HttpError(409, "DAILY_RESERVATION_LIMIT", "今日无可用预约次数");
+  }
   if (!body || typeof body !== "object" || (body as { executionResult?: unknown }).executionResult !== true) {
     throw new HttpError(409, "OFFICIAL_SIGN_REJECTED", "官方签到未成功");
   }
@@ -575,6 +639,9 @@ export async function createOfficialQrSignCheckCode(env: AppEnv, accessToken: st
   const response = await officialFetch(env, url, "sign-key", { headers: officialHeaders(accessToken) });
   const text = await officialText(response, "sign-key");
   if (!response.ok) throw officialFailure(response, text);
+  if (isDailyReservationLimitError(text)) {
+    throw new HttpError(409, "DAILY_RESERVATION_LIMIT", "今日无可用预约次数");
+  }
   let key = text;
   try {
     const body = JSON.parse(text) as unknown;

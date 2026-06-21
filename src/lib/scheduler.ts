@@ -599,6 +599,14 @@ function workflowRecordMatches(workflow: SignWorkflowRow, record: { roomId: numb
   return start.date === workflow.date && start.time === workflow.start_time && end.time === workflow.end_time;
 }
 
+function publicWorkflowFailureReason(reason: string | null | undefined): string | null {
+  if (!reason) return null;
+  if (reason === "DAILY_RESERVATION_LIMIT" || reason.includes("当日已达到") || reason.includes("预约次数")) {
+    return "今日无可用预约次数";
+  }
+  return reason;
+}
+
 async function participantOfficialRecord(env: AppEnv, workflow: SignWorkflowRow, userId: string) {
   const token = await getAccessToken(env, userId);
   const profile = await getOfficialReservationProfile(env, userId, token);
@@ -717,8 +725,8 @@ export async function submitDueSignWorkflows(env: AppEnv, now: number, limit = 2
       await queueUserNotifications(env, recipients, `auto-sign:${notificationKey}:success`, "AUTO_SIGN_SUCCESS", payload);
     } else {
       if (autoSignEnabled && now >= endAt) {
-        const reason = refreshed.results.find((participant) => participant.last_error_message)?.last_error_message
-          ?? refreshed.results.find((participant) => participant.last_error_code)?.last_error_code
+        const reason = publicWorkflowFailureReason(refreshed.results.find((participant) => participant.last_error_message)?.last_error_message)
+          ?? publicWorkflowFailureReason(refreshed.results.find((participant) => participant.last_error_code)?.last_error_code)
           ?? "预约结束前未完成全部成员签到";
         await env.DB.batch([
           env.DB.prepare(
