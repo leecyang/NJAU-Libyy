@@ -428,19 +428,13 @@ export async function reservationParticipants(env: AppEnv, request: Request): Pr
       })),
     });
   }
-  const snapshot = await env.OFFICIAL_GATEWAY.readSnapshot<{ participants: Array<ReservationParticipant & { totalScore: number | null }> }>(
-    `user:${requester.id}:reservation-participants`,
-  );
-  const cachedParticipants = snapshot?.value.participants;
-  const participants = cachedParticipants ?? await (async () => {
-    const available = await listReservationParticipants(env, requester);
-    const metrics = await readUserMetrics(env, available.map((participant) => participant.id), dates);
-    return available.map((participant) => ({
-      ...participant,
-      totalScore: metrics.get(participant.id)?.totalScore ?? null,
-      scoreRefreshedAt: metrics.get(participant.id)?.scoreRefreshedAt ?? null,
-    }));
-  })();
+  const available = await listReservationParticipants(env, requester);
+  const metrics = await readUserMetrics(env, available.map((participant) => participant.id), dates);
+  const participants = available.map((participant) => ({
+    ...participant,
+    totalScore: metrics.get(participant.id)?.totalScore ?? null,
+    scoreRefreshedAt: metrics.get(participant.id)?.scoreRefreshedAt ?? null,
+  }));
   const quotas = await reservationQuotas(env.DB, participants.map((participant) => participant.id), dates);
   return ok({
     participants: participants.map((participant) => ({

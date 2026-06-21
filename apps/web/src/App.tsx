@@ -1167,11 +1167,14 @@ function RoomDetailPage({
     if (!selection?.date) return;
     void api<{ participants: ReservationParticipant[] }>(`/api/v1/reservation-participants?date=${encodeURIComponent(selection.date)}`)
       .then((response) => {
-        const quotas = new Map(response.participants.map((participant) => [participant.id, participant.reservationQuota]));
-        setParticipants((current) => current.map((participant) => ({
-          ...participant,
-          reservationQuota: quotas.get(participant.id) ?? participant.reservationQuota,
-        })));
+        setParticipants((current) => {
+          const currentById = new Map(current.map((participant) => [participant.id, participant]));
+          return response.participants.map((participant) => ({
+            ...currentById.get(participant.id),
+            ...participant,
+          }));
+        });
+        setSelectedParticipantIds((current) => current.filter((id) => response.participants.some((participant) => participant.id === id)));
       })
       .catch(() => undefined);
   }, [selection?.date]);
