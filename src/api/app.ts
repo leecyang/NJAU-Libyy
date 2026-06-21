@@ -1838,14 +1838,148 @@ export async function signoutTasks(env: AppEnv, request: Request): Promise<Respo
 
 export async function dashboard(env: AppEnv, request: Request): Promise<Response> {
   await requireAdmin(env, request);
-  const row = await env.DB.prepare(
-    `SELECT
-      (SELECT COUNT(*) FROM users WHERE status = 'ACTIVE') AS active_users,
-      (SELECT COUNT(*) FROM official_credentials WHERE credential_status = 'ACTIVE') AS active_credentials,
-      (SELECT COUNT(*) FROM reservation_tasks WHERE status NOT IN ('SUCCESS', 'FAILED', 'CANCELLED', 'EXPIRED')) AS open_tasks,
-      (SELECT COUNT(*) FROM email_outbox WHERE status = 'PENDING') AS pending_emails`,
-  ).first();
-  return ok(row);
+  const now = Date.now();
+  const today = shanghaiDate();
+  const since24h = now - 24 * 60 * 60 * 1000;
+  const [
+    accounts,
+    credentials,
+    tasks,
+    reservations,
+    mail,
+    gateway,
+    sign,
+    failedTasks,
+    failedEmails,
+    failedGatewayJobs,
+    failedCredentials,
+  ] = await Promise.all([
+    env.DB.prepare(
+      `SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN status = 'ACTIVE' THEN 1 ELSE 0 END) AS active,
+        SUM(CASE WHEN status = 'BANNED' THEN 1 ELSE 0 END) AS banned,
+        SUM(CASE WHEN role = 'ADMIN' THEN 1 ELSE 0 END) AS admins
+       FROM users`,
+    ).first(),
+    env.DB.prepare(
+      `SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN credential_status = 'ACTIVE' THEN 1 ELSE 0 END) AS active,
+        SUM(CASE WHEN credential_status = 'REAUTH_REQUIRED' THEN 1 ELSE 0 END) AS reauth_required,
+        SUM(CASE WHEN credential_status = 'REFRESH_FAILED' THEN 1 ELSE 0 END) AS refresh_failed,
+        SUM(CASE WHEN credential_status IN ('REAUTH_REQUIRED', 'REFRESH_FAILED', 'DISABLED') THEN 1 ELSE 0 END) AS problem
+       FROM official_credentials`,
+    ).first(),
+    env.DB.prepare(
+      `SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN status IN ('DRAFT', 'WAITING_WINDOW', 'WAITING_MEMBERS', 'READY', 'SUBMITTING') THEN 1 ELSE 0 END) AS open,
+        SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) AS failed,
+        SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) AS success,
+        SUM(CASE WHEN status = 'CANCELLED' THEN 1 ELSE 0 END) AS cancelled
+       FROM reservation_tasks`,
+    ).first(),
+    env.DB.prepare(
+      `SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN date = ? THEN 1 ELSE 0 END) AS today,
+        SUM(CASE WHEN status IN ('SIGNED_IN', 'RESERVED', 'SUCCESS') THEN 1 ELSE 0 END) AS active
+       FROM reservations`,
+    ).bind(today).first(),
+    env.DB.prepare(
+      `SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END) AS pending,
+        SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) AS failed,
+        SUM(CASE WHEN status = 'SENT' AND sent_at >= ? THEN 1 ELSE 0 END) AS sent_last_24h
+       FROM email_outbox`,
+    ).bind(since24h).first(),
+    env.DB.prepare(
+      `SELECT
+        COUNT(*) AS total,
+        SUM(CASE WHEN status = 'QUEUED' THEN 1 ELSE 0 END) AS queued,
+        SUM(CASE WHEN status = 'RUNNING' THEN 1 ELSE 0 END) AS running,
+        SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) AS failed,
+        SUM(CASE WHEN status = 'QUEUED' AND lane = 'READ' THEN 1 ELSE 0 END) AS read_queued,
+        SUM(CASE WHEN status = 'QUEUED' AND lane IN ('WRITE', 'PLAYWRIGHT') THEN 1 ELSE 0 END) AS write_queued
+       FROM official_gateway_jobs`,
+    ).first(),
+    env.DB.prepare(
+      `SELECT
+        (SELECT COUNT(*) FROM sign_tasks WHERE status = 'FAILED') AS failed_sign_tasks,
+        (SELECT COUNT(*) FROM signout_tasks WHERE status = 'FAILED') AS failed_signout_tasks,
+        (SELECT COUNT(*) FROM sign_workflows WHERE status = 'FAILED' OR signout_status = 'FAILED') AS failed_workflows`,
+    ).first(),
+    env.DB.prepare(
+      `SELECT t.id, t.status, t.failure_code, t.failure_message, t.created_at, u.email, u.real_name
+         FROM reservation_tasks t JOIN users u ON u.id = t.owner_user_id
+        WHERE t.status = 'FAILED'
+        ORDER BY t.updated_at DESC LIMIT 6`,
+    ).all(),
+    env.DB.prepare(
+      `SELECT id, recipient_email, template, status, last_error_message, created_at
+         FROM email_outbox
+        WHERE status = 'FAILED'
+        ORDER BY created_at DESC LIMIT 6`,
+    ).all(),
+    env.DB.prepare(
+      `SELECT id, kind, lane, status, error_code, error_message, created_at
+         FROM official_gateway_jobs
+        WHERE status = 'FAILED'
+        ORDER BY updated_at DESC LIMIT 6`,
+    ).all(),
+    env.DB.prepare(
+      `SELECT c.user_id AS id, u.email, u.real_name, c.credential_status AS status, c.last_error_code, c.last_error_message, c.updated_at AS created_at
+         FROM official_credentials c JOIN users u ON u.id = c.user_id
+        WHERE c.credential_status IN ('REAUTH_REQUIRED', 'REFRESH_FAILED', 'DISABLED')
+        ORDER BY c.updated_at DESC LIMIT 6`,
+    ).all(),
+  ]);
+  const config = {
+    environment: env.ENVIRONMENT,
+    version: env.APP_VERSION,
+    officialApiConfigured: Boolean(env.LIBYY_APP_SECRET),
+    officialGatewayEnabled: Boolean(env.OFFICIAL_GATEWAY),
+    smtpConfigured: Boolean(env.SMTP_PASSWORD),
+    emailDeliveryEnabled: flag(env, "EMAIL_DELIVERY_ENABLED"),
+    reservationSubmissionEnabled: flag(env, "ENABLE_SINGLE_RESERVATION_SUBMISSION"),
+    multiMemberReservationSubmissionEnabled: flag(env, "ENABLE_MULTIMEMBER_RESERVATION_SUBMISSION"),
+    signLinkGenerationEnabled: flag(env, "ENABLE_SIGN_LINK_GENERATION"),
+    autoSignSubmissionEnabled: flag(env, "ENABLE_AUTO_SIGN_SUBMISSION"),
+    signoutSubmissionEnabled: flag(env, "ENABLE_SIGNOUT_SUBMISSION"),
+  };
+  const recentFailures = [
+    ...failedTasks.results.map((item) => ({ kind: "reservation-task", ...item })),
+    ...failedEmails.results.map((item) => ({ kind: "email", ...item })),
+    ...failedGatewayJobs.results.map((item) => ({ kind: "gateway-job", ...item })),
+    ...failedCredentials.results.map((item) => ({ kind: "credential", ...item })),
+  ].sort((left, right) => Number((right as { created_at?: number }).created_at ?? 0) - Number((left as { created_at?: number }).created_at ?? 0)).slice(0, 12);
+  return ok({
+    generatedAt: now,
+    accounts,
+    credentials,
+    tasks,
+    reservations,
+    mail,
+    gateway,
+    sign,
+    exceptions: {
+      total: Number((tasks as { failed?: number | null } | null)?.failed ?? 0)
+        + Number((mail as { failed?: number | null } | null)?.failed ?? 0)
+        + Number((gateway as { failed?: number | null } | null)?.failed ?? 0)
+        + Number((credentials as { problem?: number | null } | null)?.problem ?? 0)
+        + Number((sign as { failed_sign_tasks?: number | null; failed_signout_tasks?: number | null; failed_workflows?: number | null } | null)?.failed_sign_tasks ?? 0)
+        + Number((sign as { failed_sign_tasks?: number | null; failed_signout_tasks?: number | null; failed_workflows?: number | null } | null)?.failed_signout_tasks ?? 0)
+        + Number((sign as { failed_sign_tasks?: number | null; failed_signout_tasks?: number | null; failed_workflows?: number | null } | null)?.failed_workflows ?? 0),
+      failedTasks: (tasks as { failed?: number | null } | null)?.failed ?? 0,
+      failedEmails: (mail as { failed?: number | null } | null)?.failed ?? 0,
+      failedGatewayJobs: (gateway as { failed?: number | null } | null)?.failed ?? 0,
+      problemCredentials: (credentials as { problem?: number | null } | null)?.problem ?? 0,
+    },
+    recentFailures,
+    config,
+  });
 }
 
 export async function adminConfig(env: AppEnv, request: Request): Promise<Response> {
@@ -1862,24 +1996,332 @@ export async function adminTestEmail(env: AppEnv, request: Request): Promise<Res
 
 export async function adminCollection(env: AppEnv, request: Request, collection: string): Promise<Response> {
   await requireAdmin(env, request);
-  const queries: Record<string, string> = {
-    users: "SELECT id, email, role, status, student_id, real_name, allow_auto_join_reservation, created_at, last_login_at FROM users ORDER BY created_at DESC LIMIT 200",
-    credentials: "SELECT user_id, credential_status, access_token_expires_seconds, access_token_obtained_at, token_version, last_refresh_success_at, refresh_failure_count, last_error_code, last_error_message FROM official_credentials ORDER BY updated_at DESC LIMIT 200",
-    tasks: "SELECT * FROM reservation_tasks ORDER BY created_at DESC LIMIT 200",
-    reservations: "SELECT * FROM reservations ORDER BY created_at DESC LIMIT 200",
-    invitations: "SELECT id, task_id, inviter_user_id, invitee_user_id, invitee_student_id, invitee_real_name, status, approval_source, expires_at, responded_at, created_at FROM reservation_invitations ORDER BY created_at DESC LIMIT 200",
-    teams: "SELECT t.id, t.name, t.description, t.leader_user_id, u.real_name AS leader_name, t.created_at FROM teams t JOIN users u ON u.id = t.leader_user_id ORDER BY t.created_at DESC LIMIT 200",
-    "team-invitations": "SELECT id, team_id, inviter_user_id, invitee_user_id, status, expires_at, responded_at, created_at FROM team_invitations ORDER BY created_at DESC LIMIT 200",
-    "sign-tasks": "SELECT id, reservation_id, scheduled_at, status, attempt_count, executed_at FROM sign_tasks ORDER BY scheduled_at DESC LIMIT 200",
-    "signout-tasks": "SELECT id, reservation_id, official_reservation_id, scheduled_at, status, attempt_count, executed_at FROM signout_tasks ORDER BY scheduled_at DESC LIMIT 200",
-    emails: "SELECT id, recipient_email, template, dedupe_key, status, attempt_count, next_attempt_at, last_error_message, created_at, sent_at FROM email_outbox ORDER BY created_at DESC LIMIT 200",
-    "audit-logs": "SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 300",
-    "gateway-jobs": "SELECT id, kind, lane, owner_user_id, status, priority, attempt_count, max_attempts, error_code, error_message, created_at, started_at, finished_at FROM official_gateway_jobs ORDER BY created_at DESC LIMIT 300",
-    "gateway-snapshots": "SELECT cache_key, scope, owner_user_id, kind, version, fresh_until, stale_until, refreshed_at, refresh_job_id, last_error_code, last_error_message FROM official_gateway_snapshots ORDER BY updated_at DESC LIMIT 300",
+  const config = adminCollections[collection];
+  if (!config) throw new HttpError(404, "NOT_FOUND", "接口不存在");
+  const filters = adminListFilters(request);
+  const listWhere = buildAdminWhere(config, filters, true);
+  const countWhere = buildAdminWhere(config, filters, true);
+  const summaryWhere = buildAdminWhere(config, filters, false);
+  const [items, count, summaryRows] = await Promise.all([
+    selectAdminRows(env, `${config.select} ${config.from} ${listWhere.sql} ${config.orderBy} LIMIT ? OFFSET ?`, [...listWhere.params, filters.pageSize, filters.offset]),
+    selectAdminFirst<{ total: number }>(env, `SELECT COUNT(*) AS total ${config.from} ${countWhere.sql}`, countWhere.params),
+    config.summaryColumn
+      ? selectAdminRows<{ key: string | null; count: number }>(env, `SELECT ${config.summaryColumn} AS key, COUNT(*) AS count ${config.from} ${summaryWhere.sql} GROUP BY ${config.summaryColumn}`, summaryWhere.params)
+      : Promise.resolve([]),
+  ]);
+  const summary: Record<string, number> = {};
+  for (const row of summaryRows) summary[String(row.key ?? "UNKNOWN")] = Number(row.count ?? 0);
+  return ok({ items, total: Number(count?.total ?? 0), page: filters.page, pageSize: filters.pageSize, summary });
+}
+
+type AdminListFilters = {
+  page: number;
+  pageSize: number;
+  offset: number;
+  q: string;
+  status: string;
+  fromMs: number | null;
+  toMs: number | null;
+};
+
+type AdminCollectionConfig = {
+  select: string;
+  from: string;
+  orderBy: string;
+  searchColumns?: string[];
+  statusColumn?: string;
+  dateColumn?: string;
+  summaryColumn?: string;
+};
+
+const adminCollections: Record<string, AdminCollectionConfig> = {
+  users: {
+    select: `SELECT u.id, u.email, u.role, u.status, u.student_id, u.real_name,
+                    u.allow_auto_join_reservation, u.square_visibility, u.created_at, u.last_login_at,
+                    c.credential_status, c.last_refresh_success_at, c.refresh_failure_count,
+                    (SELECT COUNT(*) FROM reservation_tasks t WHERE t.owner_user_id = u.id OR t.requested_by_user_id = u.id) AS task_count,
+                    (SELECT COUNT(*) FROM reservations r WHERE r.owner_user_id = u.id OR r.requested_by_user_id = u.id) AS reservation_count`,
+    from: "FROM users u LEFT JOIN official_credentials c ON c.user_id = u.id",
+    orderBy: "ORDER BY u.created_at DESC",
+    searchColumns: ["u.id", "u.email", "u.student_id", "u.real_name"],
+    statusColumn: "u.status",
+    dateColumn: "u.created_at",
+    summaryColumn: "u.status",
+  },
+  credentials: {
+    select: `SELECT c.user_id, u.email, u.student_id, u.real_name, u.status AS user_status,
+                    c.credential_status, c.access_token_expires_seconds, c.access_token_obtained_at,
+                    c.token_version, c.last_refresh_attempt_at, c.last_refresh_success_at,
+                    c.refresh_failure_count, c.last_error_code, c.last_error_message,
+                    c.created_at, c.updated_at`,
+    from: "FROM official_credentials c JOIN users u ON u.id = c.user_id",
+    orderBy: "ORDER BY c.updated_at DESC",
+    searchColumns: ["c.user_id", "u.email", "u.student_id", "u.real_name", "c.last_error_code"],
+    statusColumn: "c.credential_status",
+    dateColumn: "c.updated_at",
+    summaryColumn: "c.credential_status",
+  },
+  tasks: {
+    select: `SELECT t.id, t.owner_user_id, u.email AS owner_email, u.real_name AS owner_name,
+                    u.student_id AS owner_student_id, t.requested_by_user_id, t.target_date,
+                    t.start_time, t.end_time, t.use_description, t.status, t.attempt_count,
+                    t.last_attempt_at, t.official_reservation_id, t.failure_code,
+                    t.failure_message, t.created_at, t.updated_at,
+                    (SELECT GROUP_CONCAT(room_name_snapshot, '、') FROM reservation_task_candidate_rooms r WHERE r.task_id = t.id ORDER BY priority) AS candidate_rooms,
+                    (SELECT COUNT(*) FROM reservation_task_members m WHERE m.task_id = t.id) AS member_count`,
+    from: "FROM reservation_tasks t JOIN users u ON u.id = t.owner_user_id",
+    orderBy: "ORDER BY t.created_at DESC",
+    searchColumns: ["t.id", "u.email", "u.real_name", "u.student_id", "t.official_reservation_id", "t.failure_code"],
+    statusColumn: "t.status",
+    dateColumn: "t.created_at",
+    summaryColumn: "t.status",
+  },
+  reservations: {
+    select: `SELECT r.id, r.task_id, r.owner_user_id, u.email AS owner_email,
+                    u.real_name AS owner_name, r.requested_by_user_id, r.official_reservation_id,
+                    r.room_id, r.room_name_snapshot, r.date, r.start_time, r.end_time,
+                    r.submission_type, r.status, r.official_status, r.synced_at,
+                    r.created_at, r.updated_at`,
+    from: "FROM reservations r JOIN users u ON u.id = r.owner_user_id",
+    orderBy: "ORDER BY r.created_at DESC",
+    searchColumns: ["r.id", "r.official_reservation_id", "r.room_name_snapshot", "u.email", "u.real_name"],
+    statusColumn: "r.status",
+    dateColumn: "r.created_at",
+    summaryColumn: "r.status",
+  },
+  invitations: {
+    select: `SELECT i.id, i.task_id, i.inviter_user_id, inviter.email AS inviter_email,
+                    i.invitee_user_id, invitee.email AS invitee_email, i.invitee_student_id,
+                    i.invitee_real_name, i.status, i.approval_source, i.expires_at,
+                    i.responded_at, i.created_at`,
+    from: "FROM reservation_invitations i JOIN users inviter ON inviter.id = i.inviter_user_id LEFT JOIN users invitee ON invitee.id = i.invitee_user_id",
+    orderBy: "ORDER BY i.created_at DESC",
+    searchColumns: ["i.id", "i.task_id", "inviter.email", "invitee.email", "i.invitee_student_id", "i.invitee_real_name"],
+    statusColumn: "i.status",
+    dateColumn: "i.created_at",
+    summaryColumn: "i.status",
+  },
+  teams: {
+    select: `SELECT t.id, t.name, t.description, t.leader_user_id, u.email AS leader_email,
+                    u.real_name AS leader_name, t.created_at,
+                    (SELECT COUNT(*) + 1 FROM team_members m WHERE m.team_id = t.id) AS member_count`,
+    from: "FROM teams t JOIN users u ON u.id = t.leader_user_id",
+    orderBy: "ORDER BY t.created_at DESC",
+    searchColumns: ["t.id", "t.name", "t.description", "u.email", "u.real_name"],
+    dateColumn: "t.created_at",
+  },
+  "team-invitations": {
+    select: `SELECT i.id, i.team_id, t.name AS team_name, i.inviter_user_id,
+                    inviter.email AS inviter_email, i.invitee_user_id, invitee.email AS invitee_email,
+                    i.status, i.expires_at, i.responded_at, i.created_at`,
+    from: "FROM team_invitations i JOIN teams t ON t.id = i.team_id JOIN users inviter ON inviter.id = i.inviter_user_id JOIN users invitee ON invitee.id = i.invitee_user_id",
+    orderBy: "ORDER BY i.created_at DESC",
+    searchColumns: ["i.id", "t.name", "inviter.email", "invitee.email"],
+    statusColumn: "i.status",
+    dateColumn: "i.created_at",
+    summaryColumn: "i.status",
+  },
+  "sign-tasks": {
+    select: `SELECT s.id, s.reservation_id, r.official_reservation_id, r.room_name_snapshot,
+                    r.date, r.start_time, r.end_time, u.email AS owner_email,
+                    s.scheduled_at, s.status, s.attempt_count, s.parameter_received_at, s.executed_at`,
+    from: "FROM sign_tasks s JOIN reservations r ON r.id = s.reservation_id JOIN users u ON u.id = r.owner_user_id",
+    orderBy: "ORDER BY s.scheduled_at DESC",
+    searchColumns: ["s.id", "s.reservation_id", "r.official_reservation_id", "r.room_name_snapshot", "u.email"],
+    statusColumn: "s.status",
+    dateColumn: "s.scheduled_at",
+    summaryColumn: "s.status",
+  },
+  "signout-tasks": {
+    select: `SELECT s.id, s.reservation_id, s.official_reservation_id, r.room_name_snapshot,
+                    r.date, r.start_time, r.end_time, u.email AS owner_email,
+                    s.scheduled_at, s.status, s.attempt_count, s.executed_at`,
+    from: "FROM signout_tasks s JOIN reservations r ON r.id = s.reservation_id JOIN users u ON u.id = r.owner_user_id",
+    orderBy: "ORDER BY s.scheduled_at DESC",
+    searchColumns: ["s.id", "s.reservation_id", "s.official_reservation_id", "r.room_name_snapshot", "u.email"],
+    statusColumn: "s.status",
+    dateColumn: "s.scheduled_at",
+    summaryColumn: "s.status",
+  },
+  emails: {
+    select: "SELECT id, recipient_email, template, dedupe_key, status, attempt_count, next_attempt_at, delivery_lock_until, last_error_message, created_at, sent_at",
+    from: "FROM email_outbox",
+    orderBy: "ORDER BY created_at DESC",
+    searchColumns: ["id", "recipient_email", "template", "dedupe_key", "last_error_message"],
+    statusColumn: "status",
+    dateColumn: "created_at",
+    summaryColumn: "status",
+  },
+  "audit-logs": {
+    select: "SELECT id, actor_user_id, actor_type, action, target_type, target_id, result, metadata_redacted_json, created_at",
+    from: "FROM audit_logs",
+    orderBy: "ORDER BY created_at DESC",
+    searchColumns: ["id", "actor_user_id", "action", "target_type", "target_id", "result"],
+    statusColumn: "result",
+    dateColumn: "created_at",
+    summaryColumn: "result",
+  },
+  "gateway-jobs": {
+    select: `SELECT j.id, j.kind, j.lane, j.owner_user_id, u.email AS owner_email,
+                    j.status, j.priority, j.attempt_count, j.max_attempts, j.available_at,
+                    j.error_code, j.error_message, j.created_at, j.started_at, j.finished_at, j.updated_at`,
+    from: "FROM official_gateway_jobs j LEFT JOIN users u ON u.id = j.owner_user_id",
+    orderBy: "ORDER BY j.created_at DESC",
+    searchColumns: ["j.id", "j.kind", "j.lane", "u.email", "j.error_code", "j.error_message"],
+    statusColumn: "j.status",
+    dateColumn: "j.created_at",
+    summaryColumn: "j.status",
+  },
+  "gateway-snapshots": {
+    select: `SELECT s.cache_key, s.scope, s.owner_user_id, u.email AS owner_email,
+                    s.kind, s.version, s.fresh_until, s.stale_until, s.refreshed_at,
+                    s.refresh_job_id, s.last_error_code, s.last_error_message, s.created_at, s.updated_at`,
+    from: "FROM official_gateway_snapshots s LEFT JOIN users u ON u.id = s.owner_user_id",
+    orderBy: "ORDER BY s.updated_at DESC",
+    searchColumns: ["s.cache_key", "s.kind", "u.email", "s.last_error_code", "s.last_error_message"],
+    statusColumn: "s.kind",
+    dateColumn: "s.updated_at",
+    summaryColumn: "s.kind",
+  },
+};
+
+function adminListFilters(request: Request): AdminListFilters {
+  const params = new URL(request.url).searchParams;
+  const page = boundedQueryInteger(params.get("page"), 1, 1, 100_000);
+  const pageSize = boundedQueryInteger(params.get("pageSize"), 25, 1, 100);
+  const fromMs = queryDateMs(params.get("from"), false);
+  const toMs = queryDateMs(params.get("to"), true);
+  return {
+    page,
+    pageSize,
+    offset: (page - 1) * pageSize,
+    q: (params.get("q") ?? "").trim().slice(0, 100),
+    status: (params.get("status") ?? "").trim().slice(0, 80),
+    fromMs,
+    toMs,
   };
-  const sql = queries[collection];
-  if (!sql) throw new HttpError(404, "NOT_FOUND", "接口不存在");
-  return ok((await env.DB.prepare(sql).all()).results);
+}
+
+function boundedQueryInteger(value: string | null, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(parsed)));
+}
+
+function queryDateMs(value: string | null, endOfDay: boolean): number | null {
+  if (!value) return null;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) throw new HttpError(400, "INVALID_DATE", "日期格式错误");
+  const timestamp = Date.parse(`${value}T00:00:00+08:00`);
+  if (!Number.isFinite(timestamp)) throw new HttpError(400, "INVALID_DATE", "日期格式错误");
+  return endOfDay ? timestamp + 24 * 60 * 60 * 1000 - 1 : timestamp;
+}
+
+function buildAdminWhere(config: AdminCollectionConfig, filters: AdminListFilters, includeStatus: boolean): { sql: string; params: unknown[] } {
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+  if (filters.q && config.searchColumns?.length) {
+    const queryParts = config.searchColumns.map((column) => `LOWER(COALESCE(CAST(${column} AS TEXT), '')) LIKE ?`);
+    conditions.push(`(${queryParts.join(" OR ")})`);
+    params.push(...config.searchColumns.map(() => `%${filters.q.toLowerCase()}%`));
+  }
+  if (includeStatus && filters.status && config.statusColumn) {
+    conditions.push(`${config.statusColumn} = ?`);
+    params.push(filters.status);
+  }
+  if (filters.fromMs !== null && config.dateColumn) {
+    conditions.push(`${config.dateColumn} >= ?`);
+    params.push(filters.fromMs);
+  }
+  if (filters.toMs !== null && config.dateColumn) {
+    conditions.push(`${config.dateColumn} <= ?`);
+    params.push(filters.toMs);
+  }
+  return { sql: conditions.length ? `WHERE ${conditions.join(" AND ")}` : "", params };
+}
+
+async function selectAdminRows<T = Record<string, unknown>>(env: AppEnv, sql: string, params: unknown[]): Promise<T[]> {
+  const statement = params.length ? env.DB.prepare(sql).bind(...params) : env.DB.prepare(sql);
+  return (await statement.all<T>()).results;
+}
+
+async function selectAdminFirst<T = Record<string, unknown>>(env: AppEnv, sql: string, params: unknown[]): Promise<T | null> {
+  const statement = params.length ? env.DB.prepare(sql).bind(...params) : env.DB.prepare(sql);
+  return statement.first<T>();
+}
+
+export async function adminCancelTask(env: AppEnv, request: Request, taskId: string): Promise<Response> {
+  const admin = await requireAdmin(env, request);
+  const now = Date.now();
+  const result = await env.DB.prepare(
+    `UPDATE reservation_tasks
+        SET status = 'CANCELLED', updated_at = ?
+      WHERE id = ? AND status IN ('DRAFT', 'WAITING_WINDOW', 'WAITING_MEMBERS', 'READY')`,
+  ).bind(now, taskId).run();
+  if (result.meta.changes !== 1) throw new HttpError(409, "TASK_STATUS_CONFLICT", "当前任务状态不允许取消");
+  await releaseReservationQuota(env, "TASK", taskId);
+  await audit(env.DB, { actorUserId: admin.id, actorType: "ADMIN", action: "ADMIN_TASK_CANCELLED", targetType: "RESERVATION_TASK", targetId: taskId, result: "SUCCESS" });
+  return ok({ id: taskId, status: "CANCELLED" });
+}
+
+export async function adminRequireCredentialRebind(env: AppEnv, request: Request, userId: string): Promise<Response> {
+  const admin = await requireAdmin(env, request);
+  const user = await env.DB.prepare("SELECT id, email FROM users WHERE id = ? AND status <> 'DELETED'").bind(userId).first<{ id: string; email: string }>();
+  if (!user) throw new HttpError(404, "NOT_FOUND", "用户不存在");
+  const result = await env.DB.prepare(
+    `UPDATE official_credentials
+        SET credential_status = 'REAUTH_REQUIRED', refresh_lock_until = NULL, updated_at = ?
+      WHERE user_id = ? AND credential_status <> 'DISABLED'`,
+  ).bind(Date.now(), userId).run();
+  if (result.meta.changes !== 1) throw new HttpError(409, "CREDENTIAL_STATUS_CONFLICT", "当前凭证状态无法要求重新绑定");
+  await queueMail(env, user.email, "OFFICIAL_REAUTH_REQUIRED", {}, { dedupeKey: `admin-reauth:${userId}` });
+  await audit(env.DB, { actorUserId: admin.id, actorType: "ADMIN", action: "ADMIN_CREDENTIAL_REBIND_REQUIRED", targetType: "USER", targetId: userId, result: "SUCCESS" });
+  return ok({ id: userId, credentialStatus: "REAUTH_REQUIRED" });
+}
+
+export async function adminRetryEmail(env: AppEnv, request: Request, emailId: string): Promise<Response> {
+  const admin = await requireAdmin(env, request);
+  const now = Date.now();
+  const result = await env.DB.prepare(
+    `UPDATE email_outbox
+        SET status = 'PENDING', next_attempt_at = ?, delivery_lock_until = NULL,
+            last_error_message = NULL
+      WHERE id = ?
+        AND (status = 'FAILED' OR (status = 'PENDING' AND delivery_lock_until IS NOT NULL AND delivery_lock_until < ?))`,
+  ).bind(now, emailId, now).run();
+  if (result.meta.changes !== 1) throw new HttpError(409, "EMAIL_STATUS_CONFLICT", "当前邮件状态不允许重试");
+  await audit(env.DB, { actorUserId: admin.id, actorType: "ADMIN", action: "ADMIN_EMAIL_RETRIED", targetType: "EMAIL", targetId: emailId, result: "SUCCESS" });
+  return ok({ id: emailId, status: "PENDING" });
+}
+
+export async function adminCancelGatewayJob(env: AppEnv, request: Request, jobId: string): Promise<Response> {
+  const admin = await requireAdmin(env, request);
+  const now = Date.now();
+  const result = await env.DB.prepare(
+    `UPDATE official_gateway_jobs
+        SET status = 'CANCELLED', locked_at = NULL, lease_until = NULL,
+            error_code = 'ADMIN_CANCELLED', error_message = '管理员已取消排队任务',
+            finished_at = ?, updated_at = ?
+      WHERE id = ? AND status = 'QUEUED'`,
+  ).bind(now, now, jobId).run();
+  if (result.meta.changes !== 1) throw new HttpError(409, "GATEWAY_JOB_STATUS_CONFLICT", "只有排队中的访问任务可以取消");
+  await audit(env.DB, { actorUserId: admin.id, actorType: "ADMIN", action: "ADMIN_GATEWAY_JOB_CANCELLED", targetType: "GATEWAY_JOB", targetId: jobId, result: "SUCCESS" });
+  return ok({ id: jobId, status: "CANCELLED" });
+}
+
+export async function adminRetryGatewayJob(env: AppEnv, request: Request, jobId: string): Promise<Response> {
+  const admin = await requireAdmin(env, request);
+  const now = Date.now();
+  const result = await env.DB.prepare(
+    `UPDATE official_gateway_jobs
+        SET status = 'QUEUED', locked_at = NULL, lease_until = NULL,
+            available_at = ?, attempt_count = 0, result_json = NULL,
+            error_code = NULL, error_message = NULL, started_at = NULL,
+            finished_at = NULL, updated_at = ?
+      WHERE id = ? AND status = 'FAILED' AND lane = 'READ'`,
+  ).bind(now, now, jobId).run();
+  if (result.meta.changes !== 1) throw new HttpError(409, "GATEWAY_JOB_STATUS_CONFLICT", "只有失败的只读访问任务可以重试");
+  await audit(env.DB, { actorUserId: admin.id, actorType: "ADMIN", action: "ADMIN_GATEWAY_JOB_RETRIED", targetType: "GATEWAY_JOB", targetId: jobId, result: "SUCCESS" });
+  return ok({ id: jobId, status: "QUEUED" });
 }
 
 export async function adminUserStatus(env: AppEnv, request: Request, userId: string): Promise<Response> {

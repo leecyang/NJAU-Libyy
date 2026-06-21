@@ -11,12 +11,12 @@ import {
   LogOut,
   Mail,
   RefreshCw,
-  Settings,
   Shield,
   UserMinus,
   UsersRound,
 } from "lucide-react";
-import { api, ApiError, type GatewayJob, waitForGatewayJob } from "./api";
+import { api, type GatewayJob, waitForGatewayJob } from "./api";
+import { AdminPage } from "./admin";
 
 type Page = "rooms" | "tasks" | "teams" | "history" | "admin";
 type Route = {
@@ -2031,59 +2031,6 @@ function HistoryPage({ toast }: { toast: (message: string, error?: boolean) => v
   );
 }
 
-function AdminPage({
-  toast,
-  navigate,
-  collection = "users",
-}: {
-  toast: (message: string, error?: boolean) => void;
-  navigate: (path: string) => void;
-  collection?: string;
-}) {
-  const [body, setBody] = useState<unknown>(null);
-  const collections = ["users", "credentials", "tasks", "reservations", "invitations", "teams", "team-invitations", "sign-tasks", "signout-tasks", "emails", "audit-logs", "gateway-jobs", "gateway-snapshots"];
-  const collectionLabels: Record<string, string> = {
-    users: "使用账号",
-    credentials: "校园账号连接",
-    tasks: "提前预约安排",
-    reservations: "全部预约",
-    invitations: "预约邀请",
-    teams: "同行小队",
-    "team-invitations": "小队邀请",
-    "sign-tasks": "签到安排",
-    "signout-tasks": "签退安排",
-    emails: "通知送达",
-    "audit-logs": "重要操作",
-    "gateway-jobs": "内容获取情况",
-    "gateway-snapshots": "可用时间更新",
-  };
-
-  async function load(path = `/api/v1/admin/${collection}`) {
-    try {
-      setBody(await api(path));
-    } catch (error) {
-      toast(error instanceof Error ? error.message : "加载失败", true);
-    }
-  }
-  useEffect(() => { void load(); }, [collection]);
-
-  return (
-    <Card title="运营管理" icon={<Settings size={20} />}>
-      <div className="admin-intro">
-        <strong>{collectionLabels[collection] ?? "运营记录"}</strong>
-        <span>查看账号、预约与通知情况，及时处理需要关注的内容。</span>
-      </div>
-      <div className="toolbar admin-toolbar">
-        <select value={collection} onChange={(event) => navigate(`/admin/${event.target.value}`)}>
-          {collections.map((item) => <option key={item} value={item}>{collectionLabels[item]}</option>)}
-        </select>
-        <Button type="button" onClick={() => api("/api/v1/admin/emails/test", { method: "POST" }).then(() => toast("确认邮件已发送，请检查收件箱")).catch((error: ApiError) => toast(error.message, true))}>确认邮件可送达</Button>
-      </div>
-      <pre className="json-panel" aria-label={`${collectionLabels[collection] ?? "运营记录"}详情`}>{JSON.stringify(body, null, 2)}</pre>
-    </Card>
-  );
-}
-
 export function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [route, setRoute] = useState<Route>(() => routeFromPath(window.location.pathname));
@@ -2166,7 +2113,7 @@ export function App() {
         {route.page === "teams" && route.teamId && !route.teamMemberId ? <TeamDetailPage teamId={route.teamId} toast={toast} navigate={navigate} /> : null}
         {route.page === "teams" && !route.teamId ? <TeamsPage toast={toast} navigate={navigate} mode={route.teamMode ?? "list"} inviteTeamId={route.teamInviteId} /> : null}
         {route.page === "history" ? <HistoryPage toast={toast} /> : null}
-        {route.page === "admin" ? <AdminPage toast={toast} navigate={navigate} collection={route.adminCollection ?? "users"} /> : null}
+        {route.page === "admin" ? <AdminPage toast={toast} navigate={navigate} collection={route.adminCollection} /> : null}
       </main>
       <footer className="footer">
         <strong>NJAU Libyy</strong>

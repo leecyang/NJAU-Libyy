@@ -1,7 +1,12 @@
 import type { AppEnv } from "./config";
 import {
+  adminCancelGatewayJob,
+  adminCancelTask,
   adminCollection,
   adminConfig,
+  adminRequireCredentialRebind,
+  adminRetryEmail,
+  adminRetryGatewayJob,
   adminTestEmail,
   adminUserStatus,
   bind,
@@ -181,6 +186,16 @@ export async function routeApi(env: AppEnv, request: Request): Promise<Response>
 
   const adminStatus = /^\/api\/v1\/admin\/users\/([^/]+)\/status$/.exec(url.pathname);
   if (request.method === "PATCH" && adminStatus?.[1]) return adminUserStatus(env, request, adminStatus[1]);
+  const adminCredentialRebind = /^\/api\/v1\/admin\/users\/([^/]+)\/require-rebind$/.exec(url.pathname);
+  if (request.method === "POST" && adminCredentialRebind?.[1]) return adminRequireCredentialRebind(env, request, adminCredentialRebind[1]);
+  const adminTaskCancel = /^\/api\/v1\/admin\/tasks\/([^/]+)\/cancel$/.exec(url.pathname);
+  if (request.method === "POST" && adminTaskCancel?.[1]) return adminCancelTask(env, request, adminTaskCancel[1]);
+  const adminEmailRetry = /^\/api\/v1\/admin\/emails\/([^/]+)\/retry$/.exec(url.pathname);
+  if (request.method === "POST" && adminEmailRetry?.[1]) return adminRetryEmail(env, request, adminEmailRetry[1]);
+  const adminGatewayCancel = /^\/api\/v1\/admin\/gateway-jobs\/([^/]+)\/cancel$/.exec(url.pathname);
+  if (request.method === "POST" && adminGatewayCancel?.[1]) return adminCancelGatewayJob(env, request, adminGatewayCancel[1]);
+  const adminGatewayRetry = /^\/api\/v1\/admin\/gateway-jobs\/([^/]+)\/retry$/.exec(url.pathname);
+  if (request.method === "POST" && adminGatewayRetry?.[1]) return adminRetryGatewayJob(env, request, adminGatewayRetry[1]);
 
   return json({ ok: false, error: { code: "NOT_FOUND", message: "接口不存在" } }, 404);
 }
