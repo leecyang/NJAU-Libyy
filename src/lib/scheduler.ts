@@ -80,11 +80,11 @@ export async function runScheduler(env: AppEnv): Promise<void> {
     await Promise.all([expireInvitations(env, now), expireTeamInvitations(env, now)]);
   });
   await budget.run("accept-reservation-members", () => submitPendingMemberAcceptanceTasks(env, now, schedulerLimit(env, "SCHEDULER_SYNC_LIMIT", 5, 20)), 2500);
+  await budget.run("submit-sign-workflows", () => submitDueSignWorkflows(env, now, schedulerLimit(env, "SCHEDULER_SIGN_LIMIT", 5, 20)), 2500);
   await budget.run("prepare-reservation-tasks", () => prepareReservationTasks(env, now, schedulerLimit(env, "SCHEDULER_PREPARE_LIMIT", 5, 20)));
   await budget.run("submit-reservation-tasks", () => submitReadyReservationTasks(env, now, schedulerLimit(env, "SCHEDULER_RESERVATION_SUBMIT_LIMIT", 2, 10)), 4000);
   await budget.run("sync-official-reservations", () => syncPendingOfficialReservations(env, schedulerLimit(env, "SCHEDULER_SYNC_LIMIT", 3, 20)), 4000);
   await budget.run("backfill-sign-workflows", () => backfillSignWorkflows(env, schedulerLimit(env, "SCHEDULER_SIGN_LIMIT", 5, 20)), 3500);
-  await budget.run("submit-sign-workflows", () => submitDueSignWorkflows(env, now, schedulerLimit(env, "SCHEDULER_SIGN_LIMIT", 5, 20)), 3000);
   await budget.run("refresh-credentials", () => refreshDueCredentials(env, now, schedulerLimit(env, "SCHEDULER_REFRESH_LIMIT", 3, 20)), 4000);
   await budget.run("deliver-mail", () => deliverDueMail(env, now, schedulerLimit(env, "SCHEDULER_MAIL_LIMIT", 2, 10)), 4000);
   await budget.run("cleanup-sessions", () => cleanupSessions(env, now));
@@ -721,6 +721,24 @@ function publicWorkflowFailureReason(reason: string | null | undefined): string 
   return reason;
 }
 
+function officialRecordSigned(record: Pick<OfficialReservationRecord, "reservationStatus">): boolean {
+  return [31, 51, 53].includes(record.reservationStatus);
+}
+
+async function markWorkflowParticipantSignSuccess(
+  env: AppEnv,
+  workflowId: string,
+  userId: string,
+  record: Pick<OfficialReservationRecord, "signInTime">,
+): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE sign_workflow_participants
+        SET sign_status = 'SUCCESS', signed_at = COALESCE(signed_at, ?),
+            last_error_code = NULL, last_error_message = NULL, updated_at = ?
+      WHERE workflow_id = ? AND user_id = ?`,
+  ).bind(record.signInTime ?? Date.now(), Date.now(), workflowId, userId).run();
+}
+
 async function participantOfficialRecord(env: AppEnv, workflow: SignWorkflowRow, userId: string) {
   const token = await getAccessToken(env, userId);
   const profile = await getOfficialReservationProfile(env, userId, token);
@@ -765,12 +783,8 @@ export async function submitDueSignWorkflows(env: AppEnv, now: number, limit = 2
             ).bind(Date.now(), workflow.id, participant.user_id).run();
             continue;
           }
-          if ([31, 51, 53].includes(record.reservationStatus)) {
-            await env.DB.prepare(
-              `UPDATE sign_workflow_participants
-                  SET sign_status = 'SUCCESS', signed_at = COALESCE(signed_at, ?), updated_at = ?
-                WHERE workflow_id = ? AND user_id = ?`,
-            ).bind(record.signInTime ?? Date.now(), Date.now(), workflow.id, participant.user_id).run();
+          if (officialRecordSigned(record)) {
+            await markWorkflowParticipantSignSuccess(env, workflow.id, participant.user_id, record);
             continue;
           }
           if (record.reservationStatus !== 21 || (record.minSignTime && now < record.minSignTime)) continue;
@@ -793,12 +807,8 @@ export async function submitDueSignWorkflows(env: AppEnv, now: number, limit = 2
           const key = await createOfficialQrSignCheckCode(env, current.token, device.roomId, device.systemMac);
           await submitOfficialSign(env, current.token, device.roomId, device.systemMac, key);
           const confirmed = await participantOfficialRecord(env, workflow, participant.user_id);
-          if (confirmed.record && [31, 51, 53].includes(confirmed.record.reservationStatus)) {
-            await env.DB.prepare(
-              `UPDATE sign_workflow_participants
-                  SET sign_status = 'SUCCESS', signed_at = ?, last_error_code = NULL, last_error_message = NULL, updated_at = ?
-                WHERE workflow_id = ? AND user_id = ?`,
-            ).bind(confirmed.record.signInTime ?? Date.now(), Date.now(), workflow.id, participant.user_id).run();
+          if (confirmed.record && officialRecordSigned(confirmed.record)) {
+            await markWorkflowParticipantSignSuccess(env, workflow.id, participant.user_id, confirmed.record);
           } else {
             await env.DB.prepare(
               `UPDATE sign_workflow_participants SET sign_status = 'PENDING', last_error_code = 'SIGN_SYNC_PENDING', updated_at = ?
@@ -806,6 +816,13 @@ export async function submitDueSignWorkflows(env: AppEnv, now: number, limit = 2
             ).bind(Date.now(), workflow.id, participant.user_id).run();
           }
         } catch (error) {
+          if (error instanceof HttpError && error.code === "OFFICIAL_SIGN_ALREADY_COMPLETED") {
+            const confirmed = await participantOfficialRecord(env, workflow, participant.user_id).catch(() => null);
+            if (confirmed?.record && officialRecordSigned(confirmed.record)) {
+              await markWorkflowParticipantSignSuccess(env, workflow.id, participant.user_id, confirmed.record);
+              continue;
+            }
+          }
           await recoverExpiredOfficialLogin(env, participant.user_id, error);
           await env.DB.prepare(
             `UPDATE sign_workflow_participants
@@ -998,6 +1015,10 @@ export async function submitDueSignTasks(env: AppEnv, now: number, limit = 20): 
           signed = true;
           break;
         } catch (error) {
+          if (error instanceof HttpError && error.code === "OFFICIAL_SIGN_ALREADY_COMPLETED") {
+            signed = true;
+            break;
+          }
           lastErrorCode = error instanceof HttpError ? error.code : "OFFICIAL_SIGN_REJECTED";
         }
       }

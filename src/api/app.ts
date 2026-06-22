@@ -2306,7 +2306,7 @@ const adminCollections: Record<string, AdminCollectionConfig> = {
   "sign-tasks": {
     select: `SELECT s.id, s.reservation_id, r.official_reservation_id, r.room_name_snapshot,
                     r.date, r.start_time, r.end_time, u.email AS owner_email,
-                    s.scheduled_at, s.status, s.attempt_count, s.parameter_received_at, s.executed_at`,
+                    s.scheduled_at, s.status, s.attempt_count, NULL AS parameter_received_at, s.executed_at`,
     from: "FROM sign_tasks s JOIN reservations r ON r.id = s.reservation_id JOIN users u ON u.id = r.owner_user_id",
     orderBy: "ORDER BY s.scheduled_at DESC",
     searchColumns: ["s.id", "s.reservation_id", "r.official_reservation_id", "r.room_name_snapshot", "u.email"],

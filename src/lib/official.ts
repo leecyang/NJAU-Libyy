@@ -302,6 +302,7 @@ function officialFailure(response: Response, body: unknown): HttpError {
     return new HttpError(401, "OFFICIAL_REAUTH_REQUIRED", "官方登录已失效，请重新绑定凭证");
   }
   if (detail.code === 2004) return new HttpError(400, "OFFICIAL_TOKEN_INVALID", "凭证格式错误，请重新复制");
+  if (detail.code === 1720) return new HttpError(409, "OFFICIAL_SIGN_ALREADY_COMPLETED", "官方已完成签到");
   const officialCode = Number.isInteger(detail.code) ? detail.code : null;
   console.error(JSON.stringify({
     level: "error",
