@@ -1075,7 +1075,7 @@ export async function manualReservation(env: AppEnv, request: Request): Promise<
 }
 
 function publicReservationRows(rows: ReservationListRow[]): Array<Record<string, unknown>> {
-  return rows.map((row) => ({
+  return collapseReservationRows(rows).map((row) => ({
     ...row,
     statusLabel: reservationStatusLabel(row.status, row.official_status),
     status_label: reservationStatusLabel(row.status, row.official_status),
@@ -1084,6 +1084,59 @@ function publicReservationRows(rows: ReservationListRow[]): Array<Record<string,
     canOpenDoor: row.status === "SIGNED_IN",
     can_open_door: row.status === "SIGNED_IN",
   }));
+}
+
+function reservationGroupKeys(row: ReservationListRow): string[] {
+  const keys = row.official_reservation_id ? [`official:${row.official_reservation_id}`] : [];
+  try {
+    const parsed = JSON.parse(row.member_snapshot_json) as unknown;
+    if (Array.isArray(parsed)) {
+      const studentIds = parsed
+        .filter(isObject)
+        .map((member) => typeof member.userId === "string" ? member.userId : "")
+        .filter(Boolean);
+      if (studentIds.length) {
+        keys.push(`source:${canonicalReservationSource({
+          roomId: row.room_id,
+          date: row.date,
+          startTime: row.start_time,
+          endTime: row.end_time,
+          studentIds,
+        })}`);
+      }
+    }
+  } catch {
+    // Fall back to official reservation id when older snapshots cannot be parsed.
+  }
+  return keys.length ? keys : [`local:${row.id}`];
+}
+
+function reservationRowPriority(row: ReservationListRow): number {
+  if (row.status === "SIGNED_IN") return 90;
+  if (row.status === "SCHEDULED" || row.status === "SUCCESS" || row.status === "WAITING_MEMBER_CONFIRMATION") return 80;
+  if (row.status === "SUBMITTED_UNVERIFIED") return 70;
+  if (row.status === "SIGNED_OUT") return 50;
+  if (row.status === "CANCELLED") return 10;
+  return 40;
+}
+
+function collapseReservationRows(rows: ReservationListRow[]): ReservationListRow[] {
+  const groups = new Map<string, ReservationListRow>();
+  for (const row of rows) {
+    const keys = reservationGroupKeys(row);
+    const current = keys.map((key) => groups.get(key)).find((value): value is ReservationListRow => Boolean(value));
+    if (!current) {
+      keys.forEach((key) => groups.set(key, row));
+      continue;
+    }
+    const currentPriority = reservationRowPriority(current);
+    const rowPriority = reservationRowPriority(row);
+    const selected = rowPriority > currentPriority || (rowPriority === currentPriority && row.created_at > current.created_at)
+      ? row
+      : current;
+    [...keys, ...reservationGroupKeys(current)].forEach((key) => groups.set(key, selected));
+  }
+  return [...new Set(groups.values())];
 }
 
 async function reservationRowsForUser(env: AppEnv, userId: string): Promise<ReservationListRow[]> {
