@@ -586,9 +586,29 @@ function maskStudentId(value: string | null): string | null {
   return `${value.slice(0, 2)}****${value.slice(-2)}`;
 }
 
+function reservationAccepted(record: OfficialReservationRecord): boolean {
+  return [21, 31, 51, 53].includes(record.reservationStatus);
+}
+
 function memberAcceptanceComplete(record: OfficialReservationRecord, members: ResolvedMember[]): boolean {
-  if (!members.length) return true;
-  return record.reservationStatus !== 12;
+  if (!members.length) return reservationAccepted(record);
+  return reservationAccepted(record);
+}
+
+function matchingOfficialReservation(
+  records: OfficialReservationRecord[],
+  input: { officialReservationId?: string; roomId: number; date: string; startTime: string; endTime: string },
+): OfficialReservationRecord | null {
+  return records.find((record) => String(record.id) === input.officialReservationId)
+    ?? records.find((record) => {
+      const recordStart = shanghaiParts(record.startTime);
+      const recordEnd = shanghaiParts(record.endTime);
+      return record.roomId === input.roomId
+        && recordStart.date === input.date
+        && recordStart.time === input.startTime
+        && recordEnd.time === input.endTime;
+    })
+    ?? null;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -600,6 +620,7 @@ async function acceptTeamMembersUntilConfirmed(
   primaryUser: User,
   officialReservationId: string,
   members: ResolvedMember[],
+  reservation: { roomId: number; date: string; startTime: string; endTime: string },
 ): Promise<{ accepted: number; failed: number; record: OfficialReservationRecord }> {
   let lastRecord: OfficialReservationRecord | null = null;
   let lastError: unknown = null;
@@ -609,16 +630,34 @@ async function acceptTeamMembersUntilConfirmed(
     let acceptedThisRound = 0;
     for (const member of members) {
       try {
-        await acceptOfficialReservation(env, await getAccessToken(env, member.localUserId), officialReservationId);
-        acceptedThisRound += 1;
+        const memberToken = await getAccessToken(env, member.localUserId);
+        const memberProfile = await getOfficialReservationProfile(env, member.localUserId, memberToken);
+        const memberRecord = matchingOfficialReservation(
+          await fetchOfficialReservationHistory(env, memberToken, memberProfile.studentId),
+          { officialReservationId, ...reservation },
+        );
+        if (!memberRecord) throw new HttpError(502, "MEMBER_RESERVATION_NOT_FOUND", "成员端暂未同步到官方预约邀请");
+        if (reservationAccepted(memberRecord)) {
+          acceptedThisRound += 1;
+          continue;
+        }
+        if (memberRecord.reservationStatus !== 12) {
+          throw new HttpError(409, "MEMBER_RESERVATION_NOT_ACCEPTABLE", "成员端预约状态无法自动同意");
+        }
+        await acceptOfficialReservation(env, memberToken, String(memberRecord.id));
+        const confirmed = matchingOfficialReservation(
+          await fetchOfficialReservationHistory(env, memberToken, memberProfile.studentId),
+          { officialReservationId: String(memberRecord.id), ...reservation },
+        );
+        if (confirmed && reservationAccepted(confirmed)) acceptedThisRound += 1;
       } catch (error) {
         lastError = error;
       }
     }
 
     const records = await syncOfficialReservationHistory(env, primaryUser);
-    lastRecord = records.find((record) => String(record.id) === officialReservationId) ?? lastRecord;
-    if (lastRecord && memberAcceptanceComplete(lastRecord, members)) {
+    lastRecord = matchingOfficialReservation(records, { officialReservationId, ...reservation }) ?? lastRecord;
+    if (lastRecord && acceptedThisRound === members.length && memberAcceptanceComplete(lastRecord, members)) {
       return { accepted: members.length, failed: 0, record: lastRecord };
     }
 
@@ -634,7 +673,49 @@ async function acceptTeamMembersUntilConfirmed(
     }
   }
 
-  throw new HttpError(502, "MEMBER_ACCEPTANCE_INCOMPLETE", "未完成全部成员同意预约，请稍后刷新预约历史确认");
+  await enqueueMemberAcceptanceTasks(env, primaryUser.id, officialReservationId, members, reservation);
+  throw new HttpError(502, "MEMBER_ACCEPTANCE_INCOMPLETE", "未完成全部成员同意预约，系统会继续在后台自动同意");
+}
+
+async function enqueueMemberAcceptanceTasks(
+  env: AppEnv,
+  ownerUserId: string,
+  officialReservationId: string,
+  members: ResolvedMember[],
+  reservation: { roomId: number; date: string; startTime: string; endTime: string },
+): Promise<void> {
+  const local = await env.DB.prepare(
+    "SELECT id FROM reservations WHERE owner_user_id = ? AND official_reservation_id = ?",
+  ).bind(ownerUserId, officialReservationId).first<{ id: string }>();
+  const now = Date.now();
+  await env.DB.batch(members.map((member) => env.DB.prepare(
+    `INSERT INTO reservation_member_acceptance_tasks
+      (id, reservation_id, owner_user_id, member_user_id, official_reservation_id, room_id, date, start_time, end_time,
+       status, attempt_count, next_attempt_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, ?)
+     ON CONFLICT(member_user_id, official_reservation_id) DO UPDATE SET
+       reservation_id = COALESCE(excluded.reservation_id, reservation_member_acceptance_tasks.reservation_id),
+       owner_user_id = excluded.owner_user_id,
+       official_reservation_id = excluded.official_reservation_id,
+       status = CASE WHEN reservation_member_acceptance_tasks.status = 'SUCCESS' THEN 'SUCCESS' ELSE 'PENDING' END,
+       next_attempt_at = excluded.next_attempt_at,
+       last_error_code = NULL,
+       last_error_message = NULL,
+       updated_at = excluded.updated_at`,
+  ).bind(
+    crypto.randomUUID(),
+    local?.id ?? null,
+    ownerUserId,
+    member.localUserId,
+    officialReservationId,
+    reservation.roomId,
+    reservation.date,
+    reservation.startTime,
+    reservation.endTime,
+    now,
+    now,
+    now,
+  )));
 }
 
 async function localReservationLimits(env: AppEnv, userId: string, date: string, duration: number): Promise<void> {
@@ -1008,7 +1089,7 @@ async function executeManualReservation(env: AppEnv, job: OfficialGatewayJob): P
       if (!matched) throw new HttpError(502, "RESERVATION_SYNC_FAILED", "官方已接收预约，但订单回读失败，请在预约历史中刷新");
       let acceptance = { accepted: 0, failed: 0 };
       if (members.length) {
-        const result = await acceptTeamMembersUntilConfirmed(env, primaryUser, String(matched.id), members);
+        const result = await acceptTeamMembersUntilConfirmed(env, primaryUser, String(matched.id), members, { roomId, date, startTime, endTime });
         acceptance = { accepted: result.accepted, failed: result.failed };
         matched = result.record;
       } else if (memberAcceptanceComplete(matched, members) === false) {
