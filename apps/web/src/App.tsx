@@ -238,6 +238,17 @@ function dayLabel(date: string): string {
   return `${date.slice(5)} ${weekday}`;
 }
 
+function datePrimaryText(date: string | number | null | undefined): string {
+  const value = String(date ?? "");
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? dayLabel(value) : value || "待定";
+}
+
+function timeRangeText(startTime: string | number | null | undefined, endTime: string | number | null | undefined): string {
+  const start = String(startTime ?? "");
+  const end = String(endTime ?? "");
+  return start && end ? `${start}-${end}` : "待定";
+}
+
 function formatTimestamp(value: number | string | null | undefined): string {
   const timestamp = typeof value === "string" ? Number(value) : value;
   if (!timestamp || !Number.isFinite(timestamp)) return "待定";
@@ -1495,8 +1506,26 @@ function TasksPage({
             <div className="section-subtitle"><strong>预约开放后提交</strong><span>{tasks.length} 项</span></div>
             <div className="list">
               {sortTasks(tasks).map((task) => (
-                <article className={`list-row${activeTask(task) ? " active-record" : ""}`} key={String(task.id)}>
-                  <div><strong>{String(task.target_date)} {String(task.start_time)}-{String(task.end_time)}{activeTask(task) ? <em className="active-badge">进行中</em> : null}</strong><span>{statusText(task.status as string | number | null | undefined)} · {taskCandidateText(task)}</span></div>
+                <article className={`list-row schedule-row${activeTask(task) ? " active-record" : ""}`} key={String(task.id)}>
+                  <div className="schedule-main">
+                    <div className="record-room">
+                      <span className="record-label">候选房间</span>
+                      <strong>{taskCandidateText(task)}</strong>
+                      <span className="record-muted">{statusText(task.status as string | number | null | undefined)}</span>
+                    </div>
+                    <div className="record-time-grid">
+                      <div className="record-time-block">
+                        <span>日期</span>
+                        <strong>{datePrimaryText(task.target_date)}</strong>
+                        <small>{String(task.target_date ?? "待定")}</small>
+                      </div>
+                      <div className="record-time-block time">
+                        <span>时间</span>
+                        <strong>{timeRangeText(task.start_time, task.end_time)}</strong>
+                      </div>
+                    </div>
+                    {activeTask(task) ? <em className="active-badge">进行中</em> : null}
+                  </div>
                   <div className="row-actions">
                     {["DRAFT", "WAITING_WINDOW", "WAITING_MEMBERS", "READY"].includes(String(task.status)) ? <Button variant="ghost" onClick={() => action(String(task.id), "cancel")}>取消</Button> : null}
                   </div>
@@ -1509,11 +1538,33 @@ function TasksPage({
             <div className="section-subtitle"><strong>签到签退</strong><span>{workflows.length} 项</span></div>
             <div className="list">
               {sortWorkflows(workflows).map((workflow) => (
-                <article className={`list-row${activeWorkflow(workflow) ? " active-record" : ""}`} key={workflow.id}>
-                  <div>
-                    <strong>{workflow.room_name_snapshot} · {workflow.date} {workflow.start_time}-{workflow.end_time}{activeWorkflow(workflow) ? <em className="active-badge">进行中</em> : null}</strong>
-                    <span>{statusText(workflow.status)} · 签到 {formatTimestamp(workflow.sign_scheduled_at)} · 签退 {formatTimestamp(workflow.signout_scheduled_at)}</span>
-                    <span>{workflow.participants.map((participant) => `${participant.realName}: ${statusText(participant.signStatus)}`).join(" · ")} · 签退 {statusText(workflow.signout_status)}</span>
+                <article className={`list-row schedule-row${activeWorkflow(workflow) ? " active-record" : ""}`} key={workflow.id}>
+                  <div className="schedule-main">
+                    <div className="record-room">
+                      <span className="record-label">房间</span>
+                      <strong>{workflow.room_name_snapshot}</strong>
+                      <span className="record-muted">{statusText(workflow.status)} · 签退 {statusText(workflow.signout_status)}</span>
+                    </div>
+                    <div className="record-time-grid">
+                      <div className="record-time-block">
+                        <span>日期</span>
+                        <strong>{datePrimaryText(workflow.date)}</strong>
+                        <small>{workflow.date}</small>
+                      </div>
+                      <div className="record-time-block time">
+                        <span>时间</span>
+                        <strong>{timeRangeText(workflow.start_time, workflow.end_time)}</strong>
+                      </div>
+                    </div>
+                    {activeWorkflow(workflow) ? <em className="active-badge">进行中</em> : null}
+                    <div className="record-detail-line">
+                      <span>执行</span>
+                      <p>签到 {formatTimestamp(workflow.sign_scheduled_at)} · 签退 {formatTimestamp(workflow.signout_scheduled_at)}</p>
+                    </div>
+                    <div className="record-detail-line">
+                      <span>成员</span>
+                      <p>{workflow.participants.map((participant) => `${participant.realName}: ${statusText(participant.signStatus)}`).join(" · ")}</p>
+                    </div>
                   </div>
                   <div className="row-actions">
                     {workflow.status === "ACTIVE" ? <Button variant="ghost" onClick={() => void cancelWorkflow(workflow.id)}>取消</Button> : null}
@@ -1962,10 +2013,28 @@ function ReservationRecords({
         const active = isActiveReservation(item);
         const signedIn = item.status === "SIGNED_IN";
         return (
-          <article className={`list-row${active ? " active-record" : ""}`} key={item.id}>
-            <div>
-              <strong>{item.room_name_snapshot} · {item.date} {item.start_time}-{item.end_time}{active ? <em className="active-badge">进行中</em> : null}</strong>
-              <span>{String(item.statusLabel ?? item.status_label ?? item.status)} · 预约编号 {String(item.official_reservation_id ?? "正在获取")}</span>
+          <article className={`list-row reservation-record-row${active ? " active-record" : ""}`} key={item.id}>
+            <div className="schedule-main">
+              <div className="record-room">
+                <span className="record-label">房间</span>
+                <strong>{item.room_name_snapshot}</strong>
+                <span className="record-muted">预约编号 {String(item.official_reservation_id ?? "正在获取")}</span>
+              </div>
+              <div className="record-time-grid">
+                <div className="record-time-block">
+                  <span>日期</span>
+                  <strong>{datePrimaryText(item.date)}</strong>
+                  <small>{item.date}</small>
+                </div>
+                <div className="record-time-block time">
+                  <span>时间</span>
+                  <strong>{timeRangeText(item.start_time, item.end_time)}</strong>
+                </div>
+              </div>
+              <div className="record-status-stack">
+                <span className="record-status">{String(item.statusLabel ?? item.status_label ?? item.status)}</span>
+                {active ? <em className="active-badge">进行中</em> : null}
+              </div>
             </div>
             <div className="row-actions">
               {signedIn ? <Button onClick={() => onAction(item.id, "open-door")}><DoorOpen size={16} />开门</Button> : null}

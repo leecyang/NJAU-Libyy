@@ -898,6 +898,11 @@ input:focus, textarea:focus, select:focus { border-color: var(--ink); box-shadow
   border-radius: var(--radius-md);
   background: var(--canvas);
 }
+.list-row.schedule-row,
+.list-row.reservation-record-row {
+  align-items: stretch;
+  padding: 14px;
+}
 .list-row.active-record {
   border-color: #a7f3d0;
   background: #f0fdf4;
@@ -917,6 +922,122 @@ input:focus, textarea:focus, select:focus { border-color: var(--ink); box-shadow
   vertical-align: middle;
 }
 .list-row > div:first-child { display: grid; gap: 4px; min-width: 0; }
+.schedule-main {
+  display: grid !important;
+  grid-template-columns: minmax(220px, 1.3fr) minmax(260px, 0.9fr) auto;
+  gap: 12px;
+  align-items: stretch;
+  min-width: 0;
+}
+.record-room {
+  display: grid;
+  align-content: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 3px 0 3px 2px;
+}
+.record-label {
+  color: var(--muted-soft) !important;
+  font-size: 11px !important;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+}
+.record-room strong {
+  color: var(--ink);
+  font-size: 18px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+.record-muted {
+  color: var(--muted) !important;
+  font-size: 13px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.record-time-grid {
+  display: grid;
+  grid-template-columns: minmax(124px, 0.9fr) minmax(140px, 1fr);
+  gap: 8px;
+  min-width: 0;
+}
+.record-time-block {
+  display: grid;
+  align-content: center;
+  gap: 3px;
+  min-width: 0;
+  min-height: 74px;
+  padding: 10px 12px;
+  border: 1px solid var(--hairline-soft);
+  border-radius: var(--radius-sm);
+  background: var(--surface-soft);
+}
+.record-time-block.time {
+  background: #fafafa;
+}
+.record-time-block span {
+  color: var(--muted-soft) !important;
+  font-size: 11px !important;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+}
+.record-time-block strong {
+  color: var(--ink);
+  font-size: 17px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.record-time-block small {
+  color: var(--muted) !important;
+  font-size: 12px;
+}
+.record-status-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 8px;
+  min-width: 92px;
+}
+.record-status {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-height: 28px;
+  padding: 5px 9px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  background: var(--canvas);
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.record-detail-line {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  min-width: 0;
+  padding-top: 2px;
+}
+.record-detail-line span {
+  color: var(--muted-soft) !important;
+  font-size: 12px !important;
+  font-weight: 700;
+}
+.record-detail-line p {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.schedule-main > .active-badge,
+.record-status-stack .active-badge {
+  align-self: center;
+  margin-left: 0;
+  white-space: nowrap;
+}
 .row-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
 .team-card { display: block; padding: 20px; }
 .team-card-content { display: grid !important; gap: 18px !important; }
@@ -1343,6 +1464,43 @@ input:focus, textarea:focus, select:focus { border-color: var(--ink); box-shadow
   .content { width: min(100% - 24px, 1200px); padding: 20px 0 120px; gap: 18px; }
   .form-grid, .list-row { grid-template-columns: 1fr; }
   .form-grid .button { width: 100%; }
+  .list-row.schedule-row,
+  .list-row.reservation-record-row {
+    gap: 12px;
+    padding: 12px;
+  }
+  .schedule-main {
+    grid-template-columns: 1fr;
+    gap: 10px;
+  }
+  .record-room {
+    padding: 0;
+  }
+  .record-room strong {
+    font-size: 17px;
+  }
+  .record-time-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .record-time-block {
+    min-height: 68px;
+    padding: 9px 10px;
+  }
+  .record-time-block strong {
+    font-size: 15px;
+    white-space: normal;
+  }
+  .record-status-stack {
+    align-items: flex-start;
+    min-width: 0;
+  }
+  .schedule-main > .active-badge {
+    justify-self: start;
+  }
+  .record-detail-line {
+    grid-template-columns: 38px minmax(0, 1fr);
+    gap: 8px;
+  }
   .three-day-head { align-items: stretch; flex-direction: column; }
   .desktop-only-action {
     display: none !important;
@@ -1362,6 +1520,16 @@ input:focus, textarea:focus, select:focus { border-color: var(--ink); box-shadow
   }
   .room-card strong, .list-row strong { font-size: 15px; }
   .room-card span, .room-card small, .list-row span, .list-row small { font-size: 13px; }
+  .list-row .record-room strong {
+    font-size: 17px;
+  }
+  .list-row .record-time-block strong {
+    font-size: 15px;
+  }
+  .record-time-block span,
+  .record-label {
+    font-size: 11px !important;
+  }
   .room-card-titleline { align-items: flex-start; }
   .room-day-range { grid-template-columns: 1fr; }
   .availability-history {
