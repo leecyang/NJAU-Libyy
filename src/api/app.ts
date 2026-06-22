@@ -22,6 +22,7 @@ import {
   verifyOfficialRoomPolicy,
   fetchOfficialUserScore,
   type OfficialMember,
+  type OfficialReservationRecord,
 } from "../lib/official";
 import {
   createSignWorkflow,
@@ -262,6 +263,8 @@ async function executeReservationsRefresh(env: AppEnv, job: OfficialGatewayJob):
 }
 
 type ReservationOptionWarning = { userId: string; realName: string; message: string };
+
+const MEMBER_ACCEPT_RETRY_DELAYS_MS = [0, 1000, 2000, 4000, 6000, 8000, 10_000, 12_000, 15_000];
 
 function shanghaiTimestamp(date: string, time: string): number {
   return new Date(`${date}T${time}:00+08:00`).valueOf();
@@ -583,18 +586,55 @@ function maskStudentId(value: string | null): string | null {
   return `${value.slice(0, 2)}****${value.slice(-2)}`;
 }
 
-async function autoAcceptTeamMembers(env: AppEnv, officialReservationId: string, members: ResolvedMember[]): Promise<{ accepted: number; failed: number }> {
-  let accepted = 0;
-  let failed = 0;
-  for (const member of members) {
-    try {
-      await acceptOfficialReservation(env, await getAccessToken(env, member.localUserId), officialReservationId);
-      accepted += 1;
-    } catch {
-      failed += 1;
+function memberAcceptanceComplete(record: OfficialReservationRecord, members: ResolvedMember[]): boolean {
+  if (!members.length) return true;
+  return record.reservationStatus !== 12;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function acceptTeamMembersUntilConfirmed(
+  env: AppEnv,
+  primaryUser: User,
+  officialReservationId: string,
+  members: ResolvedMember[],
+): Promise<{ accepted: number; failed: number; record: OfficialReservationRecord }> {
+  let lastRecord: OfficialReservationRecord | null = null;
+  let lastError: unknown = null;
+
+  for (const delay of MEMBER_ACCEPT_RETRY_DELAYS_MS) {
+    if (delay > 0) await sleep(delay);
+    let acceptedThisRound = 0;
+    for (const member of members) {
+      try {
+        await acceptOfficialReservation(env, await getAccessToken(env, member.localUserId), officialReservationId);
+        acceptedThisRound += 1;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    const records = await syncOfficialReservationHistory(env, primaryUser);
+    lastRecord = records.find((record) => String(record.id) === officialReservationId) ?? lastRecord;
+    if (lastRecord && memberAcceptanceComplete(lastRecord, members)) {
+      return { accepted: members.length, failed: 0, record: lastRecord };
+    }
+
+    if (acceptedThisRound < members.length) {
+      console.error(JSON.stringify({
+        level: "warn",
+        event: "manual_reservation_member_accept_retry",
+        officialReservationId,
+        acceptedThisRound,
+        memberCount: members.length,
+        code: lastError instanceof HttpError ? lastError.code : lastError instanceof Error ? lastError.name : "MEMBER_ACCEPT_FAILED",
+      }));
     }
   }
-  return { accepted, failed };
+
+  throw new HttpError(502, "MEMBER_ACCEPTANCE_INCOMPLETE", "未完成全部成员同意预约，请稍后刷新预约历史确认");
 }
 
 async function localReservationLimits(env: AppEnv, userId: string, date: string, duration: number): Promise<void> {
@@ -903,6 +943,7 @@ async function executeManualReservation(env: AppEnv, job: OfficialGatewayJob): P
   });
   await claimReservationQuota(env, participants.map((participant) => participant.id), date, "MANUAL", quotaSource);
   let officialSubmitted = false;
+  const isStrictPostSubmitFailure = (error: unknown): boolean => error instanceof HttpError && error.code === "MEMBER_ACCEPTANCE_INCOMPLETE";
   const postSubmitWarning = async (error: unknown): Promise<Record<string, unknown>> => {
     const code = error instanceof HttpError ? error.code : "RESERVATION_POST_SUBMIT_SYNC_FAILED";
     const message = error instanceof Error ? error.message : "官方已接收预约，但本地同步暂未完成，请稍后刷新预约历史";
@@ -965,10 +1006,13 @@ async function executeManualReservation(env: AppEnv, job: OfficialGatewayJob): P
         return record.roomId === roomId && recordStart.date === date && recordStart.time === startTime && recordEnd.time === endTime;
       });
       if (!matched) throw new HttpError(502, "RESERVATION_SYNC_FAILED", "官方已接收预约，但订单回读失败，请在预约历史中刷新");
-      const acceptance = await autoAcceptTeamMembers(env, String(matched.id), members);
-      if (acceptance.accepted) {
-        records = await syncOfficialReservationHistory(env, primaryUser);
-        matched = records.find((record) => record.id === matched!.id) ?? matched;
+      let acceptance = { accepted: 0, failed: 0 };
+      if (members.length) {
+        const result = await acceptTeamMembersUntilConfirmed(env, primaryUser, String(matched.id), members);
+        acceptance = { accepted: result.accepted, failed: result.failed };
+        matched = result.record;
+      } else if (memberAcceptanceComplete(matched, members) === false) {
+        throw new HttpError(502, "MEMBER_ACCEPTANCE_INCOMPLETE", "未完成全部成员同意预约，请稍后刷新预约历史确认");
       }
       const local = await env.DB.prepare(
         "SELECT id, status FROM reservations WHERE owner_user_id = ? AND official_reservation_id = ?",
@@ -989,10 +1033,14 @@ async function executeManualReservation(env: AppEnv, job: OfficialGatewayJob): P
         teamMembersPendingRetry: acceptance.failed,
       };
     } catch (error) {
+      if (isStrictPostSubmitFailure(error)) throw error;
       return await postSubmitWarning(error);
     }
   } catch (error) {
-    if (officialSubmitted) return await postSubmitWarning(error);
+    if (officialSubmitted) {
+      if (isStrictPostSubmitFailure(error)) throw error;
+      return await postSubmitWarning(error);
+    }
     await releaseReservationQuota(env, "MANUAL", quotaSource);
     throw error;
   }
