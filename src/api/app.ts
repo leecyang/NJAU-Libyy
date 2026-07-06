@@ -8,7 +8,6 @@ import { HttpError, json, ok, readJsonBody, requireString } from "../lib/http";
 import { queueMail } from "../lib/mail";
 import { publicGatewayJob, type OfficialGatewayJob } from "../lib/official-gateway-types";
 import {
-  acceptOfficialReservation,
   cancelOfficialReservation,
   createOfficialQrSignCheckCode,
   fetchOfficialReservationHistory,
@@ -26,12 +25,16 @@ import {
 } from "../lib/official";
 import {
   createSignWorkflow,
+  enqueueMemberAcceptanceTasks,
   localReservationStatus,
   parseSignDeviceMap,
+  requeueMemberAcceptanceTasks,
   reservationStatusLabel,
   resolveSignDevice,
   shanghaiParts,
+  submitPendingMemberAcceptanceTasks,
   syncOfficialReservationHistory,
+  type MemberAcceptanceRunResult,
 } from "../lib/reservations";
 import {
   assertPrimaryReservationScore,
@@ -90,6 +93,14 @@ type ReservationListRow = {
   status: string;
   official_status: number | null;
   created_at: number;
+};
+
+type MemberAcceptanceTaskListRow = {
+  id: string;
+  status: string;
+  member_user_id: string;
+  last_error_message: string | null;
+  updated_at: number;
 };
 
 function isObject(value: unknown): value is JsonObject {
@@ -264,8 +275,6 @@ async function executeReservationsRefresh(env: AppEnv, job: OfficialGatewayJob):
 
 type ReservationOptionWarning = { userId: string; realName: string; message: string };
 
-const MEMBER_ACCEPT_RETRY_DELAYS_MS = [0, 1000, 2000, 4000, 6000, 8000, 10_000, 12_000, 15_000];
-
 function shanghaiTimestamp(date: string, time: string): number {
   return new Date(`${date}T${time}:00+08:00`).valueOf();
 }
@@ -403,6 +412,41 @@ async function executeReservationOptionsRefresh(env: AppEnv, job: OfficialGatewa
   return await buildReservationOptions(env, requester, true);
 }
 
+async function runDueMemberAcceptance(
+  env: AppEnv,
+  reservationId: string | null,
+  memberUserId: string | null,
+  taskIds: string[] | null = null,
+): Promise<MemberAcceptanceRunResult> {
+  return submitPendingMemberAcceptanceTasks(env, Date.now(), integerVar(env, "SCHEDULER_SYNC_LIMIT", 5), { reservationId, memberUserId, taskIds });
+}
+
+async function executeMemberAcceptance(env: AppEnv, job: OfficialGatewayJob): Promise<Record<string, unknown>> {
+  const reservationId = typeof job.payload.reservationId === "string" ? job.payload.reservationId : null;
+  const memberUserId = typeof job.payload.memberUserId === "string" ? job.payload.memberUserId : null;
+  const taskIds = Array.isArray(job.payload.taskIds) ? job.payload.taskIds.filter((value): value is string => typeof value === "string") : null;
+  return { reservationId, memberUserId, ...await runDueMemberAcceptance(env, reservationId, memberUserId, taskIds) };
+}
+
+async function enqueueMemberAcceptanceJob(
+  env: AppEnv,
+  ownerUserId: string,
+  reservationId: string | null,
+  memberUserId: string | null,
+  officialReservationId: string | null,
+): Promise<OfficialGatewayJob | null> {
+  if (!env.OFFICIAL_GATEWAY) return null;
+  return env.OFFICIAL_GATEWAY.enqueue({
+    kind: "MEMBER_ACCEPTANCE",
+    lane: "WRITE",
+    ownerUserId,
+    dedupeKey: `member-accept:${reservationId ?? officialReservationId ?? "unknown"}:${memberUserId ?? "all"}`,
+    payload: { reservationId, memberUserId, officialReservationId },
+    priority: 4,
+    maxAttempts: 1,
+  });
+}
+
 export function registerOfficialGatewayHandlers(env: AppEnv): void {
   const gateway = requireGateway(env);
   gateway.registerHandler("ROOMS_REFRESH", (job) => executeRoomsRefresh(env, job));
@@ -410,6 +454,7 @@ export function registerOfficialGatewayHandlers(env: AppEnv): void {
   gateway.registerHandler("PARTICIPANT_SCORES_REFRESH", (job) => executeParticipantScoresRefresh(env, job));
   gateway.registerHandler("RESERVATIONS_REFRESH", (job) => executeReservationsRefresh(env, job));
   gateway.registerHandler("RESERVATION_OPTIONS_REFRESH", (job) => executeReservationOptionsRefresh(env, job));
+  gateway.registerHandler("MEMBER_ACCEPTANCE", (job) => executeMemberAcceptance(env, job));
   gateway.registerHandler("MANUAL_RESERVATION", (job) => executeManualReservation(env, job));
   gateway.registerHandler("CANCEL_RESERVATION", (job) => executeCancelReservation(env, job));
   gateway.registerHandler("CREATE_SIGN_LINK", (job) => executeCreateSignLink(env, job));
@@ -586,15 +631,6 @@ function maskStudentId(value: string | null): string | null {
   return `${value.slice(0, 2)}****${value.slice(-2)}`;
 }
 
-function reservationAccepted(record: OfficialReservationRecord): boolean {
-  return [21, 31, 51, 53].includes(record.reservationStatus);
-}
-
-function memberAcceptanceComplete(record: OfficialReservationRecord, members: ResolvedMember[]): boolean {
-  if (!members.length) return reservationAccepted(record);
-  return reservationAccepted(record);
-}
-
 function matchingOfficialReservation(
   records: OfficialReservationRecord[],
   input: { officialReservationId?: string; roomId: number; date: string; startTime: string; endTime: string },
@@ -609,113 +645,6 @@ function matchingOfficialReservation(
         && recordEnd.time === input.endTime;
     })
     ?? null;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function acceptTeamMembersUntilConfirmed(
-  env: AppEnv,
-  primaryUser: User,
-  officialReservationId: string,
-  members: ResolvedMember[],
-  reservation: { roomId: number; date: string; startTime: string; endTime: string },
-): Promise<{ accepted: number; failed: number; record: OfficialReservationRecord }> {
-  let lastRecord: OfficialReservationRecord | null = null;
-  let lastError: unknown = null;
-
-  for (const delay of MEMBER_ACCEPT_RETRY_DELAYS_MS) {
-    if (delay > 0) await sleep(delay);
-    let acceptedThisRound = 0;
-    for (const member of members) {
-      try {
-        const memberToken = await getAccessToken(env, member.localUserId);
-        const memberProfile = await getOfficialReservationProfile(env, member.localUserId, memberToken);
-        const memberRecord = matchingOfficialReservation(
-          await fetchOfficialReservationHistory(env, memberToken, memberProfile.studentId),
-          { officialReservationId, ...reservation },
-        );
-        if (!memberRecord) throw new HttpError(502, "MEMBER_RESERVATION_NOT_FOUND", "成员端暂未同步到官方预约邀请");
-        if (reservationAccepted(memberRecord)) {
-          acceptedThisRound += 1;
-          continue;
-        }
-        if (memberRecord.reservationStatus !== 12) {
-          throw new HttpError(409, "MEMBER_RESERVATION_NOT_ACCEPTABLE", "成员端预约状态无法自动同意");
-        }
-        await acceptOfficialReservation(env, memberToken, String(memberRecord.id));
-        const confirmed = matchingOfficialReservation(
-          await fetchOfficialReservationHistory(env, memberToken, memberProfile.studentId),
-          { officialReservationId: String(memberRecord.id), ...reservation },
-        );
-        if (confirmed && reservationAccepted(confirmed)) acceptedThisRound += 1;
-      } catch (error) {
-        lastError = error;
-      }
-    }
-
-    const records = await syncOfficialReservationHistory(env, primaryUser);
-    lastRecord = matchingOfficialReservation(records, { officialReservationId, ...reservation }) ?? lastRecord;
-    if (lastRecord && acceptedThisRound === members.length && memberAcceptanceComplete(lastRecord, members)) {
-      return { accepted: members.length, failed: 0, record: lastRecord };
-    }
-
-    if (acceptedThisRound < members.length) {
-      console.error(JSON.stringify({
-        level: "warn",
-        event: "manual_reservation_member_accept_retry",
-        officialReservationId,
-        acceptedThisRound,
-        memberCount: members.length,
-        code: lastError instanceof HttpError ? lastError.code : lastError instanceof Error ? lastError.name : "MEMBER_ACCEPT_FAILED",
-      }));
-    }
-  }
-
-  await enqueueMemberAcceptanceTasks(env, primaryUser.id, officialReservationId, members, reservation);
-  throw new HttpError(502, "MEMBER_ACCEPTANCE_INCOMPLETE", "未完成全部成员同意预约，系统会继续在后台自动同意");
-}
-
-async function enqueueMemberAcceptanceTasks(
-  env: AppEnv,
-  ownerUserId: string,
-  officialReservationId: string,
-  members: ResolvedMember[],
-  reservation: { roomId: number; date: string; startTime: string; endTime: string },
-): Promise<void> {
-  const local = await env.DB.prepare(
-    "SELECT id FROM reservations WHERE owner_user_id = ? AND official_reservation_id = ?",
-  ).bind(ownerUserId, officialReservationId).first<{ id: string }>();
-  const now = Date.now();
-  await env.DB.batch(members.map((member) => env.DB.prepare(
-    `INSERT INTO reservation_member_acceptance_tasks
-      (id, reservation_id, owner_user_id, member_user_id, official_reservation_id, room_id, date, start_time, end_time,
-       status, attempt_count, next_attempt_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, ?)
-     ON CONFLICT(member_user_id, official_reservation_id) DO UPDATE SET
-       reservation_id = COALESCE(excluded.reservation_id, reservation_member_acceptance_tasks.reservation_id),
-       owner_user_id = excluded.owner_user_id,
-       official_reservation_id = excluded.official_reservation_id,
-       status = CASE WHEN reservation_member_acceptance_tasks.status = 'SUCCESS' THEN 'SUCCESS' ELSE 'PENDING' END,
-       next_attempt_at = excluded.next_attempt_at,
-       last_error_code = NULL,
-       last_error_message = NULL,
-       updated_at = excluded.updated_at`,
-  ).bind(
-    crypto.randomUUID(),
-    local?.id ?? null,
-    ownerUserId,
-    member.localUserId,
-    officialReservationId,
-    reservation.roomId,
-    reservation.date,
-    reservation.startTime,
-    reservation.endTime,
-    now,
-    now,
-    now,
-  )));
 }
 
 async function localReservationLimits(env: AppEnv, userId: string, date: string, duration: number): Promise<void> {
@@ -1024,7 +953,6 @@ async function executeManualReservation(env: AppEnv, job: OfficialGatewayJob): P
   });
   await claimReservationQuota(env, participants.map((participant) => participant.id), date, "MANUAL", quotaSource);
   let officialSubmitted = false;
-  const isStrictPostSubmitFailure = (error: unknown): boolean => error instanceof HttpError && error.code === "MEMBER_ACCEPTANCE_INCOMPLETE";
   const postSubmitWarning = async (error: unknown): Promise<Record<string, unknown>> => {
     const code = error instanceof HttpError ? error.code : "RESERVATION_POST_SUBMIT_SYNC_FAILED";
     const message = error instanceof Error ? error.message : "官方已接收预约，但本地同步暂未完成，请稍后刷新预约历史";
@@ -1087,14 +1015,6 @@ async function executeManualReservation(env: AppEnv, job: OfficialGatewayJob): P
         return record.roomId === roomId && recordStart.date === date && recordStart.time === startTime && recordEnd.time === endTime;
       });
       if (!matched) throw new HttpError(502, "RESERVATION_SYNC_FAILED", "官方已接收预约，但订单回读失败，请在预约历史中刷新");
-      let acceptance = { accepted: 0, failed: 0 };
-      if (members.length) {
-        const result = await acceptTeamMembersUntilConfirmed(env, primaryUser, String(matched.id), members, { roomId, date, startTime, endTime });
-        acceptance = { accepted: result.accepted, failed: result.failed };
-        matched = result.record;
-      } else if (memberAcceptanceComplete(matched, members) === false) {
-        throw new HttpError(502, "MEMBER_ACCEPTANCE_INCOMPLETE", "未完成全部成员同意预约，请稍后刷新预约历史确认");
-      }
       const local = await env.DB.prepare(
         "SELECT id, status FROM reservations WHERE owner_user_id = ? AND official_reservation_id = ?",
       ).bind(primary.id, String(matched.id)).first<{ id: string; status: string }>();
@@ -1105,21 +1025,23 @@ async function executeManualReservation(env: AppEnv, job: OfficialGatewayJob): P
             .bind(requester.id, Date.now(), local.id),
         ]);
       }
+      if (members.length) {
+        await enqueueMemberAcceptanceTasks(env, primaryUser.id, String(matched.id), members, { roomId, date, startTime, endTime });
+        await enqueueMemberAcceptanceJob(env, primaryUser.id, local?.id ?? null, null, String(matched.id));
+      }
       await audit(env.DB, { actorUserId: requester.id, actorType: "USER", action: "MANUAL_RESERVATION_SUBMITTED", targetType: "RESERVATION", targetId: local?.id, result: "SUCCESS" });
       return {
         id: local?.id,
         officialReservationId: String(matched.id),
         status: local?.status ?? localReservationStatus(matched.reservationStatus),
-        teamMembersAutoAccepted: acceptance.accepted,
-        teamMembersPendingRetry: acceptance.failed,
+        teamMembersAutoAccepted: 0,
+        teamMembersPendingRetry: members.length,
       };
     } catch (error) {
-      if (isStrictPostSubmitFailure(error)) throw error;
       return await postSubmitWarning(error);
     }
   } catch (error) {
     if (officialSubmitted) {
-      if (isStrictPostSubmitFailure(error)) throw error;
       return await postSubmitWarning(error);
     }
     await releaseReservationQuota(env, "MANUAL", quotaSource);
@@ -1155,8 +1077,8 @@ export async function manualReservation(env: AppEnv, request: Request): Promise<
   return gatewayJobResponse(env, job, 2500);
 }
 
-function publicReservationRows(rows: ReservationListRow[]): Array<Record<string, unknown>> {
-  return collapseReservationRows(rows).map((row) => ({
+async function publicReservationRows(env: AppEnv, requesterId: string, rows: ReservationListRow[]): Promise<Array<Record<string, unknown>>> {
+  return Promise.all(collapseReservationRows(rows).map(async (row) => ({
     ...row,
     statusLabel: reservationStatusLabel(row.status, row.official_status),
     status_label: reservationStatusLabel(row.status, row.official_status),
@@ -1164,7 +1086,8 @@ function publicReservationRows(rows: ReservationListRow[]): Array<Record<string,
     can_cancel: canCancelReservation(row),
     canOpenDoor: row.status === "SIGNED_IN",
     can_open_door: row.status === "SIGNED_IN",
-  }));
+    memberAcceptance: await memberAcceptanceSummary(env, requesterId, row),
+  })));
 }
 
 function reservationGroupKeys(row: ReservationListRow): string[] {
@@ -1251,10 +1174,116 @@ async function requireReservationOperator(env: AppEnv, requesterId: string, rese
   return row;
 }
 
+function reservationSnapshotMembers(row: ReservationListRow): Array<{ localUserId: string; userType: number | null }> {
+  try {
+    const parsed = JSON.parse(row.member_snapshot_json) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .filter(isObject)
+      .map((member) => ({
+        localUserId: typeof member.localUserId === "string" ? member.localUserId : "",
+        userType: typeof member.userType === "number" ? member.userType : null,
+      }))
+      .filter((member) => Boolean(member.localUserId));
+  } catch {
+    return [];
+  }
+}
+
+function reservationSnapshotPrimaryUserId(row: ReservationListRow): string {
+  return reservationSnapshotMembers(row).find((member) => member.userType === 1)?.localUserId ?? row.owner_user_id;
+}
+
+function reservationSnapshotAcceptanceMemberIds(row: ReservationListRow): string[] {
+  const members = reservationSnapshotMembers(row);
+  const hasExplicitPrimary = members.some((member) => member.userType === 1);
+  return [...new Set(members
+    .filter((member) => hasExplicitPrimary ? member.userType !== 1 : member.localUserId !== row.owner_user_id)
+    .map((member) => member.localUserId))];
+}
+
+function actionableAcceptanceTasks(tasks: MemberAcceptanceTaskListRow[]): MemberAcceptanceTaskListRow[] {
+  return tasks.filter((task) => ["PENDING", "RUNNING", "FAILED"].includes(task.status));
+}
+
+async function acceptanceTasksForReservation(env: AppEnv, row: ReservationListRow): Promise<MemberAcceptanceTaskListRow[]> {
+  const conditions = ["reservation_id = ?"];
+  const params: unknown[] = [row.id];
+  if (row.official_reservation_id) {
+    conditions.push("official_reservation_id = ?");
+    params.push(row.official_reservation_id);
+  }
+  conditions.push("(owner_user_id = ? AND room_id = ? AND date = ? AND start_time = ? AND end_time = ?)");
+  params.push(row.owner_user_id, row.room_id, row.date, row.start_time, row.end_time);
+  const rows = await env.DB.prepare(
+    `SELECT DISTINCT id, status, member_user_id, last_error_message, updated_at
+       FROM reservation_member_acceptance_tasks
+      WHERE ${conditions.map((condition) => `(${condition})`).join(" OR ")}
+      ORDER BY updated_at DESC`,
+  ).bind(...params).all<MemberAcceptanceTaskListRow>();
+  return rows.results;
+}
+
+async function canManageMemberAcceptance(
+  env: AppEnv,
+  requesterId: string,
+  row: ReservationListRow,
+  memberUserIds: string[],
+): Promise<boolean> {
+  const primaryUserId = reservationSnapshotPrimaryUserId(row);
+  if (primaryUserId === requesterId || row.requested_by_user_id === requesterId) return true;
+  const relatedUserIds = [...new Set([primaryUserId, row.owner_user_id, row.requested_by_user_id, ...memberUserIds].filter((id): id is string => Boolean(id)))];
+  if (!relatedUserIds.length) return false;
+  const placeholders = relatedUserIds.map(() => "?").join(",");
+  const managed = await env.DB.prepare(
+    `SELECT team.id
+       FROM teams team
+      WHERE team.leader_user_id = ?
+        AND (
+          team.leader_user_id IN (${placeholders})
+          OR EXISTS (
+            SELECT 1 FROM team_members member
+             WHERE member.team_id = team.id AND member.user_id IN (${placeholders})
+          )
+        )
+      LIMIT 1`,
+  ).bind(requesterId, ...relatedUserIds, ...relatedUserIds).first();
+  return Boolean(managed);
+}
+
+async function memberAcceptanceSummary(
+  env: AppEnv,
+  requesterId: string,
+  row: ReservationListRow,
+): Promise<Record<string, unknown>> {
+  const tasks = await acceptanceTasksForReservation(env, row);
+  const snapshotMemberIds = reservationSnapshotAcceptanceMemberIds(row);
+  const actionable = actionableAcceptanceTasks(tasks);
+  const hasTasks = tasks.length > 0;
+  const syntheticPendingIds = hasTasks ? [] : snapshotMemberIds;
+  const memberUserIds = [...new Set([...tasks.map((task) => task.member_user_id), ...snapshotMemberIds])];
+  const canManage = await canManageMemberAcceptance(env, requesterId, row, memberUserIds);
+  const currentUserPending = actionable.some((task) => task.member_user_id === requesterId)
+    || syntheticPendingIds.includes(requesterId);
+  const pendingCount = tasks.filter((task) => task.status === "PENDING").length + syntheticPendingIds.length;
+  const runningCount = tasks.filter((task) => task.status === "RUNNING").length;
+  const failedCount = tasks.filter((task) => task.status === "FAILED").length;
+  const lastPublicError = tasks.find((task) => task.last_error_message)?.last_error_message ?? null;
+  const actionableCount = pendingCount + runningCount + failedCount;
+  return {
+    pendingCount,
+    runningCount,
+    failedCount,
+    lastPublicError,
+    canManualAccept: row.status === "WAITING_MEMBER_CONFIRMATION" && actionableCount > 0 && (currentUserPending || canManage),
+    currentUserPending,
+  };
+}
+
 export async function reservationHistory(env: AppEnv, request: Request): Promise<Response> {
   const user = await requireBoundUser(env, request);
   if (!env.OFFICIAL_GATEWAY && new URL(request.url).searchParams.get("sync") === "true") await syncOfficialReservationHistory(env, user);
-  return ok(publicReservationRows(await reservationRowsForUser(env, user.id)));
+  return ok(await publicReservationRows(env, user.id, await reservationRowsForUser(env, user.id)));
 }
 
 export async function syncReservationHistory(env: AppEnv, request: Request): Promise<Response> {
@@ -1316,6 +1345,71 @@ export async function cancelReservation(env: AppEnv, request: Request, reservati
     dedupeKey: `cancel:${user.id}:${reservationId}`,
     payload: { reservationId },
     priority: 4,
+    maxAttempts: 1,
+  });
+  return gatewayJobResponse(env, job, 2000);
+}
+
+export async function acceptReservationMembers(env: AppEnv, request: Request, reservationId: string): Promise<Response> {
+  const requester = await requireBoundUser(env, request);
+  const row = await env.DB.prepare(
+    `SELECT id, task_id, official_reservation_id, owner_user_id, requested_by_user_id, room_id, room_name_snapshot, date,
+            start_time, end_time, member_snapshot_json, submission_type, status, official_status, created_at
+       FROM reservations WHERE id = ?`,
+  ).bind(reservationId).first<ReservationListRow>();
+  if (!row) throw new HttpError(404, "RESERVATION_NOT_FOUND", "未找到预约记录");
+  if (row.status !== "WAITING_MEMBER_CONFIRMATION") {
+    throw new HttpError(409, "MEMBER_ACCEPTANCE_NOT_REQUIRED", "当前预约不需要成员同意");
+  }
+  if (!row.official_reservation_id) throw new HttpError(409, "OFFICIAL_RESERVATION_MISSING", "当前预约缺少官方预约号");
+
+  let tasks = await acceptanceTasksForReservation(env, row);
+  if (!actionableAcceptanceTasks(tasks).length) {
+    const snapshotMembers = reservationSnapshotAcceptanceMemberIds(row).map((localUserId) => ({ localUserId }));
+    if (snapshotMembers.length) {
+      await enqueueMemberAcceptanceTasks(env, reservationSnapshotPrimaryUserId(row), row.official_reservation_id, snapshotMembers, {
+        roomId: row.room_id,
+        date: row.date,
+        startTime: row.start_time,
+        endTime: row.end_time,
+      });
+      tasks = await acceptanceTasksForReservation(env, row);
+    }
+  }
+
+  const actionable = actionableAcceptanceTasks(tasks);
+  if (!actionable.length) {
+    throw new HttpError(409, "MEMBER_ACCEPTANCE_TASK_NOT_FOUND", "未找到可执行的成员同意任务");
+  }
+  const canManage = await canManageMemberAcceptance(env, requester.id, row, actionable.map((task) => task.member_user_id));
+  const selectedTasks = canManage ? actionable : actionable.filter((task) => task.member_user_id === requester.id);
+  if (!selectedTasks.length) {
+    throw new HttpError(403, "MEMBER_ACCEPTANCE_FORBIDDEN", "只能由待同意成员本人、预约发起人或小队队长执行");
+  }
+
+  const requeued = await requeueMemberAcceptanceTasks(env, selectedTasks.map((task) => task.id));
+  const memberUserId = canManage ? null : requester.id;
+  await audit(env.DB, {
+    actorUserId: requester.id,
+    actorType: "USER",
+    action: "RESERVATION_MEMBER_ACCEPTANCE_REQUEUED",
+    targetType: "RESERVATION",
+    targetId: reservationId,
+    result: "PENDING",
+    metadata: { requeued, scope: canManage ? "ALL" : "SELF" },
+  });
+  const taskIds = selectedTasks.map((task) => task.id);
+  if (!env.OFFICIAL_GATEWAY) {
+    const result = await runDueMemberAcceptance(env, row.id, memberUserId, taskIds);
+    return ok({ reservationId, requeued, ...result });
+  }
+  const job = await env.OFFICIAL_GATEWAY.enqueue({
+    kind: "MEMBER_ACCEPTANCE",
+    lane: "WRITE",
+    ownerUserId: requester.id,
+    dedupeKey: `member-accept:${row.id}:${memberUserId ?? "all"}`,
+    payload: { reservationId: row.id, memberUserId, officialReservationId: row.official_reservation_id, taskIds },
+    priority: 3,
     maxAttempts: 1,
   });
   return gatewayJobResponse(env, job, 2000);
@@ -1624,7 +1718,7 @@ export async function teamMemberReservations(env: AppEnv, request: Request, team
     : null;
   return ok({
     member: { id: member.id, realName: member.real_name ?? member.email },
-    reservations: publicReservationRows(await reservationRowsForUser(env, member.id)),
+    reservations: await publicReservationRows(env, leader.id, await reservationRowsForUser(env, member.id)),
     cache: snapshot ? { status: snapshot.freshness, refreshedAt: snapshot.refreshedAt } : { status: "MISS", refreshedAt: null },
   });
 }

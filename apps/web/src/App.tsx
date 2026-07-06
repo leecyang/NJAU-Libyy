@@ -1,6 +1,7 @@
 import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   CalendarClock,
+  CheckCircle2,
   ChevronLeft,
   CircleUserRound,
   ClipboardList,
@@ -15,7 +16,7 @@ import {
   UserMinus,
   UsersRound,
 } from "lucide-react";
-import { api, type GatewayJob, waitForGatewayJob } from "./api";
+import { api, ApiError, type GatewayJob, waitForGatewayJob } from "./api";
 import { AdminPage } from "./admin";
 
 type Page = "rooms" | "tasks" | "teams" | "history" | "admin";
@@ -108,6 +109,14 @@ export type Reservation = {
   can_cancel?: boolean;
   canOpenDoor?: boolean;
   can_open_door?: boolean;
+  memberAcceptance?: {
+    pendingCount: number;
+    runningCount: number;
+    failedCount: number;
+    lastPublicError: string | null;
+    canManualAccept: boolean;
+    currentUserPending: boolean;
+  };
   created_at?: number;
 };
 type Task = Record<string, string | number | null>;
@@ -1620,8 +1629,15 @@ function TeamMemberReservationsPage({
   async function action(id: string, actionName: ReservationAction) {
     try {
       const response = await api<GatewayJob<{ roomName?: string }> | { roomName?: string }>(`/api/v1/reservations/${id}/${actionName}`, { method: "POST" });
-      const result = "jobId" in response ? await waitForGatewayJob(response) : response;
-      toast(actionName === "open-door" ? `${result.roomName ?? "研讨间"} 开门成功` : "预约已更新");
+      let result: { roomName?: string } = "jobId" in response ? {} : response;
+      if ("jobId" in response) {
+        try {
+          result = await waitForGatewayJob(response, actionName === "accept-members" ? 3000 : 120_000);
+        } catch (error) {
+          if (!(actionName === "accept-members" && error instanceof ApiError && error.code === "GATEWAY_JOB_TIMEOUT")) throw error;
+        }
+      }
+      toast(actionName === "open-door" ? `${result.roomName ?? "研讨间"} 开门成功` : actionName === "accept-members" ? "已提交同意重试" : "预约已更新");
       await load();
     } catch (error) {
       toast(error instanceof Error ? error.message : "操作失败", true);
@@ -1996,7 +2012,7 @@ function TeamsPage({
   );
 }
 
-type ReservationAction = "cancel" | "signout" | "open-door";
+type ReservationAction = "cancel" | "signout" | "open-door" | "accept-members";
 
 function ReservationRecords({
   items,
@@ -2012,6 +2028,8 @@ function ReservationRecords({
       {items.map((item) => {
         const active = isActiveReservation(item);
         const signedIn = item.status === "SIGNED_IN";
+        const acceptance = item.memberAcceptance;
+        const canAcceptMembers = item.status === "WAITING_MEMBER_CONFIRMATION" && Boolean(acceptance?.canManualAccept);
         return (
           <article className={`list-row reservation-record-row${active ? " active-record" : ""}`} key={item.id}>
             <div className="schedule-main">
@@ -2039,6 +2057,11 @@ function ReservationRecords({
             <div className="row-actions">
               {signedIn ? <Button onClick={() => onAction(item.id, "open-door")}><DoorOpen size={16} />开门</Button> : null}
               {signedIn ? <Button variant="secondary" onClick={() => onAction(item.id, "signout")}>签退</Button> : null}
+              {canAcceptMembers ? (
+                <Button variant="secondary" onClick={() => onAction(item.id, "accept-members")}>
+                  <CheckCircle2 size={16} />{acceptance?.currentUserPending ? "同意预约" : "重试同意"}
+                </Button>
+              ) : null}
               {!signedIn && (item.canCancel || item.can_cancel) ? <Button variant="ghost" onClick={() => onAction(item.id, "cancel")}>取消</Button> : null}
             </div>
           </article>
@@ -2076,9 +2099,16 @@ function HistoryPage({ toast }: { toast: (message: string, error?: boolean) => v
   async function action(id: string, actionName: ReservationAction) {
     try {
       const response = await api<GatewayJob<{ url?: string; roomName?: string }> | { url?: string; roomName?: string }>(`/api/v1/reservations/${id}/${actionName}`, { method: "POST" });
-      const result = "jobId" in response ? await waitForGatewayJob(response) : response;
+      let result: { url?: string; roomName?: string } = "jobId" in response ? {} : response;
+      if ("jobId" in response) {
+        try {
+          result = await waitForGatewayJob(response, actionName === "accept-members" ? 3000 : 120_000);
+        } catch (error) {
+          if (!(actionName === "accept-members" && error instanceof ApiError && error.code === "GATEWAY_JOB_TIMEOUT")) throw error;
+        }
+      }
       if (result.url) window.open(result.url, "_blank", "noopener,noreferrer");
-      toast(actionName === "open-door" ? `${result.roomName ?? "研讨间"} 开门成功` : "预约已更新");
+      toast(actionName === "open-door" ? `${result.roomName ?? "研讨间"} 开门成功` : actionName === "accept-members" ? "已提交同意重试" : "预约已更新");
       await load();
     } catch (error) {
       toast(error instanceof Error ? error.message : "操作失败", true);

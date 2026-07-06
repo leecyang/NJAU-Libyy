@@ -1,6 +1,6 @@
 #!/bin/sh
 set -eu
 
-mkdir -p /data/playwright-profiles
+mkdir -p /data
 chown -R appuser:appuser /data
 exec gosu appuser "$@"

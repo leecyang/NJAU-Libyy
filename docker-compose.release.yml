@@ -22,9 +22,6 @@ services:
     image: "njau-libyy-app:${APP_IMAGE_TAG:-latest}"
     network_mode: "service:tailscale"
     init: true
-    shm_size: "1gb"
-    security_opt:
-      - seccomp:./docker/playwright-seccomp.json
     env_file:
       - .env
     environment:
@@ -33,7 +30,6 @@ services:
       SQLITE_PATH: /data/njau-libyy.sqlite
       WEB_DIST_DIR: /app/apps/web/dist
       MIGRATIONS_DIR: /app/migrations
-      PLAYWRIGHT_PROFILE_DIR: /data/playwright-profiles
     volumes:
       - app-data:/data
     depends_on:

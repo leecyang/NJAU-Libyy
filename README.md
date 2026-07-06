@@ -7,9 +7,8 @@
 - `app`：Node 22 服务，托管 `apps/web/dist` 静态前端和 `/api/v1/*` API。
 - `tailscale`：官方 `tailscale/tailscale` 镜像，用作 `app` 的共享 network namespace。
 - Compose 固定向 Tailscale 注入 `--reset --accept-routes=false --accept-dns=false`，启动时清理旧 prefs，且不接收 tailnet 路由或 DNS 配置，避免 `app` 的公网出站被 tailnet 路由或 MagicDNS 接管。`.env` 中的 `TS_EXTRA_ARGS` 只用于追加额外参数。
-- `app` 使用 Playwright 官方 Chromium 的非 root 沙箱；Compose 加载 `docker/playwright-seccomp.json` 以允许 Chromium 创建隔离的 user namespace。
 - `SQLite`：默认数据文件 `/data/njau-libyy.sqlite`，由 Compose volume 持久化。
-- `Official Access Gateway`：所有官方 HTTP 和 Playwright 自动化统一经过该层；SQLite 保存分层快照与持久化 job，进程内执行器提供 SingleFlight、分读写通道限流和短暂等待。
+- `Official Access Gateway`：所有官方 HTTP、纯协议 CAS 登录和写操作统一经过该层；SQLite 保存分层快照与持久化 job，进程内执行器提供 SingleFlight、分读写通道限流和短暂等待。
 - `scheduler`：Node 服务内每分钟执行自动预约、签到、签退、邮件 outbox 和清理任务。
 - `SMTP`：Node TLS 直连阿里企业邮。
 
@@ -150,7 +149,6 @@ R2_PUBLIC_BASE_URL=https://cloud.way2api.fun/NJAU \
 - 使用 `aria2c`、IPv4 和最多 16 个连接并行下载发布文件
 - 下载预构建 Docker 镜像 tar.gz
 - 下载 release 版 `docker-compose.yml`
-- 下载 Playwright Chromium 沙箱所需的 `docker/playwright-seccomp.json`
 - 备份当前 SQLite 到 `/opt/NJAU-Libyy/backups`
 - 执行 `docker load`
 - 先启动/保持 `tailscale`，再使用新镜像强制重建 `app` 容器
@@ -212,8 +210,7 @@ journalctl -u njau-libyy-update.service -f
 | `APP_BIND_ADDR` | Compose 端口绑定地址，默认 `127.0.0.1`；公网直连 3000 时设为 `0.0.0.0` |
 | `LIBYY_API_BASE_URL` | 官方图书馆接口地址，默认 `https://libyy.njau.edu.cn` |
 | `CAS_CREDENTIAL_ENCRYPTION_KEY` | 加密统一认证密码的独立 32 字节 base64url 密钥，必须配置且不得与 token 密钥相同 |
-| `PLAYWRIGHT_PROFILE_DIR` | 每用户隔离的 Chromium profile 根目录，Compose 默认 `/data/playwright-profiles` |
-| `PLAYWRIGHT_MAX_CONCURRENCY` | 同时运行的统一认证浏览器数量，默认 `2` |
+| `CAS_LOGIN_MAX_CONCURRENCY` | 同时运行的纯协议 CAS 登录数量，默认 `2`；旧的 `PLAYWRIGHT_MAX_CONCURRENCY` 仍可作为兼容 fallback |
 | `OFFICIAL_READ_CONCURRENCY` | 官方只读请求与刷新 job 最大并发，默认 `3` |
 | `OFFICIAL_WRITE_CONCURRENCY` | 官方写请求最大并发，默认 `1`，避免并发提交 |
 | `OFFICIAL_REQUEST_MIN_INTERVAL_MS` | 官方请求启动间隔，默认 `150ms` |

@@ -7,7 +7,7 @@
     "dev": "npm run build:web && npm run build:server && node dist/server/node/server.js",
     "dev:web": "vite --config apps/web/vite.config.ts --host 0.0.0.0",
     "build:web": "vite build --config apps/web/vite.config.ts",
-    "build:server": "esbuild src/node/server.ts --bundle --minify --platform=node --format=esm --target=node22 --outfile=dist/server/node/server.js --external:better-sqlite3 --external:dotenv --external:playwright --external:playwright-core",
+    "build:server": "esbuild src/node/server.ts --bundle --minify --platform=node --format=esm --target=node22 --outfile=dist/server/node/server.js --external:better-sqlite3 --external:dotenv",
     "build": "npm run build:web && npm run build:server",
     "start": "node dist/server/node/server.js",
     "admin:promote": "node scripts/promote-admin.mjs",
@@ -28,7 +28,6 @@
     "better-sqlite3": "^12.10.0",
     "dotenv": "^17.4.2",
     "lucide-react": "^1.17.0",
-    "playwright": "1.60.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
   }

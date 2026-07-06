@@ -1,9 +1,9 @@
 import type { AppEnv } from "../config";
 import type { AppPreparedStatement } from "../db/types";
-import { getAccessToken, getOfficialReservationProfile } from "./credentials";
+import { getAccessToken, getOfficialReservationProfile, recoverExpiredOfficialLogin } from "./credentials";
 import { HttpError } from "./http";
 import { canonicalReservationSource, claimReservationQuota, releaseReservationQuota } from "./user-metrics";
-import { fetchOfficialReservationHistory, type OfficialReservationRecord } from "./official";
+import { acceptOfficialReservation, fetchOfficialReservationHistory, type OfficialReservationRecord } from "./official";
 
 export type ReservationUser = {
   id: string;
@@ -50,6 +50,30 @@ export type SignWorkflowInput = {
   signoutAdvanceMinutes?: number;
   participantUserIds: string[];
   replaceExisting?: boolean;
+};
+
+export type ReservationAcceptanceMember = {
+  localUserId: string | null;
+};
+
+export type MemberAcceptanceTask = {
+  id: string;
+  reservation_id: string | null;
+  owner_user_id: string;
+  member_user_id: string;
+  official_reservation_id: string;
+  room_id: number;
+  date: string;
+  start_time: string;
+  end_time: string;
+  attempt_count: number;
+};
+
+export type MemberAcceptanceRunResult = {
+  processed: number;
+  succeeded: number;
+  rescheduled: number;
+  disabled: number;
 };
 
 export function shanghaiParts(timestamp: number): { date: string; time: string } {
@@ -372,6 +396,194 @@ export async function findOfficialRecord(
   const record = (await fetchOfficialReservationHistory(env, token, profile.studentId))
     .find((item) => String(item.id) === officialReservationId) ?? null;
   return { token, studentId: profile.studentId, record };
+}
+
+function reservationAccepted(record: OfficialReservationRecord): boolean {
+  return [21, 31, 51, 53].includes(record.reservationStatus);
+}
+
+function matchingAcceptanceReservation(
+  records: OfficialReservationRecord[],
+  task: Pick<MemberAcceptanceTask, "official_reservation_id" | "room_id" | "date" | "start_time" | "end_time">,
+): OfficialReservationRecord | null {
+  return records.find((record) => String(record.id) === task.official_reservation_id)
+    ?? records.find((record) => {
+      const start = shanghaiParts(record.startTime);
+      const end = shanghaiParts(record.endTime);
+      return record.roomId === task.room_id && start.date === task.date && start.time === task.start_time && end.time === task.end_time;
+    })
+    ?? null;
+}
+
+function memberAcceptanceRetryDelayMs(attemptCount: number): number {
+  return Math.min(30 * 60_000, 30_000 * 2 ** Math.max(0, Math.min(attemptCount, 6)));
+}
+
+export async function enqueueMemberAcceptanceTasks(
+  env: AppEnv,
+  ownerUserId: string,
+  officialReservationId: string,
+  members: ReservationAcceptanceMember[],
+  reservation: { roomId: number; date: string; startTime: string; endTime: string },
+): Promise<void> {
+  const localMembers = members
+    .map((member) => member.localUserId)
+    .filter((id): id is string => Boolean(id));
+  if (!localMembers.length) return;
+  const local = await env.DB.prepare(
+    "SELECT id FROM reservations WHERE owner_user_id = ? AND official_reservation_id = ?",
+  ).bind(ownerUserId, officialReservationId).first<{ id: string }>();
+  const now = Date.now();
+  await env.DB.batch(localMembers.map((memberUserId) => env.DB.prepare(
+    `INSERT INTO reservation_member_acceptance_tasks
+      (id, reservation_id, owner_user_id, member_user_id, official_reservation_id, room_id, date, start_time, end_time,
+       status, attempt_count, next_attempt_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', 0, ?, ?, ?)
+     ON CONFLICT(member_user_id, official_reservation_id) DO UPDATE SET
+       reservation_id = COALESCE(excluded.reservation_id, reservation_member_acceptance_tasks.reservation_id),
+       owner_user_id = excluded.owner_user_id,
+       official_reservation_id = excluded.official_reservation_id,
+       status = CASE WHEN reservation_member_acceptance_tasks.status = 'SUCCESS' THEN 'SUCCESS' ELSE 'PENDING' END,
+       next_attempt_at = excluded.next_attempt_at,
+       last_error_code = NULL,
+       last_error_message = NULL,
+       updated_at = excluded.updated_at`,
+  ).bind(
+    crypto.randomUUID(),
+    local?.id ?? null,
+    ownerUserId,
+    memberUserId,
+    officialReservationId,
+    reservation.roomId,
+    reservation.date,
+    reservation.startTime,
+    reservation.endTime,
+    now,
+    now,
+    now,
+  )));
+}
+
+async function markMemberAcceptanceSuccess(env: AppEnv, task: MemberAcceptanceTask, record: OfficialReservationRecord): Promise<void> {
+  const now = Date.now();
+  await env.DB.batch([
+    env.DB.prepare(
+      `UPDATE reservation_member_acceptance_tasks
+          SET status = 'SUCCESS', last_error_code = NULL, last_error_message = NULL, updated_at = ?
+        WHERE id = ?`,
+    ).bind(now, task.id),
+    env.DB.prepare(
+      `UPDATE reservations
+          SET status = ?, official_status = ?, synced_at = ?, updated_at = ?
+        WHERE owner_user_id = ? AND official_reservation_id = ?`,
+    ).bind(localReservationStatus(record.reservationStatus), record.reservationStatus, now, now, task.owner_user_id, String(record.id)),
+  ]);
+  await syncOfficialReservationHistory(env, { id: task.owner_user_id, student_id: null, real_name: null });
+}
+
+async function rescheduleMemberAcceptance(env: AppEnv, task: MemberAcceptanceTask, error: unknown): Promise<void> {
+  const code = error instanceof HttpError ? error.code : "MEMBER_ACCEPT_FAILED";
+  const message = error instanceof Error ? error.message : "成员同意预约失败";
+  const now = Date.now();
+  await env.DB.prepare(
+    `UPDATE reservation_member_acceptance_tasks
+        SET status = 'PENDING', next_attempt_at = ?, last_error_code = ?, last_error_message = ?, updated_at = ?
+      WHERE id = ?`,
+  ).bind(now + memberAcceptanceRetryDelayMs(task.attempt_count), code, message, now, task.id).run();
+  console.error(JSON.stringify({ level: "warn", event: "reservation_member_acceptance_retry", taskId: task.id, code }));
+}
+
+export async function submitPendingMemberAcceptanceTasks(
+  env: AppEnv,
+  now: number,
+  limit = 5,
+  filter: { reservationId?: string | null; memberUserId?: string | null; taskIds?: string[] | null } = {},
+): Promise<MemberAcceptanceRunResult> {
+  const conditions = ["status IN ('PENDING', 'RUNNING')", "next_attempt_at <= ?"];
+  const params: unknown[] = [now];
+  if (filter.taskIds?.length) {
+    const uniqueTaskIds = [...new Set(filter.taskIds)].filter(Boolean);
+    if (uniqueTaskIds.length) {
+      conditions.push(`id IN (${uniqueTaskIds.map(() => "?").join(",")})`);
+      params.push(...uniqueTaskIds);
+    }
+  }
+  if (filter.reservationId) {
+    conditions.push("reservation_id = ?");
+    params.push(filter.reservationId);
+  }
+  if (filter.memberUserId) {
+    conditions.push("member_user_id = ?");
+    params.push(filter.memberUserId);
+  }
+  const rows = await env.DB.prepare(
+    `SELECT id, reservation_id, owner_user_id, member_user_id, official_reservation_id, room_id, date, start_time, end_time, attempt_count
+       FROM reservation_member_acceptance_tasks
+      WHERE ${conditions.join(" AND ")}
+      ORDER BY next_attempt_at, updated_at LIMIT ${limit}`,
+  ).bind(...params).all<MemberAcceptanceTask>();
+
+  const result: MemberAcceptanceRunResult = { processed: 0, succeeded: 0, rescheduled: 0, disabled: 0 };
+  for (const task of rows.results) {
+    const claimed = await env.DB.prepare(
+      `UPDATE reservation_member_acceptance_tasks
+          SET status = 'RUNNING', attempt_count = attempt_count + 1, updated_at = ?
+        WHERE id = ? AND status IN ('PENDING', 'RUNNING')`,
+    ).bind(Date.now(), task.id).run();
+    if (claimed.meta.changes !== 1) continue;
+    result.processed += 1;
+    const currentTask = { ...task, attempt_count: task.attempt_count + 1 };
+    try {
+      const token = await getAccessToken(env, task.member_user_id);
+      const profile = await getOfficialReservationProfile(env, task.member_user_id, token);
+      let record = matchingAcceptanceReservation(await fetchOfficialReservationHistory(env, token, profile.studentId), task);
+      if (!record) throw new HttpError(502, "MEMBER_RESERVATION_NOT_FOUND", "成员端暂未同步到官方预约邀请");
+      if ([61, 63].includes(record.reservationStatus)) {
+        await env.DB.prepare(
+          `UPDATE reservation_member_acceptance_tasks
+              SET status = 'DISABLED', last_error_code = 'RESERVATION_CANCELLED', updated_at = ?
+            WHERE id = ?`,
+        ).bind(Date.now(), task.id).run();
+        result.disabled += 1;
+        continue;
+      }
+      if (!reservationAccepted(record)) {
+        if (record.reservationStatus !== 12) throw new HttpError(409, "MEMBER_RESERVATION_NOT_ACCEPTABLE", "成员端预约状态无法自动同意");
+        await acceptOfficialReservation(env, token, String(record.id));
+        record = matchingAcceptanceReservation(await fetchOfficialReservationHistory(env, token, profile.studentId), {
+          ...task,
+          official_reservation_id: String(record.id),
+        });
+      }
+      if (record && reservationAccepted(record)) {
+        await markMemberAcceptanceSuccess(env, task, record);
+        result.succeeded += 1;
+      } else {
+        throw new HttpError(502, "MEMBER_ACCEPTANCE_NOT_CONFIRMED", "成员同意请求已提交但尚未确认");
+      }
+    } catch (error) {
+      await recoverExpiredOfficialLogin(env, task.member_user_id, error);
+      await rescheduleMemberAcceptance(env, currentTask, error);
+      result.rescheduled += 1;
+    }
+  }
+  return result;
+}
+
+export async function requeueMemberAcceptanceTasks(
+  env: AppEnv,
+  taskIds: string[],
+): Promise<number> {
+  const unique = [...new Set(taskIds)].filter(Boolean);
+  if (!unique.length) return 0;
+  const placeholders = unique.map(() => "?").join(",");
+  const now = Date.now();
+  const result = await env.DB.prepare(
+    `UPDATE reservation_member_acceptance_tasks
+        SET status = 'PENDING', next_attempt_at = ?, updated_at = ?
+      WHERE id IN (${placeholders}) AND status IN ('PENDING', 'RUNNING', 'FAILED')`,
+  ).bind(now, now, ...unique).run();
+  return result.meta.changes;
 }
 
 export function resolveSignDevice(env: AppEnv, roomId: number | string): SignDevice {

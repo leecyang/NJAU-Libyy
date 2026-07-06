@@ -5,7 +5,6 @@ import { getAccessToken, getOfficialReservationProfile, recoverExpiredOfficialLo
 import { HttpError } from "./http";
 import { deliverDueMail, queueMail } from "./mail";
 import {
-  acceptOfficialReservation,
   createOfficialQrSignCheckCode,
   fetchOfficialReservationDates,
   fetchOfficialReservationHistory,
@@ -19,11 +18,13 @@ import {
   type OfficialReservationRecord,
 } from "./official";
 import {
+  enqueueMemberAcceptanceTasks,
   ensureReservationTasks,
   findOfficialRecord,
   localReservationStatus,
   resolveSignDevice,
   shanghaiParts,
+  submitPendingMemberAcceptanceTasks,
   syncOfficialReservationHistory,
   type MemberSnapshot,
 } from "./reservations";
@@ -79,7 +80,9 @@ export async function runScheduler(env: AppEnv): Promise<void> {
   await budget.run("expire-invitations", async () => {
     await Promise.all([expireInvitations(env, now), expireTeamInvitations(env, now)]);
   });
-  await budget.run("accept-reservation-members", () => submitPendingMemberAcceptanceTasks(env, now, schedulerLimit(env, "SCHEDULER_SYNC_LIMIT", 5, 20)), 2500);
+  await budget.run("accept-reservation-members", async () => {
+    await submitPendingMemberAcceptanceTasks(env, now, schedulerLimit(env, "SCHEDULER_SYNC_LIMIT", 5, 20));
+  }, 2500);
   await budget.run("submit-sign-workflows", () => submitDueSignWorkflows(env, now, schedulerLimit(env, "SCHEDULER_SIGN_LIMIT", 5, 20)), 2500);
   await budget.run("prepare-reservation-tasks", () => prepareReservationTasks(env, now, schedulerLimit(env, "SCHEDULER_PREPARE_LIMIT", 5, 20)));
   await budget.run("submit-reservation-tasks", () => submitReadyReservationTasks(env, now, schedulerLimit(env, "SCHEDULER_RESERVATION_SUBMIT_LIMIT", 2, 10)), 4000);
@@ -346,132 +349,6 @@ async function authorizedMembers(env: AppEnv, taskId: string): Promise<Authorize
   return rows.results.map((row) => ({ source: row.source, localUserId: row.member_user_id, userId: row.official_student_id, userName: row.official_real_name }));
 }
 
-async function autoAcceptTeamMembers(env: AppEnv, officialReservationId: string, members: AuthorizedMember[]): Promise<number> {
-  let accepted = 0;
-  for (const member of members) {
-    if (member.source !== "TEAM" || !member.localUserId) continue;
-    try {
-      await acceptOfficialReservation(env, await getAccessToken(env, member.localUserId), officialReservationId);
-      accepted += 1;
-    } catch {
-      // The official invitation remains pending and is picked up by later history synchronization.
-    }
-  }
-  return accepted;
-}
-
-type MemberAcceptanceTask = {
-  id: string;
-  reservation_id: string | null;
-  owner_user_id: string;
-  member_user_id: string;
-  official_reservation_id: string;
-  room_id: number;
-  date: string;
-  start_time: string;
-  end_time: string;
-  attempt_count: number;
-};
-
-function reservationAccepted(record: OfficialReservationRecord): boolean {
-  return [21, 31, 51, 53].includes(record.reservationStatus);
-}
-
-function matchingOfficialReservation(
-  records: OfficialReservationRecord[],
-  task: Pick<MemberAcceptanceTask, "official_reservation_id" | "room_id" | "date" | "start_time" | "end_time">,
-): OfficialReservationRecord | null {
-  return records.find((record) => String(record.id) === task.official_reservation_id)
-    ?? records.find((record) => {
-      const start = shanghaiParts(record.startTime);
-      const end = shanghaiParts(record.endTime);
-      return record.roomId === task.room_id && start.date === task.date && start.time === task.start_time && end.time === task.end_time;
-    })
-    ?? null;
-}
-
-function memberAcceptanceRetryDelayMs(attemptCount: number): number {
-  return Math.min(30 * 60_000, 30_000 * 2 ** Math.max(0, Math.min(attemptCount, 6)));
-}
-
-async function markMemberAcceptanceSuccess(env: AppEnv, task: MemberAcceptanceTask, record: OfficialReservationRecord): Promise<void> {
-  const now = Date.now();
-  await env.DB.batch([
-    env.DB.prepare(
-      `UPDATE reservation_member_acceptance_tasks
-          SET status = 'SUCCESS', last_error_code = NULL, last_error_message = NULL, updated_at = ?
-        WHERE id = ?`,
-    ).bind(now, task.id),
-    env.DB.prepare(
-      `UPDATE reservations
-          SET status = ?, official_status = ?, synced_at = ?, updated_at = ?
-        WHERE owner_user_id = ? AND official_reservation_id = ?`,
-    ).bind(localReservationStatus(record.reservationStatus), record.reservationStatus, now, now, task.owner_user_id, String(record.id)),
-  ]);
-  await syncOfficialReservationHistory(env, { id: task.owner_user_id, student_id: null, real_name: null });
-}
-
-async function rescheduleMemberAcceptance(env: AppEnv, task: MemberAcceptanceTask, error: unknown): Promise<void> {
-  const code = error instanceof HttpError ? error.code : "MEMBER_ACCEPT_FAILED";
-  const message = error instanceof Error ? error.message : "成员同意预约失败";
-  const now = Date.now();
-  await env.DB.prepare(
-    `UPDATE reservation_member_acceptance_tasks
-        SET status = 'PENDING', next_attempt_at = ?, last_error_code = ?, last_error_message = ?, updated_at = ?
-      WHERE id = ?`,
-  ).bind(now + memberAcceptanceRetryDelayMs(task.attempt_count), code, message, now, task.id).run();
-  console.error(JSON.stringify({ level: "warn", event: "reservation_member_acceptance_retry", taskId: task.id, code }));
-}
-
-async function submitPendingMemberAcceptanceTasks(env: AppEnv, now: number, limit = 5): Promise<void> {
-  const rows = await env.DB.prepare(
-    `SELECT id, reservation_id, owner_user_id, member_user_id, official_reservation_id, room_id, date, start_time, end_time, attempt_count
-       FROM reservation_member_acceptance_tasks
-      WHERE status IN ('PENDING', 'RUNNING') AND next_attempt_at <= ?
-      ORDER BY next_attempt_at, updated_at LIMIT ${limit}`,
-  ).bind(now).all<MemberAcceptanceTask>();
-
-  for (const task of rows.results) {
-    const claimed = await env.DB.prepare(
-      `UPDATE reservation_member_acceptance_tasks
-          SET status = 'RUNNING', attempt_count = attempt_count + 1, updated_at = ?
-        WHERE id = ? AND status IN ('PENDING', 'RUNNING')`,
-    ).bind(Date.now(), task.id).run();
-    if (claimed.meta.changes !== 1) continue;
-    const currentTask = { ...task, attempt_count: task.attempt_count + 1 };
-    try {
-      const token = await getAccessToken(env, task.member_user_id);
-      const profile = await getOfficialReservationProfile(env, task.member_user_id, token);
-      let record = matchingOfficialReservation(await fetchOfficialReservationHistory(env, token, profile.studentId), task);
-      if (!record) throw new HttpError(502, "MEMBER_RESERVATION_NOT_FOUND", "成员端暂未同步到官方预约邀请");
-      if ([61, 63].includes(record.reservationStatus)) {
-        await env.DB.prepare(
-          `UPDATE reservation_member_acceptance_tasks
-              SET status = 'DISABLED', last_error_code = 'RESERVATION_CANCELLED', updated_at = ?
-            WHERE id = ?`,
-        ).bind(Date.now(), task.id).run();
-        continue;
-      }
-      if (!reservationAccepted(record)) {
-        if (record.reservationStatus !== 12) throw new HttpError(409, "MEMBER_RESERVATION_NOT_ACCEPTABLE", "成员端预约状态无法自动同意");
-        await acceptOfficialReservation(env, token, String(record.id));
-        record = matchingOfficialReservation(await fetchOfficialReservationHistory(env, token, profile.studentId), {
-          ...task,
-          official_reservation_id: String(record.id),
-        });
-      }
-      if (record && reservationAccepted(record)) {
-        await markMemberAcceptanceSuccess(env, task, record);
-      } else {
-        throw new HttpError(502, "MEMBER_ACCEPTANCE_NOT_CONFIRMED", "成员同意请求已提交但尚未确认");
-      }
-    } catch (error) {
-      await recoverExpiredOfficialLogin(env, task.member_user_id, error);
-      await rescheduleMemberAcceptance(env, currentTask, error);
-    }
-  }
-}
-
 function redactedResponse(response: unknown): string {
   return JSON.stringify({
     received: response !== null,
@@ -557,10 +434,6 @@ async function submitReadyReservationTasks(env: AppEnv, now: number, limit = 2):
         return record.roomId === submitted!.room.id && start.date === task.target_date && start.time === task.start_time && end.time === task.end_time;
       });
       if (!official) throw new HttpError(502, "RESERVATION_SYNC_FAILED", "官方已接收预约，但订单回读失败");
-      if (await autoAcceptTeamMembers(env, String(official.id), members)) {
-        officialRecords = await fetchOfficialReservationHistory(env, token, profile.studentId);
-        official = officialRecords.find((record) => record.id === official!.id) ?? official;
-      }
       await env.DB.batch([
         env.DB.prepare(
           `INSERT INTO reservations
@@ -583,6 +456,23 @@ async function submitReadyReservationTasks(env: AppEnv, now: number, limit = 2):
         await moveReservationQuota(env, "TASK", task.id, "RESERVATION", quotaSource);
       } catch {
         await releaseReservationQuota(env, "TASK", task.id);
+      }
+      await enqueueMemberAcceptanceTasks(env, task.owner_user_id, String(official.id), members, {
+        roomId: submitted.room.id,
+        date: task.target_date,
+        startTime: task.start_time,
+        endTime: task.end_time,
+      });
+      if (members.some((member) => member.localUserId) && env.OFFICIAL_GATEWAY) {
+        await env.OFFICIAL_GATEWAY.enqueue({
+          kind: "MEMBER_ACCEPTANCE",
+          lane: "WRITE",
+          ownerUserId: task.owner_user_id,
+          dedupeKey: `member-accept:${reservationId}:all`,
+          payload: { reservationId, officialReservationId: String(official.id) },
+          priority: 4,
+          maxAttempts: 1,
+        });
       }
       await ensureReservationTasks(env, reservationId, official);
       await audit(env.DB, { actorUserId: task.owner_user_id, actorType: "SYSTEM", action: "AUTO_RESERVATION_SUBMITTED", targetType: "RESERVATION", targetId: reservationId, result: "SUBMITTED_UNVERIFIED" });

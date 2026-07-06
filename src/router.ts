@@ -10,6 +10,7 @@ import {
   adminTestEmail,
   adminUserStatus,
   bind,
+  acceptReservationMembers,
   cancelReservation,
   cancelSignWorkflow,
   changeTaskStatus,
@@ -131,6 +132,8 @@ export async function routeApi(env: AppEnv, request: Request): Promise<Response>
   if (request.method === "GET" && reservationDetailMatch?.[1]) return reservationDetail(env, request, reservationDetailMatch[1]);
   const reservationCancelMatch = /^\/api\/v1\/reservations\/([^/]+)\/cancel$/.exec(url.pathname);
   if (request.method === "POST" && reservationCancelMatch?.[1]) return cancelReservation(env, request, reservationCancelMatch[1]);
+  const reservationAcceptMembersMatch = /^\/api\/v1\/reservations\/([^/]+)\/accept-members$/.exec(url.pathname);
+  if (request.method === "POST" && reservationAcceptMembersMatch?.[1]) return acceptReservationMembers(env, request, reservationAcceptMembersMatch[1]);
   const reservationSignLinkMatch = /^\/api\/v1\/reservations\/([^/]+)\/sign-link$/.exec(url.pathname);
   if (request.method === "POST" && reservationSignLinkMatch?.[1]) return createSignLink(env, request, reservationSignLinkMatch[1]);
   const reservationSignoutMatch = /^\/api\/v1\/reservations\/([^/]+)\/signout$/.exec(url.pathname);

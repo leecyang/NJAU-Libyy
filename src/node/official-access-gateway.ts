@@ -164,7 +164,7 @@ export class NodeOfficialAccessGateway implements OfficialAccessGateway {
     const interval = boundedInteger(env.OFFICIAL_REQUEST_MIN_INTERVAL_MS, 150, 0, 5000);
     const readConcurrency = boundedInteger(env.OFFICIAL_READ_CONCURRENCY, 3, 1, 16);
     const writeConcurrency = boundedInteger(env.OFFICIAL_WRITE_CONCURRENCY, 1, 1, 8);
-    const playwrightConcurrency = boundedInteger(env.PLAYWRIGHT_MAX_CONCURRENCY, 2, 1, 8);
+    const playwrightConcurrency = boundedInteger(env.CAS_LOGIN_MAX_CONCURRENCY ?? env.PLAYWRIGHT_MAX_CONCURRENCY, 2, 1, 8);
     this.jobLimits = { READ: readConcurrency, WRITE: writeConcurrency, PLAYWRIGHT: playwrightConcurrency };
     this.officialReadLane = new AsyncLane(readConcurrency, interval);
     this.officialWriteLane = new AsyncLane(writeConcurrency, interval);

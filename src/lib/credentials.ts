@@ -4,7 +4,7 @@ import { audit } from "./audit";
 import { decryptSecret, encryptSecret } from "./crypto";
 import { HttpError } from "./http";
 import { queueMail } from "./mail";
-import { fetchOfficialIdentity, refreshOfficialToken, searchOfficialUsers, type OfficialIdentity } from "./official";
+import { fetchOfficialIdentity, refreshOfficialToken, searchOfficialUsers, type OfficialIdentity, type OfficialRefreshResult } from "./official";
 
 type Credential = {
   id: string;
@@ -84,22 +84,21 @@ async function persistTokens(
   ).bind(crypto.randomUUID(), userId, accessCiphertext, reflushCiphertext, expires, now, now, now, now, now).run();
 }
 
-export async function bindCredentialFromToken(
+export async function bindCredentialFromTokens(
   env: AppEnv,
   user: User,
-  submittedReflushToken: string,
+  tokens: OfficialRefreshResult,
   expectedStudentId: string,
 ): Promise<void> {
   const now = Date.now();
-  const refreshed = await refreshOfficialToken(env, submittedReflushToken);
-  const identity = await fetchOfficialIdentity(env, refreshed.accessToken);
+  const identity = await fetchOfficialIdentity(env, tokens.accessToken);
   const conflictingUser = await env.DB.prepare(
     "SELECT id FROM users WHERE student_id = ? AND id <> ?",
   ).bind(identity.userId, user.id).first<{ id: string }>();
 
   if (conflictingUser) {
     // The submitted token has already rolled. Preserve its successor for the existing owner.
-    await persistTokens(env, conflictingUser.id, refreshed.accessToken, refreshed.reflushToken, refreshed.expires, now);
+    await persistTokens(env, conflictingUser.id, tokens.accessToken, tokens.reflushToken, tokens.expires, now);
     await audit(env.DB, {
       actorUserId: user.id,
       actorType: "USER",
@@ -114,7 +113,7 @@ export async function bindCredentialFromToken(
   if (identity.userId !== expectedStudentId) {
     throw new HttpError(409, "CAS_IDENTITY_MISMATCH", "统一认证账号与官方身份不一致");
   }
-  const mobile = await resolveReservationMobile(env, refreshed.accessToken, identity);
+  const mobile = await resolveReservationMobile(env, tokens.accessToken, identity);
 
   await env.DB.batch([
     env.DB.prepare(
@@ -128,7 +127,7 @@ export async function bindCredentialFromToken(
       user.id,
     ),
   ]);
-  await persistTokens(env, user.id, refreshed.accessToken, refreshed.reflushToken, refreshed.expires, now);
+  await persistTokens(env, user.id, tokens.accessToken, tokens.reflushToken, tokens.expires, now);
   await audit(env.DB, {
     actorUserId: user.id,
     actorType: "USER",
@@ -137,6 +136,16 @@ export async function bindCredentialFromToken(
     targetId: user.id,
     result: "SUCCESS",
   });
+}
+
+export async function bindCredentialFromToken(
+  env: AppEnv,
+  user: User,
+  submittedReflushToken: string,
+  expectedStudentId: string,
+): Promise<void> {
+  const refreshed = await refreshOfficialToken(env, submittedReflushToken);
+  await bindCredentialFromTokens(env, user, refreshed, expectedStudentId);
 }
 
 export async function getOfficialReservationProfile(

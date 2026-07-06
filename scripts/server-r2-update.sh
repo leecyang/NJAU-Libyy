@@ -157,17 +157,15 @@ json_value() {
 VERSION="$(json_value version)"
 IMAGE_OBJECT="$(json_value image)"
 COMPOSE_OBJECT="$(json_value compose)"
-SECCOMP_OBJECT="$(json_value seccomp)"
 ENV_EXAMPLE_OBJECT="$(json_value envExample)"
 
-if [ -z "$VERSION" ] || [ -z "$IMAGE_OBJECT" ] || [ -z "$COMPOSE_OBJECT" ] || [ -z "$SECCOMP_OBJECT" ] || [ -z "$ENV_EXAMPLE_OBJECT" ]; then
+if [ -z "$VERSION" ] || [ -z "$IMAGE_OBJECT" ] || [ -z "$COMPOSE_OBJECT" ] || [ -z "$ENV_EXAMPLE_OBJECT" ]; then
   echo "[deploy] Invalid manifest: $MANIFEST_PATH" >&2
   exit 1
 fi
 
 IMAGE_PATH="$APP_DIR/releases/$IMAGE_OBJECT"
 COMPOSE_PATH="$APP_DIR/docker-compose.yml"
-SECCOMP_PATH="$APP_DIR/docker/playwright-seccomp.json"
 
 echo "[deploy] Version $VERSION"
 
@@ -185,22 +183,11 @@ fi
 
 download "$R2_PUBLIC_BASE_URL/$CHANNEL/$IMAGE_OBJECT" "$IMAGE_PATH"
 download "$R2_PUBLIC_BASE_URL/$CHANNEL/$COMPOSE_OBJECT" "$COMPOSE_PATH"
-mkdir -p "$APP_DIR/docker"
-download "$R2_PUBLIC_BASE_URL/$CHANNEL/$SECCOMP_OBJECT" "$SECCOMP_PATH"
 download "$R2_PUBLIC_BASE_URL/$CHANNEL/$ENV_EXAMPLE_OBJECT" "$APP_DIR/.env.example"
-
-if [ ! -s "$SECCOMP_PATH" ]; then
-  echo "[deploy] Missing Playwright seccomp profile: $SECCOMP_PATH" >&2
-  exit 1
-fi
 
 printf 'APP_IMAGE_TAG=%s\n' "$VERSION" > "$APP_DIR/.release.env"
 echo "[deploy] Validating compose file"
 docker compose --env-file .env --env-file .release.env config >/dev/null
-if ! docker compose --env-file .env --env-file .release.env config | grep -q 'seccomp:./docker/playwright-seccomp.json'; then
-  echo "[deploy] Compose does not enable the Playwright seccomp profile" >&2
-  exit 1
-fi
 
 if docker compose ps -q app >/dev/null 2>&1; then
   CONTAINER_ID="$(docker compose ps -q app || true)"

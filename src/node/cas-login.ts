@@ -1,14 +1,13 @@
-import fs from "node:fs/promises";
-import path from "node:path";
-import { chromium, type BrowserContext, type Page } from "playwright";
+import { createCipheriv, randomInt } from "node:crypto";
 import type { AppEnv } from "../config";
 import type { User } from "../lib/auth";
 import { audit } from "../lib/audit";
 import type { CasAttemptPublic, CasAttemptPurpose, CasAttemptStatus, CasAutomationAdapter } from "../lib/cas-types";
-import { bindCredentialFromToken } from "../lib/credentials";
+import { bindCredentialFromToken, bindCredentialFromTokens } from "../lib/credentials";
 import { decryptSecret, encryptSecret } from "../lib/crypto";
 import { HttpError } from "../lib/http";
 import { queueMail } from "../lib/mail";
+import type { OfficialRefreshResult } from "../lib/official";
 
 type AttemptRow = {
   id: string;
@@ -26,23 +25,82 @@ type AttemptRow = {
 };
 
 type ActiveAttempt = {
-  context: BrowserContext;
+  abortController: AbortController;
   smsResolver?: (code: string) => void;
+  smsRejecter?: (error: unknown) => void;
 };
 
-type CasEntryState = "PASSWORD" | "SMS" | "AUTHENTICATED";
-export type CasSmsPageState = "AUTHENTICATED" | "ERROR" | "WAITING";
+type LoginPage = {
+  url: string;
+  action: string;
+  execution: string;
+  pwdEncryptSalt: string;
+  fields: Record<string, string>;
+};
+
+type ParsedForm = {
+  attrs: Record<string, string>;
+  inputs: Record<string, string>;
+};
+
+type ProtocolLoginResult =
+  | { kind: "TOKENS"; tokens: OfficialRefreshResult }
+  | { kind: "REFLUSH_TOKEN"; reflushToken: string };
+
+type RequestOptions = RequestInit & {
+  signal?: AbortSignal;
+};
 
 const ACTIVE_STATUSES = "('QUEUED', 'RUNNING', 'SMS_REQUIRED')";
 const ATTEMPT_TTL_MS = 10 * 60_000;
 const SMS_TTL_MS = 5 * 60_000;
-const SMS_INPUT_SELECTOR = '#dynamicCode, input[name="dynamicCode"], input[placeholder*="短信验证码"], #smsCode, #verifyCode, input[name="smsCode"]';
-const SMS_INPUT_TIMEOUT_MS = 15_000;
-const SMS_ACTION_TIMEOUT_MS = 5_000;
+const AUTH_BASE_URL = "https://authserver.njau.edu.cn";
+const DEFAULT_AES_IV = "HDbk7NdBpFPpFrZR";
+const RANDOM_PREFIX_CHARS = "ABCDEFGHJKMNPQRSTWXYZabcdefhijkmnprstwxyz2345678";
+const DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+const MAX_REDIRECTS = 24;
 
 class CasAutomationError extends Error {
   constructor(readonly code: string, message: string, readonly internalDetail?: string) {
     super(message);
+  }
+}
+
+class ProtocolCookieJar {
+  private readonly cookies = new Map<string, {
+    name: string;
+    value: string;
+    domain: string;
+    path: string;
+    hostOnly: boolean;
+    secure: boolean;
+    expiresAt: number | null;
+  }>();
+
+  store(headers: Headers, requestUrl: URL): void {
+    for (const raw of setCookieHeaders(headers)) {
+      const cookie = parseSetCookie(raw, requestUrl);
+      if (!cookie) continue;
+      const key = `${cookie.domain}\t${cookie.path}\t${cookie.name}`;
+      if (cookie.expiresAt !== null && cookie.expiresAt <= Date.now()) this.cookies.delete(key);
+      else this.cookies.set(key, cookie);
+    }
+  }
+
+  header(url: URL): string {
+    const now = Date.now();
+    const pairs: string[] = [];
+    for (const [key, cookie] of this.cookies) {
+      if (cookie.expiresAt !== null && cookie.expiresAt <= now) {
+        this.cookies.delete(key);
+        continue;
+      }
+      if (cookie.secure && url.protocol !== "https:") continue;
+      if (!domainMatches(url.hostname.toLowerCase(), cookie.domain, cookie.hostOnly)) continue;
+      if (!pathMatches(url.pathname, cookie.path)) continue;
+      pairs.push(`${cookie.name}=${cookie.value}`);
+    }
+    return pairs.join("; ");
   }
 }
 
@@ -62,32 +120,280 @@ function isStudentId(value: string): boolean {
   return /^[0-9A-Za-z]{4,32}$/.test(value);
 }
 
-export function casProfilePath(root: string, userId: string): string {
-  if (!/^[0-9a-f-]{36}$/i.test(userId)) throw new Error("Invalid user id for profile path");
-  const resolvedRoot = path.resolve(root);
-  const target = path.resolve(resolvedRoot, userId);
-  if (!target.startsWith(`${resolvedRoot}${path.sep}`)) throw new Error("Invalid profile path");
-  return target;
+function splitSetCookie(value: string): string[] {
+  const result: string[] = [];
+  let start = 0;
+  let inExpires = false;
+  for (let index = 0; index < value.length; index += 1) {
+    if (value.slice(index, index + 8).toLowerCase() === "expires=") inExpires = true;
+    if (inExpires && value[index] === ";") inExpires = false;
+    if (value[index] === "," && !inExpires && /\s*[^=;,\s]+=/.test(value.slice(index + 1))) {
+      result.push(value.slice(start, index).trim());
+      start = index + 1;
+    }
+  }
+  result.push(value.slice(start).trim());
+  return result.filter(Boolean);
 }
 
-async function visible(page: Page, selector: string): Promise<boolean> {
-  return page.locator(selector).first().isVisible().catch(() => false);
+function setCookieHeaders(headers: Headers): string[] {
+  const extended = headers as Headers & { getSetCookie?: () => string[] };
+  const values = extended.getSetCookie?.();
+  if (values?.length) return values;
+  const combined = headers.get("set-cookie");
+  return combined ? splitSetCookie(combined) : [];
 }
 
-export function isAbortedNavigation(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.includes("net::ERR_ABORTED") || message.includes("Navigation interrupted by another one");
+function defaultCookiePath(pathname: string): string {
+  if (!pathname || !pathname.startsWith("/")) return "/";
+  const index = pathname.lastIndexOf("/");
+  return index <= 0 ? "/" : pathname.slice(0, index);
 }
 
-export function classifyCasSmsPageState(input: {
-  url: string;
-  token: string | null;
-  inputVisible: boolean;
-  errorText: string;
-}): CasSmsPageState {
-  if (input.url.includes("/student/studentIndex") && input.token) return "AUTHENTICATED";
-  if (input.errorText.trim()) return "ERROR";
-  return "WAITING";
+function parseSetCookie(raw: string, requestUrl: URL) {
+  const parts = raw.split(";").map((part) => part.trim());
+  const [nameValue, ...attrs] = parts;
+  const separator = nameValue?.indexOf("=") ?? -1;
+  if (!nameValue || separator <= 0) return null;
+  const name = nameValue.slice(0, separator);
+  const value = nameValue.slice(separator + 1);
+  let domain = requestUrl.hostname.toLowerCase();
+  let hostOnly = true;
+  let path = defaultCookiePath(requestUrl.pathname);
+  let secure = false;
+  let expiresAt: number | null = null;
+
+  for (const attr of attrs) {
+    const [rawKey, ...rawValue] = attr.split("=");
+    const key = rawKey?.toLowerCase();
+    const attrValue = rawValue.join("=");
+    if (key === "domain" && attrValue) {
+      domain = attrValue.trim().replace(/^\./, "").toLowerCase();
+      hostOnly = false;
+    } else if (key === "path" && attrValue) {
+      path = attrValue.startsWith("/") ? attrValue : "/";
+    } else if (key === "secure") {
+      secure = true;
+    } else if (key === "expires" && attrValue) {
+      const timestamp = Date.parse(attrValue);
+      expiresAt = Number.isFinite(timestamp) ? timestamp : expiresAt;
+    } else if (key === "max-age" && attrValue) {
+      const seconds = Number(attrValue);
+      if (Number.isFinite(seconds)) expiresAt = Date.now() + seconds * 1000;
+    }
+  }
+
+  return { name, value, domain, path, hostOnly, secure, expiresAt };
+}
+
+function domainMatches(host: string, domain: string, hostOnly: boolean): boolean {
+  return hostOnly ? host === domain : host === domain || host.endsWith(`.${domain}`);
+}
+
+function pathMatches(pathname: string, cookiePath: string): boolean {
+  return pathname === cookiePath || pathname.startsWith(cookiePath.endsWith("/") ? cookiePath : `${cookiePath}/`);
+}
+
+function decodeHtml(value: string): string {
+  return value
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">");
+}
+
+function attrs(value: string): Record<string, string> {
+  const result: Record<string, string> = {};
+  const pattern = /([:\w-]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>/]+)))?/g;
+  for (const match of value.matchAll(pattern)) {
+    const name = match[1]?.toLowerCase();
+    if (!name) continue;
+    result[name] = decodeHtml(match[2] ?? match[3] ?? match[4] ?? "");
+  }
+  return result;
+}
+
+function parseForm(html: string, formId: string): ParsedForm | null {
+  const formPattern = new RegExp(`<form\\b([^>]*)\\bid=["']${formId}["'][^>]*>[\\s\\S]*?<\\/form>`, "i");
+  const formMatch = formPattern.exec(html);
+  if (!formMatch?.[0]) return null;
+  const startTag = /^<form\b([^>]*)>/i.exec(formMatch[0])?.[1] ?? "";
+  const formAttrs = attrs(startTag);
+  const inputs: Record<string, string> = {};
+  for (const input of formMatch[0].matchAll(/<input\b([^>]*)>/gi)) {
+    const inputAttrs = attrs(input[1] ?? "");
+    const name = inputAttrs.name || inputAttrs.id;
+    if (name) inputs[name] = inputAttrs.value ?? "";
+  }
+  return { attrs: formAttrs, inputs };
+}
+
+function extractLoginPage(html: string, url: string): LoginPage {
+  const form = parseForm(html, "pwdFromId");
+  if (!form) throw new CasAutomationError("CAS_FORM_ERROR", "统一认证登录表单加载异常");
+  const execution = form.inputs.execution;
+  const pwdEncryptSalt = form.inputs.pwdEncryptSalt;
+  if (!execution || !pwdEncryptSalt) throw new CasAutomationError("CAS_FORM_ERROR", "统一认证登录表单缺少必要字段");
+  const action = new URL(form.attrs.action || "/authserver/login", url).toString();
+  return { url, action, execution, pwdEncryptSalt, fields: form.inputs };
+}
+
+function stripTags(value: string): string {
+  return value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function extractErrorText(html: string): string {
+  const patterns = [
+    /id=["']showErrorTip["'][^>]*>([\s\S]*?)<\/[^>]+>/i,
+    /class=["'][^"']*(?:error|auth_error|el-message)[^"']*["'][^>]*>([\s\S]*?)<\/[^>]+>/i,
+  ];
+  for (const pattern of patterns) {
+    const match = pattern.exec(html);
+    const text = stripTags(match?.[1] ?? "");
+    if (text) return text;
+  }
+  return "";
+}
+
+function hasSliderChallenge(html: string): boolean {
+  return /toSliderCaptcha\.htl|slider-captcha|sliderCaptchaDiv/i.test(html);
+}
+
+function hasSmsChallenge(html: string, url: string): boolean {
+  return /dynamicCode|getDynamicCode|短信验证码|reAuthCheck|reAuthLoginView/i.test(html) || /reAuthCheck|reAuthLoginView/i.test(url);
+}
+
+function hasCaptchaChallenge(html: string, errorText = ""): boolean {
+  return hasSliderChallenge(html) || /验证码|图形动态码/.test(errorText) || (/captchaDiv|getCaptcha\.htl/i.test(html) && !hasSmsChallenge(html, ""));
+}
+
+function isInvalidCredentialText(errorText: string): boolean {
+  return /用户名|密码错误|账号|凭证错误/.test(errorText);
+}
+
+function randomPrefix(length = 64): string {
+  let result = "";
+  for (let index = 0; index < length; index += 1) {
+    result += RANDOM_PREFIX_CHARS[randomInt(RANDOM_PREFIX_CHARS.length)];
+  }
+  return result;
+}
+
+export function encryptCasPassword(password: string, pwdEncryptSalt: string): string {
+  const key = Buffer.from(pwdEncryptSalt, "utf8");
+  const iv = Buffer.from(DEFAULT_AES_IV, "utf8");
+  if (key.byteLength !== 16) throw new CasAutomationError("CAS_FORM_ERROR", "统一认证加密参数异常");
+  const cipher = createCipheriv("aes-128-cbc", key, iv);
+  return Buffer.concat([cipher.update(`${randomPrefix()}${password}`, "utf8"), cipher.final()]).toString("base64");
+}
+
+function serviceUrlFromLoginUrl(loginUrl: string): string {
+  return new URL(loginUrl).searchParams.get("service") ?? "";
+}
+
+function withService(url: string, service: string): string {
+  const target = new URL(url);
+  if (service && !target.searchParams.has("service")) target.searchParams.set("service", service);
+  return target.toString();
+}
+
+function formBody(fields: Record<string, string>): URLSearchParams {
+  const body = new URLSearchParams();
+  Object.entries(fields).forEach(([key, value]) => body.set(key, value));
+  return body;
+}
+
+function parseJsonMaybe(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+function objectValues(value: unknown): Record<string, unknown>[] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+  const object = value as Record<string, unknown>;
+  return [
+    object,
+    ...["data", "result", "token", "tokenInfo", "oauth"].flatMap((key) => objectValues(object[key])),
+  ];
+}
+
+function stringField(objects: Record<string, unknown>[], names: string[]): string | null {
+  for (const object of objects) {
+    for (const name of names) {
+      const value = object[name];
+      if (typeof value === "string" && value.trim()) return value.trim();
+    }
+  }
+  return null;
+}
+
+function numberField(objects: Record<string, unknown>[], names: string[]): number | null {
+  for (const object of objects) {
+    for (const name of names) {
+      const value = object[name];
+      if (typeof value === "number" && Number.isFinite(value)) return value;
+      if (typeof value === "string" && Number.isFinite(Number(value))) return Number(value);
+    }
+  }
+  return null;
+}
+
+function normalizeExpires(raw: number | null): number | null {
+  if (!raw || !Number.isFinite(raw)) return null;
+  if (raw > Date.now()) return Math.max(60, Math.trunc((raw - Date.now()) / 1000));
+  if (raw > Date.now() / 1000) return Math.max(60, Math.trunc(raw - Date.now() / 1000));
+  return Math.trunc(raw);
+}
+
+function tokenResultFromResponse(body: unknown): ProtocolLoginResult {
+  const objects = objectValues(body);
+  const accessToken = stringField(objects, ["accessToken", "access_token", "token"]);
+  const reflushToken = stringField(objects, ["reflushToken", "refreshToken", "reflush_token", "refresh_token"]);
+  const expires = normalizeExpires(numberField(objects, ["expires", "expiresIn", "expires_in", "expire", "expireIn", "expireTime"]));
+  if (accessToken && reflushToken && expires) return { kind: "TOKENS", tokens: { accessToken, reflushToken, expires } };
+  if (reflushToken) return { kind: "REFLUSH_TOKEN", reflushToken };
+  throw new CasAutomationError("CAS_TOKEN_NOT_FOUND", "统一认证完成但未取得官方登录凭证");
+}
+
+function extractReauthParams(html: string): Record<string, unknown> {
+  const match = /var\s+reAuthParams\s*=\s*(\{.*?\})\s*(?:;|\s*)/is.exec(html);
+  if (!match?.[1]) return {};
+  const parsed = parseJsonMaybe(match[1]);
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
+}
+
+function reauthCodeType(reauthType: string): string {
+  return ({
+    "3": "reAuthDynamicCodeType",
+    "4": "reAuthWChatDynamicCodeType",
+    "5": "reAuthCpdailyDynamicCodeType",
+    "11": "reAuthEmailDynamicCodeType",
+    "12": "reAuthDingTalkDynamicCodeType",
+    "13": "reAuthWeLinkDynamicCodeType",
+  } as Record<string, string>)[reauthType] ?? "reAuthDynamicCodeType";
+}
+
+function smsFormData(html: string): Record<string, string> {
+  const reauth = extractReauthParams(html);
+  if (Object.keys(reauth).length) {
+    return {
+      service: String(reauth.service ?? ""),
+      reAuthType: String(reauth.reAuthType ?? ""),
+      isMultifactor: String(reauth.isMultifactor ?? ""),
+      password: "",
+      dynamicCode: "",
+      uuid: "",
+      answer1: "",
+      answer2: "",
+      otpCode: "",
+    };
+  }
+  return parseForm(html, "pwdFromId")?.inputs ?? parseForm(html, "phoneFromId")?.inputs ?? {};
 }
 
 export class CasLoginManager implements CasAutomationAdapter {
@@ -113,7 +419,6 @@ export class CasLoginManager implements CasAutomationAdapter {
               pending_password_ciphertext = NULL, updated_at = ?
         WHERE status = 'QUEUED'`,
     ).bind(now).run();
-    await fs.mkdir(this.profileRoot(), { recursive: true, mode: 0o700 });
   }
 
   async startAttempt(userId: string, studentId: string, password: string, purpose: CasAttemptPurpose): Promise<CasAttemptPublic> {
@@ -132,7 +437,7 @@ export class CasLoginManager implements CasAutomationAdapter {
       student_id: studentId,
       pending_password_ciphertext: await encryptSecret(password, this.env.CAS_CREDENTIAL_ENCRYPTION_KEY),
       status: "QUEUED",
-      progress: "等待启动浏览器",
+      progress: "等待启动统一认证协议登录",
       sms_attempt_count: 0,
       sms_expires_at: null,
       error_code: null,
@@ -182,6 +487,7 @@ export class CasLoginManager implements CasAutomationAdapter {
     ).bind("正在校验短信验证码", Date.now(), attemptId).run();
     const resolver = active.smsResolver;
     active.smsResolver = undefined;
+    active.smsRejecter = undefined;
     resolver(code);
     return publicAttempt({
       ...row,
@@ -196,22 +502,14 @@ export class CasLoginManager implements CasAutomationAdapter {
     for (const [attemptId, active] of this.active) {
       const row = await this.attempt(attemptId);
       if (row?.user_id !== userId) continue;
-      await active.context.close().catch(() => undefined);
+      active.smsRejecter?.(new CasAutomationError("CAS_ATTEMPT_CANCELLED", "认证任务已取消"));
+      active.abortController.abort();
       this.active.delete(attemptId);
     }
-    await fs.rm(this.profilePath(userId), { recursive: true, force: true });
-  }
-
-  private profileRoot(): string {
-    return path.resolve(this.env.PLAYWRIGHT_PROFILE_DIR || "/data/playwright-profiles");
-  }
-
-  private profilePath(userId: string): string {
-    return casProfilePath(this.profileRoot(), userId);
   }
 
   private maxConcurrency(): number {
-    const value = Number(this.env.PLAYWRIGHT_MAX_CONCURRENCY ?? "2");
+    const value = Number(this.env.CAS_LOGIN_MAX_CONCURRENCY ?? this.env.PLAYWRIGHT_MAX_CONCURRENCY ?? "2");
     return Number.isInteger(value) && value > 0 ? Math.min(value, 8) : 2;
   }
 
@@ -246,79 +544,28 @@ export class CasLoginManager implements CasAutomationAdapter {
   }
 
   private async run(attemptId: string): Promise<void> {
-    if (!this.env.OFFICIAL_GATEWAY) {
-      throw new CasAutomationError("OFFICIAL_GATEWAY_UNAVAILABLE", "官方访问网关尚未启动");
-    }
-    return this.env.OFFICIAL_GATEWAY.runPlaywright(`cas:${attemptId}`, () => this.runAttempt(attemptId));
+    return this.runAttempt(attemptId);
   }
 
   private async runAttempt(attemptId: string): Promise<void> {
-    let context: BrowserContext | null = null;
+    const active: ActiveAttempt = { abortController: new AbortController() };
+    this.active.set(attemptId, active);
     let stage = "LOAD_ATTEMPT";
     try {
       const attempt = await this.attempt(attemptId);
       if (!attempt?.pending_password_ciphertext || attempt.expires_at <= Date.now()) throw new CasAutomationError("CAS_ATTEMPT_EXPIRED", "认证任务已过期");
       const password = await decryptSecret(attempt.pending_password_ciphertext, this.env.CAS_CREDENTIAL_ENCRYPTION_KEY);
-      await this.progress(attemptId, "RUNNING", "正在启动独立浏览器环境");
-      const profilePath = this.profilePath(attempt.user_id);
-      await fs.mkdir(profilePath, { recursive: true, mode: 0o700 });
-      await fs.chmod(profilePath, 0o700);
-      stage = "LAUNCH_BROWSER";
-      try {
-        context = await chromium.launchPersistentContext(profilePath, {
-          headless: true,
-          chromiumSandbox: true,
-          viewport: { width: 1365, height: 768 },
-          userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        });
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        if (detail.includes("Chromium sandboxing failed") || detail.includes("No usable sandbox")) {
-          throw new CasAutomationError(
-            "CAS_BROWSER_SANDBOX_UNAVAILABLE",
-            "服务器浏览器沙箱未正确配置，请联系管理员更新部署配置",
-            detail,
-          );
-        }
-        throw new CasAutomationError(
-          "CAS_BROWSER_START_FAILED",
-          "统一认证浏览器启动失败，请稍后重试",
-          detail,
-        );
-      }
-      this.active.set(attemptId, { context });
-      const page = context.pages()[0] ?? await context.newPage();
-      stage = "CLEAR_LIBYY_STATE";
-      await this.clearLibyyState(context);
-      await this.progress(attemptId, "RUNNING", "正在打开南京农业大学统一认证");
-      stage = "OPEN_CAS";
-      try {
-        await page.goto(new URL("/student/studentIndex", this.env.LIBYY_API_BASE_URL).toString(), {
-          waitUntil: "domcontentloaded",
-          timeout: 60_000,
-        });
-      } catch (error) {
-        if (!isAbortedNavigation(error)) throw error;
-      }
-      const entryState = await this.waitForCasEntry(page);
-      if (entryState === "PASSWORD") {
-        stage = "SUBMIT_PASSWORD";
-        await this.submitPassword(page, attempt.student_id, password);
-        stage = "WAIT_AFTER_PASSWORD";
-        await this.waitAfterPassword(attempt, page);
-      } else if (entryState === "SMS") {
-        stage = "WAIT_AFTER_PASSWORD";
-        await this.handleSms(attempt, page);
-      }
-      stage = "READ_TOKEN";
-      const reflushToken = await this.waitForToken(page);
+      await this.progress(attemptId, "RUNNING", "正在通过统一认证协议登录");
+      stage = "CAS_PROTOCOL_LOGIN";
+      const result = await this.protocolLogin(attempt, password, active);
       const user = await this.env.DB.prepare(
         `SELECT id, email, role, status, student_id, real_name, allow_auto_join_reservation, square_visibility
            FROM users WHERE id = ?`,
       ).bind(attempt.user_id).first<User>();
       if (!user) throw new CasAutomationError("ACCOUNT_NOT_FOUND", "账号不存在");
       stage = "BIND_CREDENTIAL";
-      await bindCredentialFromToken(this.env, user, reflushToken, attempt.student_id);
+      if (result.kind === "TOKENS") await bindCredentialFromTokens(this.env, user, result.tokens, attempt.student_id);
+      else await bindCredentialFromToken(this.env, user, result.reflushToken, attempt.student_id);
       const passwordCiphertext = await encryptSecret(password, this.env.CAS_CREDENTIAL_ENCRYPTION_KEY);
       const now = Date.now();
       await this.env.DB.prepare(
@@ -338,7 +585,7 @@ export class CasLoginManager implements CasAutomationAdapter {
       await audit(this.env.DB, { actorUserId: attempt.user_id, actorType: attempt.purpose === "AUTO_RECOVERY" ? "SYSTEM" : "USER", action: "CAS_LOGIN_SUCCEEDED", targetType: "CREDENTIAL", targetId: attempt.user_id, result: "SUCCESS", metadata: { purpose: attempt.purpose } });
     } catch (error) {
       const code = error instanceof CasAutomationError ? error.code : error instanceof HttpError ? error.code : "CAS_AUTOMATION_FAILED";
-      const message = error instanceof CasAutomationError || error instanceof HttpError ? error.message : "统一认证自动化失败，请稍后重试";
+      const message = error instanceof CasAutomationError || error instanceof HttpError ? error.message : "统一认证协议登录失败，请稍后重试";
       const status: CasAttemptStatus = code === "CAS_ATTEMPT_EXPIRED" || code === "CAS_SMS_EXPIRED" ? "EXPIRED" : "FAILED";
       await this.env.DB.prepare(
         `UPDATE official_login_attempts
@@ -360,176 +607,166 @@ export class CasLoginManager implements CasAutomationAdapter {
       console.error(JSON.stringify({ level: "error", event: "cas_login_failed", attemptId, stage, code, detail, stack }));
     } finally {
       this.active.delete(attemptId);
-      await context?.close().catch(() => undefined);
     }
   }
 
-  private async clearLibyyState(context: BrowserContext): Promise<void> {
-    const cookies = await context.cookies();
-    await context.clearCookies();
-    const preserved = cookies.filter((cookie) => !cookie.domain.endsWith("libyy.njau.edu.cn"));
-    if (preserved.length) await context.addCookies(preserved);
-    const cleanupPage = await context.newPage();
+  private browserHeaders(extra?: HeadersInit): Headers {
+    const extraHeaders: Record<string, string> = {};
+    new Headers(extra).forEach((value, key) => {
+      extraHeaders[key] = value;
+    });
+    const headers = new Headers({
+      "user-agent": DEFAULT_USER_AGENT,
+      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+      ...extraHeaders,
+    });
+    return headers;
+  }
+
+  private async request(jar: ProtocolCookieJar, url: URL | string, init: RequestOptions = {}): Promise<Response> {
+    const target = new URL(url.toString());
+    const headers = this.browserHeaders(init.headers);
+    const cookie = jar.header(target);
+    if (cookie && !headers.has("cookie")) headers.set("cookie", cookie);
     try {
-      await cleanupPage.goto(new URL("/favicon.ico", this.env.LIBYY_API_BASE_URL).toString(), {
-        waitUntil: "domcontentloaded",
-        timeout: 15_000,
+      const response = await fetch(target, {
+        ...init,
+        headers,
+        redirect: "manual",
+        signal: init.signal,
       });
-      await cleanupPage.evaluate(() => {
-        localStorage.clear();
-        sessionStorage.clear();
-      });
+      jar.store(response.headers, new URL(response.url || target.toString()));
+      return response;
     } catch (error) {
-      throw new CasAutomationError(
-        "CAS_STORAGE_RESET_FAILED",
-        "清理图书馆旧登录状态失败，请稍后重试",
-        error instanceof Error ? error.message : String(error),
-      );
-    } finally {
-      await cleanupPage.close().catch(() => undefined);
-    }
-  }
-
-  private async waitForCasEntry(page: Page): Promise<CasEntryState> {
-    const deadline = Date.now() + 60_000;
-    while (Date.now() < deadline) {
-      const url = page.url();
-      if (url.includes("/student/studentIndex")) {
-        const token = await page.evaluate(() => localStorage.getItem("reflushToken")).catch(() => null);
-        if (token) return "AUTHENTICATED";
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new CasAutomationError("CAS_ATTEMPT_CANCELLED", "认证任务已取消");
       }
-      if (await visible(page, SMS_INPUT_SELECTOR)) return "SMS";
-      if (url.includes("authserver.njau.edu.cn") && await page.locator("#pwdEncryptSalt").count()) return "PASSWORD";
-      await page.waitForTimeout(200);
+      throw new CasAutomationError("CAS_NETWORK_FAILED", "统一认证服务暂时不可用", error instanceof Error ? error.message : String(error));
     }
-    throw new CasAutomationError("CAS_LOGIN_PAGE_NOT_FOUND", "未能进入统一认证登录页或图书馆主页");
   }
 
-  private async submitPassword(page: Page, studentId: string, password: string): Promise<void> {
-    if (await visible(page, "#pwdFromId #captcha") || await visible(page, "#sliderCaptchaDiv > *")) {
-      throw new CasAutomationError("CAS_CAPTCHA_REQUIRED", "统一认证要求图形或滑块验证码，请稍后重试");
-    }
-    await page.waitForFunction(() => typeof (window as Window & { encryptPassword?: unknown }).encryptPassword === "function", undefined, { timeout: 15_000 });
-    await page.evaluate(({ account, secret }) => {
-      const username = document.querySelector<HTMLInputElement>("#pwdFromId #username");
-      const passwordInput = document.querySelector<HTMLInputElement>("#pwdFromId #password");
-      const saltPassword = document.querySelector<HTMLInputElement>("#pwdFromId #saltPassword");
-      const salt = document.querySelector<HTMLInputElement>("#pwdFromId #pwdEncryptSalt")?.value;
-      const form = document.querySelector<HTMLFormElement>("#pwdFromId");
-      const encrypt = (window as Window & { encryptPassword?: (value: string, salt: string) => string }).encryptPassword;
-      if (!username || !passwordInput || !saltPassword || !salt || !form || !encrypt) throw new Error("CAS password form is incomplete");
-      username.value = account;
-      passwordInput.value = secret;
-      saltPassword.value = encrypt(secret, salt);
-      passwordInput.disabled = true;
-      form.submit();
-    }, { account: studentId, secret: password });
-  }
-
-  private async waitAfterPassword(attempt: AttemptRow, page: Page): Promise<void> {
-    const deadline = Date.now() + 60_000;
-    while (Date.now() < deadline) {
-      const url = page.url();
-      if (url.includes("/student/studentIndex")) return;
-      if (await visible(page, SMS_INPUT_SELECTOR)) {
-        await this.handleSms(attempt, page);
-        return;
+  private async fetchFollow(jar: ProtocolCookieJar, inputUrl: URL | string, init: RequestOptions = {}): Promise<Response> {
+    let url = new URL(inputUrl.toString());
+    let method = init.method ?? "GET";
+    let body = init.body;
+    let headers = init.headers;
+    let response = await this.request(jar, url, { ...init, method, body, headers });
+    for (let redirect = 0; redirect < MAX_REDIRECTS && response.status >= 300 && response.status < 400; redirect += 1) {
+      const location = response.headers.get("location");
+      if (!location) return response;
+      url = new URL(location, response.url || url.toString());
+      if (response.status === 303 || ((response.status === 301 || response.status === 302) && method !== "GET" && method !== "HEAD")) {
+        method = "GET";
+        body = undefined;
+        const nextHeaders = new Headers(headers);
+        nextHeaders.delete("content-type");
+        headers = nextHeaders;
       }
-      if (url.includes("reAuthCheck") || url.includes("reAuthLoginView")) {
-        await this.waitForSmsInput(page);
-        await this.handleSms(attempt, page);
-        return;
-      }
-      if (url.includes("authserver.njau.edu.cn")) {
-        if (await visible(page, "#pwdFromId #captcha") || await visible(page, "#sliderCaptchaDiv > *")) {
-          throw new CasAutomationError("CAS_CAPTCHA_REQUIRED", "统一认证要求图形或滑块验证码，请稍后重试");
-        }
-        const errorText = (await page.locator("#showErrorTip").textContent().catch(() => ""))?.trim();
-        if (errorText) throw new CasAutomationError("CAS_INVALID_CREDENTIALS", "学号或统一认证密码错误");
-      }
-      await page.waitForTimeout(200);
+      response = await this.request(jar, url, { ...init, method, body, headers });
     }
-    throw new CasAutomationError("CAS_LOGIN_TIMEOUT", "统一认证登录超时");
+    return response;
   }
 
-  private async waitForSmsInput(page: Page): Promise<void> {
-    try {
-      await page.locator(SMS_INPUT_SELECTOR).filter({ visible: true }).first().waitFor({
-        state: "visible",
-        timeout: SMS_INPUT_TIMEOUT_MS,
-      });
-    } catch (error) {
-      throw new CasAutomationError(
-        "CAS_SMS_FORM_NOT_FOUND",
-        "统一认证已进入二次验证，但短信验证码输入框未加载，请稍后重试",
-        error instanceof Error ? error.message : String(error),
-      );
+  private async protocolLogin(attempt: AttemptRow, password: string, active: ActiveAttempt): Promise<ProtocolLoginResult> {
+    const jar = new ProtocolCookieJar();
+    const authorizeUrl = new URL("/api/oauth/v1/authorize", this.env.LIBYY_API_BASE_URL);
+    authorizeUrl.searchParams.set("redirectURI", new URL("/", this.env.LIBYY_API_BASE_URL).toString());
+    const loginPageResponse = await this.fetchFollow(jar, authorizeUrl, { signal: active.abortController.signal });
+    const loginPageText = await loginPageResponse.text();
+    const loginPageUrl = loginPageResponse.url;
+    if (this.authorizationCode(loginPageUrl)) return this.exchangeAuthorizationCode(jar, this.authorizationCode(loginPageUrl)!, active, attempt.id, loginPageUrl);
+    if (!loginPageUrl.includes("authserver.njau.edu.cn")) {
+      throw new CasAutomationError("CAS_LOGIN_PAGE_NOT_FOUND", "未能进入统一认证登录页");
+    }
+    if (hasSliderChallenge(loginPageText)) throw new CasAutomationError("CAS_CAPTCHA_REQUIRED", "统一认证要求滑块验证码，请稍后重试");
+    const loginPage = extractLoginPage(loginPageText, loginPageUrl);
+    await this.ensureCaptchaNotRequired(jar, attempt.student_id, active, loginPage.url);
+    const afterPassword = await this.submitPassword(jar, loginPage, attempt.student_id, password, active);
+    return this.handleLoginResponse(jar, afterPassword, attempt, active);
+  }
+
+  private async ensureCaptchaNotRequired(jar: ProtocolCookieJar, studentId: string, active: ActiveAttempt, referer: string): Promise<void> {
+    const url = new URL("/authserver/checkNeedCaptcha.htl", AUTH_BASE_URL);
+    url.searchParams.set("username", studentId);
+    url.searchParams.set("_", String(Date.now()));
+    const response = await this.request(jar, url, {
+      signal: active.abortController.signal,
+      headers: { referer, "x-requested-with": "XMLHttpRequest", accept: "application/json,text/plain,*/*" },
+    });
+    const payload = parseJsonMaybe(await response.text());
+    if (payload && typeof payload === "object" && (payload as { isNeed?: unknown }).isNeed) {
+      throw new CasAutomationError("CAS_CAPTCHA_REQUIRED", "统一认证要求图形验证码，请稍后重试");
     }
   }
 
-  private smsInput(page: Page) {
-    return page.locator(SMS_INPUT_SELECTOR).filter({ visible: true }).first();
-  }
-
-  private async smsObservation(page: Page): Promise<{ state: CasSmsPageState; errorText: string; inputVisible: boolean }> {
-    const url = page.url();
-    const [token, inputVisible, errorText] = await Promise.all([
-      url.includes("/student/studentIndex")
-        ? page.evaluate(() => localStorage.getItem("reflushToken")).catch(() => null)
-        : Promise.resolve(null),
-      this.smsInput(page).isVisible().catch(() => false),
-      page.locator("#showErrorTip, .error, .el-message").first().textContent().catch(() => ""),
-    ]);
-    const normalizedError = errorText?.trim() ?? "";
-    return {
-      state: classifyCasSmsPageState({ url, token, inputVisible, errorText: normalizedError }),
-      errorText: normalizedError,
-      inputVisible,
+  private async submitPassword(
+    jar: ProtocolCookieJar,
+    page: LoginPage,
+    studentId: string,
+    password: string,
+    active: ActiveAttempt,
+  ): Promise<Response> {
+    const service = serviceUrlFromLoginUrl(page.url);
+    const fields = {
+      ...page.fields,
+      username: studentId,
+      password: encryptCasPassword(password, page.pwdEncryptSalt),
+      captcha: "",
+      _eventId: page.fields._eventId || "submit",
+      cllt: "userNameLogin",
+      dllt: page.fields.dllt || "generalLogin",
+      lt: page.fields.lt || "",
+      execution: page.execution,
     };
+    return this.fetchFollow(jar, withService(page.action, service), {
+      method: "POST",
+      body: formBody(fields),
+      signal: active.abortController.signal,
+      headers: {
+        origin: AUTH_BASE_URL,
+        referer: page.url,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+    });
   }
 
-  private async waitForAuthentication(page: Page, timeout: number): Promise<boolean> {
-    const deadline = Date.now() + timeout;
-    while (Date.now() < deadline) {
-      if ((await this.smsObservation(page)).state === "AUTHENTICATED") return true;
-      await page.waitForTimeout(200);
-    }
-    return false;
+  private async handleLoginResponse(
+    jar: ProtocolCookieJar,
+    response: Response,
+    attempt: AttemptRow,
+    active: ActiveAttempt,
+  ): Promise<ProtocolLoginResult> {
+    const code = this.authorizationCode(response.url);
+    if (code) return this.exchangeAuthorizationCode(jar, code, active, attempt.id, response.url);
+    const text = await response.text();
+    const errorText = extractErrorText(text);
+    if (hasCaptchaChallenge(text, errorText)) throw new CasAutomationError("CAS_CAPTCHA_REQUIRED", "统一认证要求图形或滑块验证码，请稍后重试");
+    if (isInvalidCredentialText(errorText)) throw new CasAutomationError("CAS_INVALID_CREDENTIALS", "学号或统一认证密码错误");
+    if (hasSmsChallenge(text, response.url)) return this.completeSms(jar, response.url, text, attempt, active);
+    if (errorText) throw new CasAutomationError("CAS_LOGIN_FAILED", errorText);
+    throw new CasAutomationError("CAS_LOGIN_FAILED", "统一认证登录未返回图书馆授权码");
   }
 
-  private async waitForSmsSubmissionOutcome(page: Page, previousError: string): Promise<{ state: "AUTHENTICATED" | "ERROR"; errorText: string }> {
-    const startedAt = Date.now();
-    const deadline = startedAt + 60_000;
-    while (Date.now() < deadline) {
-      const observation = await this.smsObservation(page);
-      if (observation.state === "AUTHENTICATED") return { state: "AUTHENTICATED", errorText: "" };
-      if (observation.state === "ERROR" && (
-        observation.errorText !== previousError
-        || (observation.inputVisible && Date.now() - startedAt >= 1_500)
-      )) {
-        return { state: "ERROR", errorText: observation.errorText };
-      }
-      await page.waitForTimeout(200);
+  private authorizationCode(url: string): string | null {
+    try {
+      const target = new URL(url);
+      if (target.hostname.endsWith("libyy.njau.edu.cn")) return target.searchParams.get("code");
+      return null;
+    } catch {
+      return null;
     }
-    throw new CasAutomationError(
-      "CAS_SMS_VERIFICATION_TIMEOUT",
-      "短信验证码已提交，但统一认证未在限定时间内返回结果，请重新发起认证",
-    );
   }
 
-  private async handleSms(attempt: AttemptRow, page: Page): Promise<void> {
-    await this.waitForSmsInput(page);
-    const send = page.locator("#getDynamicCode");
-    if (await send.isVisible().catch(() => false)) {
-      await send.click({ timeout: SMS_ACTION_TIMEOUT_MS });
-      await page.waitForFunction(() => {
-        const button = document.querySelector<HTMLButtonElement>("#getDynamicCode");
-        const uuid = document.querySelector<HTMLInputElement>("#uuid");
-        return Boolean(button?.disabled || uuid?.value || button?.textContent?.includes("秒"));
-      }, undefined, { timeout: 15_000 }).catch(() => undefined);
-    }
+  private async completeSms(
+    jar: ProtocolCookieJar,
+    responseUrl: string,
+    html: string,
+    attempt: AttemptRow,
+    active: ActiveAttempt,
+  ): Promise<ProtocolLoginResult> {
+    await this.trySendSmsCode(jar, responseUrl, html, active);
     const smsExpiresAt = Date.now() + SMS_TTL_MS;
-    let codePromise = this.waitForSmsCode(attempt.id, smsExpiresAt);
     await this.progress(attempt.id, "SMS_REQUIRED", "请输入发送到绑定手机的 6 位短信验证码", smsExpiresAt);
     if (attempt.purpose === "AUTO_RECOVERY") {
       const user = await this.env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(attempt.user_id).first<{ email: string }>();
@@ -538,43 +775,102 @@ export class CasLoginManager implements CasAutomationAdapter {
       });
     }
 
+    let currentHtml = html;
+    let currentUrl = responseUrl;
     for (let index = 0; index < 3; index += 1) {
-      const code = await codePromise;
-      const previousError = (await this.smsObservation(page)).errorText;
-      let input = this.smsInput(page);
-      try {
-        await input.fill(code, { timeout: SMS_ACTION_TIMEOUT_MS });
-      } catch (error) {
-        await page.waitForTimeout(300);
-        if (await this.waitForAuthentication(page, 2_000)) return;
-        input = this.smsInput(page);
-        if (await input.isVisible().catch(() => false)) {
-          await input.fill(code, { timeout: SMS_ACTION_TIMEOUT_MS });
-        } else if (await this.waitForAuthentication(page, 8_000)) {
-          return;
-        } else {
-          throw new CasAutomationError(
-            "CAS_SMS_INPUT_UNAVAILABLE",
-            "短信验证码输入框当前不可用，请重新发起认证",
-            error instanceof Error ? error.message : String(error),
-          );
+      const code = await this.waitForSmsCode(attempt.id, smsExpiresAt);
+      const response = await this.submitSmsCode(jar, currentUrl, currentHtml, code, active);
+      const authCode = this.authorizationCode(response.url);
+      if (authCode) return this.exchangeAuthorizationCode(jar, authCode, active, attempt.id, response.url);
+      const text = await response.text();
+      const payload = parseJsonMaybe(text);
+      if (payload && typeof payload === "object") {
+        const resultCode = String((payload as { code?: unknown }).code ?? "");
+        if (["reAuth_failed", "reAuth_unauthorized"].includes(resultCode)) {
+          const message = String((payload as { msg?: unknown; message?: unknown }).msg ?? (payload as { message?: unknown }).message ?? "短信验证码错误");
+          if (index >= 2) throw new CasAutomationError("CAS_SMS_FAILED", message);
+          await this.progress(attempt.id, "SMS_REQUIRED", message, smsExpiresAt);
+          continue;
         }
       }
-      const submit = page.locator("button.auth_login_btn.submit_btn:visible").first();
-      try {
-        if (await submit.isVisible().catch(() => false)) await submit.click({ timeout: SMS_ACTION_TIMEOUT_MS });
-        else await input.press("Enter", { timeout: SMS_ACTION_TIMEOUT_MS });
-      } catch (error) {
-        if (!isAbortedNavigation(error) && !await this.waitForAuthentication(page, 5_000)) throw error;
+      const followUp = await this.fetchFollow(jar, `${AUTH_BASE_URL}/authserver/login?${new URLSearchParams({ service: serviceUrlFromLoginUrl(currentUrl) || String(extractReauthParams(currentHtml).service ?? "") })}`, {
+        signal: active.abortController.signal,
+        headers: { referer: currentUrl },
+      });
+      const followCode = this.authorizationCode(followUp.url);
+      if (followCode) return this.exchangeAuthorizationCode(jar, followCode, active, attempt.id, followUp.url);
+      currentHtml = await followUp.text();
+      currentUrl = followUp.url;
+      const errorText = extractErrorText(currentHtml);
+      if (index >= 2 || !hasSmsChallenge(currentHtml, currentUrl)) {
+        throw new CasAutomationError("CAS_SMS_FAILED", errorText || "短信验证码校验失败");
       }
-      const outcome = await this.waitForSmsSubmissionOutcome(page, previousError);
-      if (outcome.state === "AUTHENTICATED") return;
-      if (index < 2) {
-        codePromise = this.waitForSmsCode(attempt.id, smsExpiresAt);
-        await this.progress(attempt.id, "SMS_REQUIRED", outcome.errorText, smsExpiresAt);
-      }
+      await this.progress(attempt.id, "SMS_REQUIRED", errorText || "短信验证码校验失败，请重新输入", smsExpiresAt);
     }
     throw new CasAutomationError("CAS_SMS_ATTEMPTS_EXCEEDED", "短信验证码尝试次数已用完");
+  }
+
+  private async trySendSmsCode(jar: ProtocolCookieJar, responseUrl: string, html: string, active: ActiveAttempt): Promise<void> {
+    const reauth = extractReauthParams(html);
+    const candidates: Array<{ url: string; data: Record<string, string> }> = [];
+    if (Object.keys(reauth).length) {
+      candidates.push({
+        url: `${AUTH_BASE_URL}/authserver/dynamicCode/getDynamicCodeByReauth.do`,
+        data: {
+          userName: String(reauth.reAuthUserId ?? ""),
+          authCodeTypeName: reauthCodeType(String(reauth.reAuthType ?? "")),
+        },
+      });
+    }
+    candidates.push(
+      { url: `${AUTH_BASE_URL}/authserver/reAuth/getDynamicCode.htl`, data: {} },
+      { url: `${AUTH_BASE_URL}/authserver/reAuth/sendDynamicCode.htl`, data: {} },
+      { url: `${AUTH_BASE_URL}/authserver/dynamicCode/getDynamicCode.htl`, data: {} },
+    );
+    for (const candidate of candidates) {
+      try {
+        const response = await this.request(jar, candidate.url, {
+          method: "POST",
+          body: formBody(candidate.data),
+          signal: active.abortController.signal,
+          headers: {
+            origin: AUTH_BASE_URL,
+            referer: responseUrl,
+            "x-requested-with": "XMLHttpRequest",
+            "content-type": "application/x-www-form-urlencoded",
+            accept: "application/json,text/plain,*/*",
+          },
+        });
+        if (response.status < 400) return;
+      } catch {
+        // Try the next known CAS SMS endpoint; page variants differ across deployments.
+      }
+    }
+  }
+
+  private async submitSmsCode(
+    jar: ProtocolCookieJar,
+    responseUrl: string,
+    html: string,
+    code: string,
+    active: ActiveAttempt,
+  ): Promise<Response> {
+    const reauth = extractReauthParams(html);
+    const data = smsFormData(html);
+    data.dynamicCode = code;
+    const action = Object.keys(reauth).length
+      ? `${AUTH_BASE_URL}/authserver/reAuthCheck/reAuthSubmit.do`
+      : withService(new URL(parseForm(html, "pwdFromId")?.attrs.action || parseForm(html, "phoneFromId")?.attrs.action || "/authserver/login", responseUrl).toString(), serviceUrlFromLoginUrl(responseUrl));
+    return this.fetchFollow(jar, action, {
+      method: "POST",
+      body: formBody(data),
+      signal: active.abortController.signal,
+      headers: {
+        origin: AUTH_BASE_URL,
+        referer: responseUrl,
+        "content-type": "application/x-www-form-urlencoded",
+      },
+    });
   }
 
   private waitForSmsCode(attemptId: string, expiresAt: number): Promise<string> {
@@ -584,28 +880,56 @@ export class CasLoginManager implements CasAutomationAdapter {
         reject(new CasAutomationError("CAS_ATTEMPT_NOT_RUNNING", "认证任务已中断"));
         return;
       }
-      active.smsResolver = resolve;
       const timeout = setTimeout(() => {
-        if (active.smsResolver === resolve) active.smsResolver = undefined;
+        cleanup();
         reject(new CasAutomationError("CAS_SMS_EXPIRED", "短信验证码提交已超时"));
       }, Math.max(0, expiresAt - Date.now()));
-      const originalResolve = active.smsResolver;
-      active.smsResolver = (code) => {
-        clearTimeout(timeout);
-        originalResolve(code);
+      const abort = () => {
+        cleanup();
+        reject(new CasAutomationError("CAS_ATTEMPT_CANCELLED", "认证任务已取消"));
       };
+      const cleanup = () => {
+        clearTimeout(timeout);
+        active.abortController.signal.removeEventListener("abort", abort);
+        if (active.smsResolver === resolver) active.smsResolver = undefined;
+        if (active.smsRejecter === rejecter) active.smsRejecter = undefined;
+      };
+      const resolver = (code: string) => {
+        cleanup();
+        resolve(code);
+      };
+      const rejecter = (error: unknown) => {
+        cleanup();
+        reject(error);
+      };
+      active.smsResolver = resolver;
+      active.smsRejecter = rejecter;
+      active.abortController.signal.addEventListener("abort", abort, { once: true });
     });
   }
 
-  private async waitForToken(page: Page): Promise<string> {
-    const deadline = Date.now() + this.loginTimeout();
-    while (Date.now() < deadline) {
-      if (page.url().includes("/student/studentIndex")) {
-        const token = await page.evaluate(() => localStorage.getItem("reflushToken")).catch(() => null);
-        if (token) return token;
-      }
-      await page.waitForTimeout(500);
-    }
-    throw new CasAutomationError("CAS_TOKEN_NOT_FOUND", "统一认证完成但未取得官方登录凭证");
+  private async exchangeAuthorizationCode(
+    jar: ProtocolCookieJar,
+    code: string,
+    active: ActiveAttempt,
+    attemptId: string,
+    referer: string,
+  ): Promise<ProtocolLoginResult> {
+    await this.progress(attemptId, "RUNNING", "正在换取图书馆登录凭证").catch(() => undefined);
+    const url = new URL("/api/studyroom/v1/userAccount/accessToken", this.env.LIBYY_API_BASE_URL);
+    url.searchParams.set("code", code);
+    const response = await this.request(jar, url, {
+      method: "POST",
+      signal: active.abortController.signal,
+      headers: {
+        origin: this.env.LIBYY_API_BASE_URL,
+        referer,
+        accept: "application/json,text/plain,*/*",
+      },
+    });
+    const text = await response.text();
+    const parsed = parseJsonMaybe(text);
+    if (!response.ok) throw new CasAutomationError("CAS_TOKEN_EXCHANGE_FAILED", "图书馆登录凭证换取失败", text.slice(0, 200));
+    return tokenResultFromResponse(parsed);
   }
 }
