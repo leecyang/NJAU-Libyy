@@ -1,7 +1,7 @@
 import type { AppEnv } from "../config";
 import { flag } from "../config";
 import { audit } from "./audit";
-import { getAccessToken, getOfficialReservationProfile, recoverExpiredOfficialLogin, refreshCredential } from "./credentials";
+import { getAccessToken, getOfficialReservationProfile, recoverExpiredOfficialLogin, refreshCredential, startCredentialRecovery } from "./credentials";
 import { HttpError } from "./http";
 import { deliverDueMail, queueMail } from "./mail";
 import {
@@ -209,13 +209,18 @@ async function refreshDueCredentials(env: AppEnv, now: number, limit = 3): Promi
   const cutoff = now - 90 * 60 * 1000;
   const rows = await env.DB.prepare(
     `SELECT user_id, credential_status FROM official_credentials
-      WHERE (credential_status IN ('ACTIVE', 'REFRESH_FAILED') AND COALESCE(last_refresh_success_at, 0) < ?)
-         OR credential_status = 'REAUTH_REQUIRED'
+      WHERE ((credential_status IN ('ACTIVE', 'REFRESH_FAILED') AND COALESCE(last_refresh_success_at, 0) < ?)
+          OR credential_status = 'REAUTH_REQUIRED')
+        AND (recovery_blocked_until IS NULL OR recovery_blocked_until <= ?)
+      ORDER BY
+        CASE credential_status WHEN 'REAUTH_REQUIRED' THEN 0 ELSE 1 END,
+        COALESCE(last_refresh_success_at, 0) ASC,
+        COALESCE(last_refresh_attempt_at, 0) ASC
       LIMIT ${limit}`,
-  ).bind(cutoff).all<{ user_id: string; credential_status: string }>();
+  ).bind(cutoff, now).all<{ user_id: string; credential_status: string }>();
   for (const row of rows.results) {
     try {
-      if (row.credential_status === "REAUTH_REQUIRED") await env.CAS_AUTOMATION?.startRecovery(row.user_id);
+      if (row.credential_status === "REAUTH_REQUIRED") await startCredentialRecovery(env, row.user_id);
       else await refreshCredential(env, row.user_id, "SCHEDULED");
     } catch (error) {
       console.error(JSON.stringify({ level: "error", event: "credential_refresh_failed", userId: row.user_id, code: error instanceof HttpError ? error.code : "CREDENTIAL_REFRESH_FAILED" }));

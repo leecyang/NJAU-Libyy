@@ -3,7 +3,7 @@ import type { AppEnv } from "../config";
 import type { User } from "../lib/auth";
 import { audit } from "../lib/audit";
 import type { CasAttemptPublic, CasAttemptPurpose, CasAttemptStatus, CasAutomationAdapter } from "../lib/cas-types";
-import { bindCredentialFromToken, bindCredentialFromTokens } from "../lib/credentials";
+import { bindCredentialFromToken, bindCredentialFromTokens, blockCredentialRecovery, clearCredentialRecoveryBlock } from "../lib/credentials";
 import { decryptSecret, encryptSecret } from "../lib/crypto";
 import { HttpError } from "../lib/http";
 import { queueMail } from "../lib/mail";
@@ -26,6 +26,7 @@ type AttemptRow = {
 
 type ActiveAttempt = {
   abortController: AbortController;
+  abortReason?: CasAutomationError;
   smsResolver?: (code: string) => void;
   smsRejecter?: (error: unknown) => void;
 };
@@ -54,6 +55,7 @@ type RequestOptions = RequestInit & {
 const ACTIVE_STATUSES = "('QUEUED', 'RUNNING', 'SMS_REQUIRED')";
 const ATTEMPT_TTL_MS = 10 * 60_000;
 const SMS_TTL_MS = 5 * 60_000;
+const CAPTCHA_RECOVERY_COOLDOWN_MS = 30 * 60_000;
 const AUTH_BASE_URL = "https://authserver.njau.edu.cn";
 const DEFAULT_AES_IV = "HDbk7NdBpFPpFrZR";
 const RANDOM_PREFIX_CHARS = "ABCDEFGHJKMNPQRSTWXYZabcdefhijkmnprstwxyz2345678";
@@ -430,6 +432,7 @@ export class CasLoginManager implements CasAutomationAdapter {
     if (current) throw new HttpError(409, "CAS_ATTEMPT_IN_PROGRESS", "已有统一认证任务正在进行");
 
     const now = Date.now();
+    if (purpose !== "AUTO_RECOVERY") await clearCredentialRecoveryBlock(this.env, userId);
     const row: AttemptRow = {
       id: crypto.randomUUID(),
       user_id: userId,
@@ -468,7 +471,12 @@ export class CasLoginManager implements CasAutomationAdapter {
     ).bind(userId).first<{ student_id: string; password_ciphertext: string }>();
     if (!stored) return null;
     const password = await decryptSecret(stored.password_ciphertext, this.env.CAS_CREDENTIAL_ENCRYPTION_KEY);
-    return this.startAttempt(userId, stored.student_id, password, "AUTO_RECOVERY");
+    try {
+      return await this.startAttempt(userId, stored.student_id, password, "AUTO_RECOVERY");
+    } catch (error) {
+      if (error instanceof HttpError && error.code === "CAS_ATTEMPT_IN_PROGRESS") return null;
+      throw error;
+    }
   }
 
   async submitSms(userId: string, attemptId: string, code: string): Promise<CasAttemptPublic> {
@@ -502,7 +510,8 @@ export class CasLoginManager implements CasAutomationAdapter {
     for (const [attemptId, active] of this.active) {
       const row = await this.attempt(attemptId);
       if (row?.user_id !== userId) continue;
-      active.smsRejecter?.(new CasAutomationError("CAS_ATTEMPT_CANCELLED", "认证任务已取消"));
+      active.abortReason = new CasAutomationError("CAS_ATTEMPT_CANCELLED", "认证任务已取消");
+      active.smsRejecter?.(active.abortReason);
       active.abortController.abort();
       this.active.delete(attemptId);
     }
@@ -544,12 +553,22 @@ export class CasLoginManager implements CasAutomationAdapter {
   }
 
   private async run(attemptId: string): Promise<void> {
-    return this.runAttempt(attemptId);
-  }
-
-  private async runAttempt(attemptId: string): Promise<void> {
     const active: ActiveAttempt = { abortController: new AbortController() };
     this.active.set(attemptId, active);
+    const timeout = setTimeout(() => {
+      active.abortReason = new CasAutomationError("CAS_ATTEMPT_TIMEOUT", "统一认证登录超时，请稍后重试");
+      active.smsRejecter?.(active.abortReason);
+      active.abortController.abort();
+    }, this.loginTimeout());
+    try {
+      await this.runAttempt(attemptId, active);
+    } finally {
+      clearTimeout(timeout);
+      this.active.delete(attemptId);
+    }
+  }
+
+  private async runAttempt(attemptId: string, active: ActiveAttempt): Promise<void> {
     let stage = "LOAD_ATTEMPT";
     try {
       const attempt = await this.attempt(attemptId);
@@ -584,29 +603,34 @@ export class CasLoginManager implements CasAutomationAdapter {
       ).bind(now, attemptId).run();
       await audit(this.env.DB, { actorUserId: attempt.user_id, actorType: attempt.purpose === "AUTO_RECOVERY" ? "SYSTEM" : "USER", action: "CAS_LOGIN_SUCCEEDED", targetType: "CREDENTIAL", targetId: attempt.user_id, result: "SUCCESS", metadata: { purpose: attempt.purpose } });
     } catch (error) {
-      const code = error instanceof CasAutomationError ? error.code : error instanceof HttpError ? error.code : "CAS_AUTOMATION_FAILED";
-      const message = error instanceof CasAutomationError || error instanceof HttpError ? error.message : "统一认证协议登录失败，请稍后重试";
+      const normalizedError = error instanceof CasAutomationError && error.code === "CAS_ATTEMPT_CANCELLED" && active.abortReason
+        ? active.abortReason
+        : error;
+      const code = normalizedError instanceof CasAutomationError ? normalizedError.code : normalizedError instanceof HttpError ? normalizedError.code : "CAS_AUTOMATION_FAILED";
+      const message = normalizedError instanceof CasAutomationError || normalizedError instanceof HttpError ? normalizedError.message : "统一认证协议登录失败，请稍后重试";
       const status: CasAttemptStatus = code === "CAS_ATTEMPT_EXPIRED" || code === "CAS_SMS_EXPIRED" ? "EXPIRED" : "FAILED";
+      const failedAt = Date.now();
       await this.env.DB.prepare(
         `UPDATE official_login_attempts
             SET status = ?, progress = ?, pending_password_ciphertext = NULL, sms_expires_at = NULL,
                 error_code = ?, error_message = ?, updated_at = ?
           WHERE id = ? AND status NOT IN ('SUCCEEDED', 'FAILED', 'EXPIRED')`,
-      ).bind(status, message, code, message, Date.now(), attemptId).run();
+      ).bind(status, message, code, message, failedAt, attemptId).run();
       const failedAttempt = await this.attempt(attemptId);
+      if (code === "CAS_CAPTCHA_REQUIRED" && failedAttempt) {
+        await blockCredentialRecovery(this.env, failedAttempt.user_id, code, message, failedAt + CAPTCHA_RECOVERY_COOLDOWN_MS);
+      }
       if (failedAttempt?.purpose === "AUTO_RECOVERY") {
         const user = await this.env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(failedAttempt.user_id).first<{ email: string }>();
         if (user) await queueMail(this.env, user.email, "OFFICIAL_REAUTH_REQUIRED", {}, {
           dedupeKey: `official-reauth:${failedAttempt.id}:${failedAttempt.user_id}`,
         });
       }
-      const detail = error instanceof CasAutomationError && error.internalDetail
-        ? error.internalDetail
-        : error instanceof Error ? error.message : String(error);
-      const stack = error instanceof Error ? error.stack : undefined;
+      const detail = normalizedError instanceof CasAutomationError && normalizedError.internalDetail
+        ? normalizedError.internalDetail
+        : normalizedError instanceof Error ? normalizedError.message : String(normalizedError);
+      const stack = normalizedError instanceof Error ? normalizedError.stack : undefined;
       console.error(JSON.stringify({ level: "error", event: "cas_login_failed", attemptId, stage, code, detail, stack }));
-    } finally {
-      this.active.delete(attemptId);
     }
   }
 

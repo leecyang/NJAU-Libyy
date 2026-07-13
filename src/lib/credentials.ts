@@ -16,9 +16,11 @@ type Credential = {
   token_version: number;
   credential_status: string;
   refresh_lock_until: number | null;
+  recovery_blocked_until: number | null;
 };
 
 const LOCK_MS = 60_000;
+const ACCESS_TOKEN_REFRESH_WINDOW_MS = 30 * 60_000;
 
 function normalizedMobile(value: string | undefined): string | null {
   const digits = value?.replace(/\D/g, "") ?? "";
@@ -67,6 +69,7 @@ async function persistTokens(
               token_version = token_version + 1, credential_status = 'ACTIVE',
               refresh_lock_until = NULL, last_refresh_attempt_at = ?,
               last_refresh_success_at = ?, refresh_failure_count = 0,
+              recovery_blocked_until = NULL, last_recovery_attempt_at = NULL,
               last_error_code = NULL, last_error_message = NULL, updated_at = ?
         WHERE user_id = ?${expectedLockUntil === undefined ? "" : " AND refresh_lock_until = ?"}`,
     ).bind(accessCiphertext, reflushCiphertext, expires, now, now, now, now, userId, ...(expectedLockUntil === undefined ? [] : [expectedLockUntil])).run();
@@ -181,6 +184,7 @@ export async function credentialStatus(env: AppEnv, userId: string): Promise<Rec
   const credential = await env.DB.prepare(
     `SELECT credential_status, access_token_expires_seconds, access_token_obtained_at,
             token_version, last_refresh_success_at, refresh_failure_count,
+            recovery_blocked_until, last_recovery_attempt_at,
             last_error_code, last_error_message
        FROM official_credentials WHERE user_id = ?`,
   ).bind(userId).first<Record<string, unknown>>();
@@ -194,6 +198,8 @@ export async function credentialStatus(env: AppEnv, userId: string): Promise<Rec
   ).bind(userId).first<Record<string, unknown>>();
   return {
     ...(credential ?? { credential_status: "UNBOUND" }),
+    recoveryBlockedUntil: credential?.recovery_blocked_until ?? null,
+    lastRecoveryAttemptAt: credential?.last_recovery_attempt_at ?? null,
     setup_required: !loginCredential,
     login_student_id: loginCredential?.student_id ?? null,
     last_cas_login_at: loginCredential?.last_login_at ?? null,
@@ -213,23 +219,68 @@ export async function getAccessToken(env: AppEnv, userId: string): Promise<strin
   const credential = await env.DB.prepare(
     `SELECT id, user_id, access_token_ciphertext, reflush_token_ciphertext,
             access_token_expires_seconds, access_token_obtained_at, token_version,
-            credential_status, refresh_lock_until
+            credential_status, refresh_lock_until, recovery_blocked_until
        FROM official_credentials WHERE user_id = ?`,
   ).bind(userId).first<Credential>();
   if (!credential) throw new HttpError(409, "CREDENTIAL_UNBOUND", "请先保存学号和统一认证密码");
   if (credential.credential_status === "REAUTH_REQUIRED") {
+    if (isRecoveryBlocked(credential, Date.now())) {
+      throw new HttpError(409, "CREDENTIAL_REAUTH_BLOCKED", "统一认证要求验证码，请稍后重新连接");
+    }
+    await markRecoveryAttempt(env, userId, Date.now());
     await env.CAS_AUTOMATION?.startRecovery(userId);
     throw new HttpError(409, "CREDENTIAL_RECOVERY_IN_PROGRESS", "官方登录正在自动恢复");
   }
   if (credential.credential_status !== "ACTIVE") throw new HttpError(409, "CREDENTIAL_NOT_ACTIVE", "官方凭证当前不可用");
 
   const expiresAt = credential.access_token_obtained_at + credential.access_token_expires_seconds * 1000;
-  if (expiresAt - Date.now() < 15 * 60 * 1000) {
+  if (expiresAt - Date.now() < ACCESS_TOKEN_REFRESH_WINDOW_MS) {
     const refreshed = await refreshCredential(env, userId, "BUSINESS_PRECHECK");
     if (!refreshed) throw new HttpError(409, "CREDENTIAL_RECOVERY_IN_PROGRESS", "官方登录正在自动恢复");
     return getAccessToken(env, userId);
   }
   return decryptSecret(credential.access_token_ciphertext, env.TOKEN_ENCRYPTION_KEY);
+}
+
+function isRecoveryBlocked(credential: { recovery_blocked_until: number | null }, now: number): boolean {
+  return typeof credential.recovery_blocked_until === "number" && credential.recovery_blocked_until > now;
+}
+
+async function markRecoveryAttempt(env: AppEnv, userId: string, now: number): Promise<void> {
+  await env.DB.prepare(
+    "UPDATE official_credentials SET last_recovery_attempt_at = ?, updated_at = ? WHERE user_id = ?",
+  ).bind(now, now, userId).run();
+}
+
+export async function blockCredentialRecovery(env: AppEnv, userId: string, errorCode: string, errorMessage: string, blockedUntil: number): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE official_credentials
+        SET credential_status = 'REAUTH_REQUIRED', refresh_lock_until = NULL,
+            recovery_blocked_until = ?, last_recovery_attempt_at = ?,
+            last_error_code = ?, last_error_message = ?, updated_at = ?
+      WHERE user_id = ? AND credential_status <> 'DISABLED'`,
+  ).bind(blockedUntil, Date.now(), errorCode, errorMessage, Date.now(), userId).run();
+}
+
+export async function clearCredentialRecoveryBlock(env: AppEnv, userId: string): Promise<void> {
+  await env.DB.prepare(
+    "UPDATE official_credentials SET recovery_blocked_until = NULL, updated_at = ? WHERE user_id = ?",
+  ).bind(Date.now(), userId).run();
+}
+
+export async function canStartCredentialRecovery(env: AppEnv, userId: string, now = Date.now()): Promise<boolean> {
+  const row = await env.DB.prepare(
+    "SELECT recovery_blocked_until FROM official_credentials WHERE user_id = ?",
+  ).bind(userId).first<{ recovery_blocked_until: number | null }>();
+  return !row?.recovery_blocked_until || row.recovery_blocked_until <= now;
+}
+
+export async function startCredentialRecovery(env: AppEnv, userId: string): Promise<boolean> {
+  const now = Date.now();
+  if (!await canStartCredentialRecovery(env, userId, now)) return false;
+  await markRecoveryAttempt(env, userId, now);
+  const attempt = await env.CAS_AUTOMATION?.startRecovery(userId);
+  return Boolean(attempt);
 }
 
 export async function refreshCredential(
@@ -296,8 +347,8 @@ export async function refreshCredential(
     });
     if (reauth) {
       const user = await env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(userId).first<{ email: string }>();
-      const attempt = await env.CAS_AUTOMATION?.startRecovery(userId);
-      if (!attempt && user) await queueMail(env, user.email, "OFFICIAL_REAUTH_REQUIRED", {});
+      const started = await startCredentialRecovery(env, userId);
+      if (!started && user) await queueMail(env, user.email, "OFFICIAL_REAUTH_REQUIRED", {});
     }
     return false;
   }
@@ -312,6 +363,6 @@ export async function recoverExpiredOfficialLogin(env: AppEnv, userId: string, e
             last_error_code = 2003, last_error_message = ?, updated_at = ?
       WHERE user_id = ?`,
   ).bind("官方登录已失效，正在自动恢复", Date.now(), userId).run();
-  await env.CAS_AUTOMATION?.startRecovery(userId);
+  await startCredentialRecovery(env, userId);
   return true;
 }

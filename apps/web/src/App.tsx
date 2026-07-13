@@ -42,6 +42,8 @@ type Session = {
   credential: {
     credential_status: string;
     setup_required?: boolean;
+    recoveryBlockedUntil?: number | null;
+    lastRecoveryAttemptAt?: number | null;
     login_student_id?: string | null;
     login_attempt?: {
       attemptId: string;
@@ -299,6 +301,13 @@ function credentialStatusText(status: string): string {
     DISABLED: "暂不可用",
   };
   return labels[status] ?? "等待连接";
+}
+
+function credentialAttemptMessage(attempt: Session["credential"]["login_attempt"]): string | null {
+  if (!attempt?.errorMessage) return null;
+  if (attempt.errorCode === "CAS_CAPTCHA_REQUIRED") return "统一认证要求验证码，本次自动连接已停止。请稍后重新提交学号和密码。";
+  if (attempt.errorCode === "CAS_ATTEMPT_TIMEOUT") return "统一认证响应超时，本次连接已停止。请稍后重新提交。";
+  return attempt.errorMessage;
 }
 
 function taskCandidateText(task: Task): string {
@@ -1006,6 +1015,7 @@ function CredentialLockPage({
   const [busy, setBusy] = useState(false);
   const attempt = session.credential.login_attempt;
   const waiting = attempt?.status === "QUEUED" || attempt?.status === "RUNNING" || attempt?.status === "SMS_REQUIRED";
+  const attemptMessage = credentialAttemptMessage(attempt);
 
   useEffect(() => {
     if (!waiting) return;
@@ -1061,7 +1071,7 @@ function CredentialLockPage({
             setBusy(false);
           }
         }}>
-          {attempt?.errorMessage ? <div className="credential-error">{attempt.errorMessage}</div> : null}
+          {attemptMessage ? <div className="credential-error">{attemptMessage}</div> : null}
           <Field label="学号"><input name="studentId" required maxLength={32} defaultValue={session.credential.login_student_id ?? session.user.studentId ?? ""} autoComplete="username" autoFocus /></Field>
           <Field label="统一认证密码"><input name="password" type="password" required maxLength={128} autoComplete="current-password" /></Field>
           <Button busy={busy}>连接校园账号</Button>
