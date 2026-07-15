@@ -14,6 +14,7 @@ export type User = {
   real_name: string | null;
   allow_auto_join_reservation: number;
   square_visibility: "VISIBLE" | "HIDDEN";
+  email_notifications_enabled: number;
 };
 
 function parseCookies(request: Request): Map<string, string> {
@@ -59,7 +60,7 @@ export async function currentUser(env: AppEnv, request: Request): Promise<User |
   const tokenHash = await sha256(`${env.SESSION_SECRET}:${token}`);
   const user = await env.DB.prepare(
     `SELECT u.id, u.email, u.role, u.status, u.student_id, u.real_name,
-            u.allow_auto_join_reservation, u.square_visibility
+            u.allow_auto_join_reservation, u.square_visibility, u.email_notifications_enabled
        FROM sessions s
        JOIN users u ON u.id = s.user_id
       WHERE s.token_hash = ? AND s.revoked_at IS NULL AND s.expires_at > ?`,
@@ -83,4 +84,3 @@ export async function requireAdmin(env: AppEnv, request: Request): Promise<User>
 export async function hashClientIp(env: AppEnv, request: Request): Promise<string> {
   return sha256(`${env.SESSION_SECRET}:${request.headers.get("cf-connecting-ip") ?? "local"}`);
 }
-

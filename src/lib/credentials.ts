@@ -192,7 +192,7 @@ export async function credentialStatus(env: AppEnv, userId: string): Promise<Rec
     "SELECT student_id, last_login_at FROM official_login_credentials WHERE user_id = ?",
   ).bind(userId).first<{ student_id: string; last_login_at: number | null }>();
   const attempt = await env.DB.prepare(
-    `SELECT id, purpose, status, progress, sms_expires_at, error_code, error_message
+    `SELECT id, purpose, status, progress, sms_expires_at, captcha_image, captcha_expires_at, error_code, error_message
        FROM official_login_attempts WHERE user_id = ?
       ORDER BY created_at DESC LIMIT 1`,
   ).bind(userId).first<Record<string, unknown>>();
@@ -209,6 +209,8 @@ export async function credentialStatus(env: AppEnv, userId: string): Promise<Rec
       status: attempt.status,
       progress: attempt.progress,
       smsExpiresAt: attempt.sms_expires_at,
+      captchaImage: attempt.captcha_image,
+      captchaExpiresAt: attempt.captcha_expires_at,
       errorCode: attempt.error_code,
       errorMessage: attempt.error_message,
     } : null,

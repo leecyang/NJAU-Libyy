@@ -165,7 +165,8 @@ function requireGateway(env: AppEnv) {
 
 async function userById(env: AppEnv, userId: string): Promise<User> {
   const user = await env.DB.prepare(
-    `SELECT id, email, role, status, student_id, real_name, allow_auto_join_reservation, square_visibility
+    `SELECT id, email, role, status, student_id, real_name, allow_auto_join_reservation, square_visibility,
+            email_notifications_enabled
        FROM users WHERE id = ?`,
   ).bind(userId).first<User>();
   if (!user || user.status !== "ACTIVE") throw new HttpError(404, "ACCOUNT_NOT_FOUND", "账号不存在");
@@ -684,6 +685,7 @@ export async function me(env: AppEnv, request: Request): Promise<Response> {
       studentId: user.student_id,
       realName: user.real_name,
       squareVisibility: user.square_visibility,
+      emailNotificationsEnabled: user.email_notifications_enabled === 1,
       totalScore,
       scoreRefreshedAt: metrics?.scoreRefreshedAt ?? null,
       reservationQuota: metrics?.reservationQuota ?? [],
@@ -691,6 +693,27 @@ export async function me(env: AppEnv, request: Request): Promise<Response> {
     metrics: metrics ?? null,
     credential,
   });
+}
+
+export async function updateNotificationSettings(env: AppEnv, request: Request): Promise<Response> {
+  const user = await requireUser(env, request);
+  const body = await readJsonBody<JsonObject>(request);
+  if (typeof body.emailNotificationsEnabled !== "boolean") {
+    throw new HttpError(400, "INVALID_FIELD", "emailNotificationsEnabled 格式错误");
+  }
+  const enabled = body.emailNotificationsEnabled ? 1 : 0;
+  await env.DB.prepare(
+    "UPDATE users SET email_notifications_enabled = ?, updated_at = ? WHERE id = ?",
+  ).bind(enabled, Date.now(), user.id).run();
+  await audit(env.DB, {
+    actorUserId: user.id,
+    actorType: "USER",
+    action: "EMAIL_NOTIFICATION_SETTING_UPDATED",
+    targetType: "USER",
+    targetId: user.id,
+    result: enabled ? "ENABLED" : "DISABLED",
+  });
+  return ok({ emailNotificationsEnabled: enabled === 1 });
 }
 
 export async function health(env: AppEnv): Promise<Response> {
@@ -781,6 +804,15 @@ export async function submitCredentialSms(env: AppEnv, request: Request): Promis
   const attemptId = requireString(body.attemptId, "attemptId", 80);
   const code = requireString(body.code, "code", 6);
   return ok(await env.CAS_AUTOMATION.submitSms(user.id, attemptId, code));
+}
+
+export async function submitCredentialCaptcha(env: AppEnv, request: Request): Promise<Response> {
+  const user = await requireUser(env, request);
+  const body = await readJsonBody<JsonObject>(request);
+  if (!env.CAS_AUTOMATION) throw new HttpError(503, "CAS_AUTOMATION_UNAVAILABLE", "统一认证自动化服务未启用");
+  const attemptId = requireString(body.attemptId, "attemptId", 80);
+  const code = requireString(body.code, "code", 8);
+  return ok(await env.CAS_AUTOMATION.submitCaptcha(user.id, attemptId, code));
 }
 
 export async function getCredentialStatus(env: AppEnv, request: Request): Promise<Response> {
@@ -2313,7 +2345,8 @@ type AdminCollectionConfig = {
 const adminCollections: Record<string, AdminCollectionConfig> = {
   users: {
     select: `SELECT u.id, u.email, u.role, u.status, u.student_id, u.real_name,
-                    u.allow_auto_join_reservation, u.square_visibility, u.created_at, u.last_login_at,
+                    u.allow_auto_join_reservation, u.square_visibility, u.email_notifications_enabled,
+                    u.created_at, u.last_login_at,
                     c.credential_status, c.last_refresh_success_at, c.refresh_failure_count,
                     (SELECT COUNT(*) FROM reservation_tasks t WHERE t.owner_user_id = u.id OR t.requested_by_user_id = u.id) AS task_count,
                     (SELECT COUNT(*) FROM reservations r WHERE r.owner_user_id = u.id OR r.requested_by_user_id = u.id) AS reservation_count`,

@@ -19,6 +19,8 @@ type AttemptRow = {
   progress: string;
   sms_attempt_count: number;
   sms_expires_at: number | null;
+  captcha_image: string | null;
+  captcha_expires_at: number | null;
   error_code: string | null;
   error_message: string | null;
   expires_at: number;
@@ -29,6 +31,8 @@ type ActiveAttempt = {
   abortReason?: CasAutomationError;
   smsResolver?: (code: string) => void;
   smsRejecter?: (error: unknown) => void;
+  captchaResolver?: (code: string) => void;
+  captchaRejecter?: (error: unknown) => void;
 };
 
 type LoginPage = {
@@ -52,14 +56,17 @@ type RequestOptions = RequestInit & {
   signal?: AbortSignal;
 };
 
-const ACTIVE_STATUSES = "('QUEUED', 'RUNNING', 'SMS_REQUIRED')";
+const ACTIVE_STATUSES = "('QUEUED', 'RUNNING', 'SMS_REQUIRED', 'CAPTCHA_REQUIRED')";
 const ATTEMPT_TTL_MS = 10 * 60_000;
 const SMS_TTL_MS = 5 * 60_000;
+const CAPTCHA_TTL_MS = 3 * 60_000;
+const MAX_CAPTCHA_ATTEMPTS = 3;
 const CAPTCHA_RECOVERY_COOLDOWN_MS = 30 * 60_000;
 const AUTH_BASE_URL = "https://authserver.njau.edu.cn";
 const DEFAULT_AES_IV = "HDbk7NdBpFPpFrZR";
 const RANDOM_PREFIX_CHARS = "ABCDEFGHJKMNPQRSTWXYZabcdefhijkmnprstwxyz2345678";
 const DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+const DEFAULT_SEC_CH_UA = "\"Chromium\";v=\"124\", \"Google Chrome\";v=\"124\", \"Not-A.Brand\";v=\"99\"";
 const MAX_REDIRECTS = 24;
 
 class CasAutomationError extends Error {
@@ -104,6 +111,48 @@ class ProtocolCookieJar {
     }
     return pairs.join("; ");
   }
+
+  // Persist only the campus-auth cookies still valid — above all CASTGC, the CAS
+  // "trusted device" ticket that lets a later attempt reuse SSO instead of a
+  // fresh password login (which is what draws the risk-engine captcha).
+  serialize(): string {
+    const now = Date.now();
+    const entries = [];
+    for (const cookie of this.cookies.values()) {
+      if (cookie.expiresAt !== null && cookie.expiresAt <= now) continue;
+      if (!cookie.domain.endsWith("njau.edu.cn")) continue;
+      entries.push(cookie);
+    }
+    return JSON.stringify(entries);
+  }
+
+  restore(serialized: string): void {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(serialized);
+    } catch {
+      return;
+    }
+    if (!Array.isArray(parsed)) return;
+    const now = Date.now();
+    for (const entry of parsed) {
+      if (!entry || typeof entry !== "object") continue;
+      const cookie = entry as Record<string, unknown>;
+      if (typeof cookie.name !== "string" || typeof cookie.value !== "string") continue;
+      if (typeof cookie.domain !== "string" || typeof cookie.path !== "string") continue;
+      const expiresAt = typeof cookie.expiresAt === "number" ? cookie.expiresAt : null;
+      if (expiresAt !== null && expiresAt <= now) continue;
+      this.cookies.set(`${cookie.domain}\t${cookie.path}\t${cookie.name}`, {
+        name: cookie.name,
+        value: cookie.value,
+        domain: cookie.domain,
+        path: cookie.path,
+        hostOnly: cookie.hostOnly === true,
+        secure: cookie.secure === true,
+        expiresAt,
+      });
+    }
+  }
 }
 
 function publicAttempt(row: AttemptRow): CasAttemptPublic {
@@ -113,6 +162,8 @@ function publicAttempt(row: AttemptRow): CasAttemptPublic {
     purpose: row.purpose,
     progress: row.progress,
     smsExpiresAt: row.sms_expires_at,
+    captchaImage: row.captcha_image,
+    captchaExpiresAt: row.captcha_expires_at,
     errorCode: row.error_code,
     errorMessage: row.error_message,
   };
@@ -267,8 +318,9 @@ function hasSmsChallenge(html: string, url: string): boolean {
   return /dynamicCode|getDynamicCode|短信验证码|reAuthCheck|reAuthLoginView/i.test(html) || /reAuthCheck|reAuthLoginView/i.test(url);
 }
 
-function hasCaptchaChallenge(html: string, errorText = ""): boolean {
-  return hasSliderChallenge(html) || /验证码|图形动态码/.test(errorText) || (/captchaDiv|getCaptcha\.htl/i.test(html) && !hasSmsChallenge(html, ""));
+function hasImageCaptcha(html: string, errorText = ""): boolean {
+  if (hasSliderChallenge(html) || hasSmsChallenge(html, "")) return false;
+  return /captchaDiv|getCaptcha\.htl/i.test(html) || /验证码|图形动态码/.test(errorText);
 }
 
 function isInvalidCredentialText(errorText: string): boolean {
@@ -411,8 +463,9 @@ export class CasLoginManager implements CasAutomationAdapter {
       `UPDATE official_login_attempts
           SET status = 'FAILED', progress = '服务重启，请重新发起认证',
               error_code = 'CAS_SERVICE_RESTARTED', error_message = '认证服务已重启',
-              pending_password_ciphertext = NULL, updated_at = ?
-        WHERE status IN ('RUNNING', 'SMS_REQUIRED')`,
+              pending_password_ciphertext = NULL, sms_expires_at = NULL,
+              captcha_image = NULL, captcha_expires_at = NULL, updated_at = ?
+        WHERE status IN ('RUNNING', 'SMS_REQUIRED', 'CAPTCHA_REQUIRED')`,
     ).bind(now).run();
     await this.env.DB.prepare(
       `UPDATE official_login_attempts
@@ -443,6 +496,8 @@ export class CasLoginManager implements CasAutomationAdapter {
       progress: "等待启动统一认证协议登录",
       sms_attempt_count: 0,
       sms_expires_at: null,
+      captcha_image: null,
+      captcha_expires_at: null,
       error_code: null,
       error_message: null,
       expires_at: now + ATTEMPT_TTL_MS,
@@ -461,7 +516,7 @@ export class CasLoginManager implements CasAutomationAdapter {
   async startRecovery(userId: string): Promise<CasAttemptPublic | null> {
     const active = await this.env.DB.prepare(
       `SELECT id, user_id, purpose, student_id, pending_password_ciphertext, status, progress,
-              sms_attempt_count, sms_expires_at, error_code, error_message, expires_at
+              sms_attempt_count, sms_expires_at, captcha_image, captcha_expires_at, error_code, error_message, expires_at
          FROM official_login_attempts WHERE user_id = ? AND status IN ${ACTIVE_STATUSES}
         ORDER BY created_at DESC LIMIT 1`,
     ).bind(userId).first<AttemptRow>();
@@ -506,12 +561,39 @@ export class CasLoginManager implements CasAutomationAdapter {
     });
   }
 
+  async submitCaptcha(userId: string, attemptId: string, code: string): Promise<CasAttemptPublic> {
+    if (!/^[0-9A-Za-z]{1,8}$/.test(code)) throw new HttpError(400, "INVALID_CAPTCHA_CODE", "请输入图形验证码");
+    const row = await this.attempt(attemptId);
+    if (!row || row.user_id !== userId) throw new HttpError(404, "CAS_ATTEMPT_NOT_FOUND", "认证任务不存在");
+    if (row.status !== "CAPTCHA_REQUIRED") throw new HttpError(409, "CAS_CAPTCHA_NOT_REQUIRED", "当前认证任务不需要图形验证码");
+    if (!row.captcha_expires_at || row.captcha_expires_at <= Date.now()) throw new HttpError(410, "CAS_CAPTCHA_EXPIRED", "图形验证码提交已超时");
+    const active = this.active.get(attemptId);
+    if (!active?.captchaResolver) throw new HttpError(409, "CAS_ATTEMPT_NOT_RUNNING", "认证任务已中断，请重新发起");
+    await this.env.DB.prepare(
+      `UPDATE official_login_attempts
+          SET status = 'RUNNING', progress = ?, captcha_image = NULL, captcha_expires_at = NULL, updated_at = ?
+        WHERE id = ? AND status = 'CAPTCHA_REQUIRED'`,
+    ).bind("正在校验图形验证码", Date.now(), attemptId).run();
+    const resolver = active.captchaResolver;
+    active.captchaResolver = undefined;
+    active.captchaRejecter = undefined;
+    resolver(code);
+    return publicAttempt({
+      ...row,
+      status: "RUNNING",
+      captcha_image: null,
+      captcha_expires_at: null,
+      progress: "正在校验图形验证码",
+    });
+  }
+
   async removeUser(userId: string): Promise<void> {
     for (const [attemptId, active] of this.active) {
       const row = await this.attempt(attemptId);
       if (row?.user_id !== userId) continue;
       active.abortReason = new CasAutomationError("CAS_ATTEMPT_CANCELLED", "认证任务已取消");
       active.smsRejecter?.(active.abortReason);
+      active.captchaRejecter?.(active.abortReason);
       active.abortController.abort();
       this.active.delete(attemptId);
     }
@@ -541,7 +623,7 @@ export class CasLoginManager implements CasAutomationAdapter {
   private async attempt(attemptId: string): Promise<AttemptRow | null> {
     return this.env.DB.prepare(
       `SELECT id, user_id, purpose, student_id, pending_password_ciphertext, status, progress,
-              sms_attempt_count, sms_expires_at, error_code, error_message, expires_at
+              sms_attempt_count, sms_expires_at, captcha_image, captcha_expires_at, error_code, error_message, expires_at
          FROM official_login_attempts WHERE id = ?`,
     ).bind(attemptId).first<AttemptRow>();
   }
@@ -558,6 +640,7 @@ export class CasLoginManager implements CasAutomationAdapter {
     const timeout = setTimeout(() => {
       active.abortReason = new CasAutomationError("CAS_ATTEMPT_TIMEOUT", "统一认证登录超时，请稍后重试");
       active.smsRejecter?.(active.abortReason);
+      active.captchaRejecter?.(active.abortReason);
       active.abortController.abort();
     }, this.loginTimeout());
     try {
@@ -576,9 +659,12 @@ export class CasLoginManager implements CasAutomationAdapter {
       const password = await decryptSecret(attempt.pending_password_ciphertext, this.env.CAS_CREDENTIAL_ENCRYPTION_KEY);
       await this.progress(attemptId, "RUNNING", "正在通过统一认证协议登录");
       stage = "CAS_PROTOCOL_LOGIN";
-      const result = await this.protocolLogin(attempt, password, active);
+      const jar = new ProtocolCookieJar();
+      await this.restoreCookieJar(jar, attempt.user_id);
+      const result = await this.protocolLogin(attempt, password, active, jar);
       const user = await this.env.DB.prepare(
-        `SELECT id, email, role, status, student_id, real_name, allow_auto_join_reservation, square_visibility
+        `SELECT id, email, role, status, student_id, real_name, allow_auto_join_reservation, square_visibility,
+                email_notifications_enabled
            FROM users WHERE id = ?`,
       ).bind(attempt.user_id).first<User>();
       if (!user) throw new CasAutomationError("ACCOUNT_NOT_FOUND", "账号不存在");
@@ -586,19 +672,22 @@ export class CasLoginManager implements CasAutomationAdapter {
       if (result.kind === "TOKENS") await bindCredentialFromTokens(this.env, user, result.tokens, attempt.student_id);
       else await bindCredentialFromToken(this.env, user, result.reflushToken, attempt.student_id);
       const passwordCiphertext = await encryptSecret(password, this.env.CAS_CREDENTIAL_ENCRYPTION_KEY);
+      const cookieJarCiphertext = await this.serializeCookieJar(jar);
       const now = Date.now();
       await this.env.DB.prepare(
         `INSERT INTO official_login_credentials
-          (user_id, student_id, password_ciphertext, last_login_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)
+          (user_id, student_id, password_ciphertext, cookie_jar_ciphertext, last_login_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(user_id) DO UPDATE SET
            student_id = excluded.student_id, password_ciphertext = excluded.password_ciphertext,
+           cookie_jar_ciphertext = excluded.cookie_jar_ciphertext,
            last_login_at = excluded.last_login_at, last_error_code = NULL, updated_at = excluded.updated_at`,
-      ).bind(attempt.user_id, attempt.student_id, passwordCiphertext, now, now, now).run();
+      ).bind(attempt.user_id, attempt.student_id, passwordCiphertext, cookieJarCiphertext, now, now, now).run();
       await this.env.DB.prepare(
         `UPDATE official_login_attempts
             SET status = 'SUCCEEDED', progress = '统一认证完成', pending_password_ciphertext = NULL,
-                sms_expires_at = NULL, error_code = NULL, error_message = NULL, updated_at = ?
+                sms_expires_at = NULL, captcha_image = NULL, captcha_expires_at = NULL,
+                error_code = NULL, error_message = NULL, updated_at = ?
           WHERE id = ?`,
       ).bind(now, attemptId).run();
       await audit(this.env.DB, { actorUserId: attempt.user_id, actorType: attempt.purpose === "AUTO_RECOVERY" ? "SYSTEM" : "USER", action: "CAS_LOGIN_SUCCEEDED", targetType: "CREDENTIAL", targetId: attempt.user_id, result: "SUCCESS", metadata: { purpose: attempt.purpose } });
@@ -613,11 +702,15 @@ export class CasLoginManager implements CasAutomationAdapter {
       await this.env.DB.prepare(
         `UPDATE official_login_attempts
             SET status = ?, progress = ?, pending_password_ciphertext = NULL, sms_expires_at = NULL,
+                captcha_image = NULL, captcha_expires_at = NULL,
                 error_code = ?, error_message = ?, updated_at = ?
           WHERE id = ? AND status NOT IN ('SUCCEEDED', 'FAILED', 'EXPIRED')`,
       ).bind(status, message, code, message, failedAt, attemptId).run();
       const failedAttempt = await this.attempt(attemptId);
-      if (code === "CAS_CAPTCHA_REQUIRED" && failedAttempt) {
+      // Only the slider challenge is unsolvable through our human-in-the-loop flow,
+      // so only it earns the recovery cooldown. A mistyped image code should let the
+      // user retry immediately rather than freezing recovery for 30 minutes.
+      if (code === "CAS_CAPTCHA_SLIDER" && failedAttempt) {
         await blockCredentialRecovery(this.env, failedAttempt.user_id, code, message, failedAt + CAPTCHA_RECOVERY_COOLDOWN_MS);
       }
       if (failedAttempt?.purpose === "AUTO_RECOVERY") {
@@ -634,6 +727,24 @@ export class CasLoginManager implements CasAutomationAdapter {
     }
   }
 
+  private async restoreCookieJar(jar: ProtocolCookieJar, userId: string): Promise<void> {
+    try {
+      const row = await this.env.DB.prepare(
+        "SELECT cookie_jar_ciphertext FROM official_login_credentials WHERE user_id = ?",
+      ).bind(userId).first<{ cookie_jar_ciphertext: string | null }>();
+      if (!row?.cookie_jar_ciphertext) return;
+      jar.restore(await decryptSecret(row.cookie_jar_ciphertext, this.env.CAS_CREDENTIAL_ENCRYPTION_KEY));
+    } catch {
+      // A corrupt or undecryptable saved jar must never block a fresh password login.
+    }
+  }
+
+  private async serializeCookieJar(jar: ProtocolCookieJar): Promise<string | null> {
+    const serialized = jar.serialize();
+    if (serialized === "[]") return null;
+    return encryptSecret(serialized, this.env.CAS_CREDENTIAL_ENCRYPTION_KEY);
+  }
+
   private browserHeaders(extra?: HeadersInit): Headers {
     const extraHeaders: Record<string, string> = {};
     new Headers(extra).forEach((value, key) => {
@@ -641,8 +752,16 @@ export class CasLoginManager implements CasAutomationAdapter {
     });
     const headers = new Headers({
       "user-agent": DEFAULT_USER_AGENT,
-      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
       "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
+      "sec-ch-ua": DEFAULT_SEC_CH_UA,
+      "sec-ch-ua-mobile": "?0",
+      "sec-ch-ua-platform": "\"Windows\"",
+      "sec-fetch-dest": "document",
+      "sec-fetch-mode": "navigate",
+      "sec-fetch-site": "same-origin",
+      "sec-fetch-user": "?1",
+      "upgrade-insecure-requests": "1",
       ...extraHeaders,
     });
     return headers;
@@ -692,8 +811,7 @@ export class CasLoginManager implements CasAutomationAdapter {
     return response;
   }
 
-  private async protocolLogin(attempt: AttemptRow, password: string, active: ActiveAttempt): Promise<ProtocolLoginResult> {
-    const jar = new ProtocolCookieJar();
+  private async protocolLogin(attempt: AttemptRow, password: string, active: ActiveAttempt, jar: ProtocolCookieJar): Promise<ProtocolLoginResult> {
     const authorizeUrl = new URL("/api/oauth/v1/authorize", this.env.LIBYY_API_BASE_URL);
     authorizeUrl.searchParams.set("redirectURI", new URL("/", this.env.LIBYY_API_BASE_URL).toString());
     const loginPageResponse = await this.fetchFollow(jar, authorizeUrl, { signal: active.abortController.signal });
@@ -703,25 +821,118 @@ export class CasLoginManager implements CasAutomationAdapter {
     if (!loginPageUrl.includes("authserver.njau.edu.cn")) {
       throw new CasAutomationError("CAS_LOGIN_PAGE_NOT_FOUND", "未能进入统一认证登录页");
     }
-    if (hasSliderChallenge(loginPageText)) throw new CasAutomationError("CAS_CAPTCHA_REQUIRED", "统一认证要求滑块验证码，请稍后重试");
+    if (hasSliderChallenge(loginPageText)) throw new CasAutomationError("CAS_CAPTCHA_SLIDER", "统一认证要求滑块验证码，请在学校统一认证官方页面完成验证后重试");
     const loginPage = extractLoginPage(loginPageText, loginPageUrl);
-    await this.ensureCaptchaNotRequired(jar, attempt.student_id, active, loginPage.url);
-    const afterPassword = await this.submitPassword(jar, loginPage, attempt.student_id, password, active);
-    return this.handleLoginResponse(jar, afterPassword, attempt, active);
+    // No proactive checkNeedCaptcha probe: the browser flow never called it and
+    // succeeded. Submit the password and let the response decide; a genuine image
+    // captcha is surfaced to the user (CAPTCHA_REQUIRED) and resubmitted, rather
+    // than dead-failing the whole login.
+    return this.passwordLogin(jar, loginPage, attempt, password, active);
   }
 
-  private async ensureCaptchaNotRequired(jar: ProtocolCookieJar, studentId: string, active: ActiveAttempt, referer: string): Promise<void> {
-    const url = new URL("/authserver/checkNeedCaptcha.htl", AUTH_BASE_URL);
-    url.searchParams.set("username", studentId);
+  private async passwordLogin(
+    jar: ProtocolCookieJar,
+    initialPage: LoginPage,
+    attempt: AttemptRow,
+    password: string,
+    active: ActiveAttempt,
+  ): Promise<ProtocolLoginResult> {
+    let page = initialPage;
+    let captcha = "";
+    for (let round = 0; round < MAX_CAPTCHA_ATTEMPTS; round += 1) {
+      const response = await this.submitPassword(jar, page, attempt.student_id, password, captcha, active);
+      const authCode = this.authorizationCode(response.url);
+      if (authCode) return this.exchangeAuthorizationCode(jar, authCode, active, attempt.id, response.url);
+      const text = await response.text();
+      const errorText = extractErrorText(text);
+      if (isInvalidCredentialText(errorText)) throw new CasAutomationError("CAS_INVALID_CREDENTIALS", "学号或统一认证密码错误");
+      if (hasSliderChallenge(text)) throw new CasAutomationError("CAS_CAPTCHA_SLIDER", "统一认证要求滑块验证码，请在学校统一认证官方页面完成验证后重试");
+      if (hasSmsChallenge(text, response.url)) return this.completeSms(jar, response.url, text, attempt, active);
+      if (hasImageCaptcha(text, errorText)) {
+        if (round + 1 >= MAX_CAPTCHA_ATTEMPTS) throw new CasAutomationError("CAS_CAPTCHA_FAILED", "图形验证码校验多次失败，请重新发起认证");
+        page = await this.reloadLoginPage(jar, page.url, active);
+        captcha = await this.promptCaptcha(jar, attempt, page.url, active);
+        continue;
+      }
+      if (errorText) throw new CasAutomationError("CAS_LOGIN_FAILED", errorText);
+      throw new CasAutomationError("CAS_LOGIN_FAILED", "统一认证登录未返回图书馆授权码");
+    }
+    throw new CasAutomationError("CAS_CAPTCHA_FAILED", "图形验证码校验多次失败，请重新发起认证");
+  }
+
+  private async reloadLoginPage(jar: ProtocolCookieJar, loginUrl: string, active: ActiveAttempt): Promise<LoginPage> {
+    const response = await this.fetchFollow(jar, loginUrl, { signal: active.abortController.signal });
+    const text = await response.text();
+    const code = this.authorizationCode(response.url);
+    if (code) throw new CasAutomationError("CAS_LOGIN_ALREADY_COMPLETE", "统一认证已完成");
+    if (!response.url.includes("authserver.njau.edu.cn")) throw new CasAutomationError("CAS_LOGIN_PAGE_NOT_FOUND", "未能进入统一认证登录页");
+    return extractLoginPage(text, response.url);
+  }
+
+  private async fetchCaptchaImage(jar: ProtocolCookieJar, referer: string, active: ActiveAttempt): Promise<string> {
+    const url = new URL("/authserver/getCaptcha.htl", AUTH_BASE_URL);
     url.searchParams.set("_", String(Date.now()));
     const response = await this.request(jar, url, {
       signal: active.abortController.signal,
-      headers: { referer, "x-requested-with": "XMLHttpRequest", accept: "application/json,text/plain,*/*" },
+      headers: { referer, accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8" },
     });
-    const payload = parseJsonMaybe(await response.text());
-    if (payload && typeof payload === "object" && (payload as { isNeed?: unknown }).isNeed) {
-      throw new CasAutomationError("CAS_CAPTCHA_REQUIRED", "统一认证要求图形验证码，请稍后重试");
+    if (response.status >= 400) throw new CasAutomationError("CAS_CAPTCHA_FETCH_FAILED", "图形验证码获取失败，请稍后重试");
+    const buffer = Buffer.from(await response.arrayBuffer());
+    if (buffer.byteLength === 0) throw new CasAutomationError("CAS_CAPTCHA_FETCH_FAILED", "图形验证码获取失败，请稍后重试");
+    const contentType = response.headers.get("content-type")?.split(";")[0]?.trim() || "image/png";
+    return `data:${contentType};base64,${buffer.toString("base64")}`;
+  }
+
+  private async promptCaptcha(jar: ProtocolCookieJar, attempt: AttemptRow, referer: string, active: ActiveAttempt): Promise<string> {
+    const image = await this.fetchCaptchaImage(jar, referer, active);
+    const captchaExpiresAt = Date.now() + CAPTCHA_TTL_MS;
+    await this.env.DB.prepare(
+      `UPDATE official_login_attempts
+          SET status = 'CAPTCHA_REQUIRED', progress = ?, captcha_image = ?, captcha_expires_at = ?, updated_at = ?
+        WHERE id = ?`,
+    ).bind("请输入图片中的验证码", image, captchaExpiresAt, Date.now(), attempt.id).run();
+    if (attempt.purpose === "AUTO_RECOVERY") {
+      const user = await this.env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(attempt.user_id).first<{ email: string }>();
+      if (user) await queueMail(this.env, user.email, "OFFICIAL_REAUTH_REQUIRED", {}, {
+        dedupeKey: `official-reauth:${attempt.id}:${attempt.user_id}`,
+      });
     }
+    return this.waitForCaptchaCode(attempt.id, captchaExpiresAt);
+  }
+
+  private waitForCaptchaCode(attemptId: string, expiresAt: number): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const active = this.active.get(attemptId);
+      if (!active) {
+        reject(new CasAutomationError("CAS_ATTEMPT_NOT_RUNNING", "认证任务已中断"));
+        return;
+      }
+      const timeout = setTimeout(() => {
+        cleanup();
+        reject(new CasAutomationError("CAS_CAPTCHA_EXPIRED", "图形验证码提交已超时"));
+      }, Math.max(0, expiresAt - Date.now()));
+      const abort = () => {
+        cleanup();
+        reject(new CasAutomationError("CAS_ATTEMPT_CANCELLED", "认证任务已取消"));
+      };
+      const cleanup = () => {
+        clearTimeout(timeout);
+        active.abortController.signal.removeEventListener("abort", abort);
+        if (active.captchaResolver === resolver) active.captchaResolver = undefined;
+        if (active.captchaRejecter === rejecter) active.captchaRejecter = undefined;
+      };
+      const resolver = (code: string) => {
+        cleanup();
+        resolve(code);
+      };
+      const rejecter = (error: unknown) => {
+        cleanup();
+        reject(error);
+      };
+      active.captchaResolver = resolver;
+      active.captchaRejecter = rejecter;
+      active.abortController.signal.addEventListener("abort", abort, { once: true });
+    });
   }
 
   private async submitPassword(
@@ -729,6 +940,7 @@ export class CasLoginManager implements CasAutomationAdapter {
     page: LoginPage,
     studentId: string,
     password: string,
+    captcha: string,
     active: ActiveAttempt,
   ): Promise<Response> {
     const service = serviceUrlFromLoginUrl(page.url);
@@ -736,7 +948,7 @@ export class CasLoginManager implements CasAutomationAdapter {
       ...page.fields,
       username: studentId,
       password: encryptCasPassword(password, page.pwdEncryptSalt),
-      captcha: "",
+      captcha,
       _eventId: page.fields._eventId || "submit",
       cllt: "userNameLogin",
       dllt: page.fields.dllt || "generalLogin",
@@ -753,23 +965,6 @@ export class CasLoginManager implements CasAutomationAdapter {
         "content-type": "application/x-www-form-urlencoded",
       },
     });
-  }
-
-  private async handleLoginResponse(
-    jar: ProtocolCookieJar,
-    response: Response,
-    attempt: AttemptRow,
-    active: ActiveAttempt,
-  ): Promise<ProtocolLoginResult> {
-    const code = this.authorizationCode(response.url);
-    if (code) return this.exchangeAuthorizationCode(jar, code, active, attempt.id, response.url);
-    const text = await response.text();
-    const errorText = extractErrorText(text);
-    if (hasCaptchaChallenge(text, errorText)) throw new CasAutomationError("CAS_CAPTCHA_REQUIRED", "统一认证要求图形或滑块验证码，请稍后重试");
-    if (isInvalidCredentialText(errorText)) throw new CasAutomationError("CAS_INVALID_CREDENTIALS", "学号或统一认证密码错误");
-    if (hasSmsChallenge(text, response.url)) return this.completeSms(jar, response.url, text, attempt, active);
-    if (errorText) throw new CasAutomationError("CAS_LOGIN_FAILED", errorText);
-    throw new CasAutomationError("CAS_LOGIN_FAILED", "统一认证登录未返回图书馆授权码");
   }
 
   private authorizationCode(url: string): string | null {

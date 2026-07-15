@@ -4,8 +4,18 @@ import { decryptSecret, encryptSecret } from "./crypto";
 import { renderTemplate, retryDelayMs } from "./mail-content";
 import { sendSmtpMail, SmtpDeliveryError } from "./smtp";
 
+const MANDATORY_TEMPLATES = new Set(["REGISTER_CODE", "RESET_PASSWORD_CODE", "TEST_EMAIL"]);
+
 function safeDeliveryError(error: unknown): string {
   return error instanceof SmtpDeliveryError ? error.diagnosticCode : "MAIL_DELIVERY_FAILED";
+}
+
+async function userAllowsNotification(env: AppEnv, recipientEmail: string, template: string): Promise<boolean> {
+  if (MANDATORY_TEMPLATES.has(template)) return true;
+  const user = await env.DB.prepare(
+    "SELECT email_notifications_enabled FROM users WHERE email = ? AND status = 'ACTIVE'",
+  ).bind(recipientEmail).first<{ email_notifications_enabled: number }>();
+  return !user || user.email_notifications_enabled === 1;
 }
 
 export async function queueMail(
@@ -15,6 +25,7 @@ export async function queueMail(
   payload: Record<string, unknown>,
   options: { dedupeKey?: string } = {},
 ): Promise<boolean> {
+  if (!await userAllowsNotification(env, recipientEmail, template)) return false;
   const result = await env.DB.prepare(
     `INSERT OR IGNORE INTO email_outbox
       (id, recipient_email, template, payload_json, status, next_attempt_at, created_at, dedupe_key)
