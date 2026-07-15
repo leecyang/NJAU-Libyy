@@ -222,6 +222,11 @@ input:focus, textarea:focus, select:focus { border-color: var(--ink); box-shadow
   background: var(--canvas);
   color: var(--ink);
 }
+.icon-button.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: var(--canvas);
+}
 
 .content { width: min(1200px, calc(100% - 48px)); margin: 0 auto; padding: 32px 0 72px; display: grid; gap: 24px; }
 .page-head { display: flex; justify-content: space-between; gap: 24px; align-items: end; }
@@ -294,6 +299,15 @@ input:focus, textarea:focus, select:focus { border-color: var(--ink); box-shadow
 .credential-form {
   display: grid;
   gap: 16px;
+}
+.credential-captcha {
+  display: block;
+  height: 44px;
+  width: auto;
+  align-self: start;
+  border-radius: 8px;
+  background: #fff;
+  image-rendering: pixelated;
 }
 .credential-progress, .credential-error {
   display: flex;

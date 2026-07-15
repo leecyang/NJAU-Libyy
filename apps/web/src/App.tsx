@@ -37,6 +37,7 @@ type Session = {
     role: "USER" | "ADMIN";
     studentId: string | null;
     realName: string | null;
+    emailNotificationsEnabled: boolean;
     totalScore: number | null;
   };
   credential: {
@@ -48,9 +49,11 @@ type Session = {
     login_attempt?: {
       attemptId: string;
       purpose: "INITIAL_BIND" | "REBIND" | "AUTO_RECOVERY";
-      status: "QUEUED" | "RUNNING" | "SMS_REQUIRED" | "SUCCEEDED" | "FAILED" | "EXPIRED";
+      status: "QUEUED" | "RUNNING" | "SMS_REQUIRED" | "CAPTCHA_REQUIRED" | "SUCCEEDED" | "FAILED" | "EXPIRED";
       progress: string;
       smsExpiresAt: number | null;
+      captchaImage: string | null;
+      captchaExpiresAt: number | null;
       errorCode: string | null;
       errorMessage: string | null;
     } | null;
@@ -967,12 +970,14 @@ function Shell({
   page,
   navigate,
   onLogout,
+  onToggleEmailNotifications,
   children,
 }: {
   session: Session;
   page: Page;
   navigate: (path: string) => void;
   onLogout: () => void;
+  onToggleEmailNotifications: () => Promise<void>;
   children: ReactNode;
 }) {
   const items: Array<{ id: Page; label: string; icon: ReactNode; admin?: boolean }> = [
@@ -993,6 +998,15 @@ function Shell({
         </nav>
         <div className="top-actions">
           <div className="user-chip"><CircleUserRound size={18} /><span>{session.user.realName ?? session.user.email}</span>{session.user.totalScore != null ? <span title={`当前可用积分 ${session.user.totalScore}`} className={`score-badge${session.user.totalScore >= 4 ? " full" : session.user.totalScore >= 2 ? " mid" : " low"}`}>{session.user.totalScore}</span> : null}</div>
+          <button
+            className={`icon-button${session.user.emailNotificationsEnabled ? " active" : ""}`}
+            onClick={() => void onToggleEmailNotifications()}
+            aria-label={session.user.emailNotificationsEnabled ? "关闭邮件通知" : "开启邮件通知"}
+            title={session.user.emailNotificationsEnabled ? "关闭邮件通知" : "开启邮件通知"}
+            type="button"
+          >
+            <Mail size={18} />
+          </button>
           <button className="icon-button" onClick={onLogout} aria-label="退出登录"><LogOut size={18} /></button>
         </div>
       </header>
@@ -1014,7 +1028,7 @@ function CredentialLockPage({
 }) {
   const [busy, setBusy] = useState(false);
   const attempt = session.credential.login_attempt;
-  const waiting = attempt?.status === "QUEUED" || attempt?.status === "RUNNING" || attempt?.status === "SMS_REQUIRED";
+  const waiting = attempt?.status === "QUEUED" || attempt?.status === "RUNNING" || attempt?.status === "SMS_REQUIRED" || attempt?.status === "CAPTCHA_REQUIRED";
   const attemptMessage = credentialAttemptMessage(attempt);
 
   useEffect(() => {
@@ -1035,7 +1049,27 @@ function CredentialLockPage({
           <h1>连接校园统一认证</h1>
           <p>完成连接后，即可查询研讨间、提交预约并完成签到与签退。账号信息仅用于你发起的图书馆预约。</p>
         </div>
-        {attempt?.status === "SMS_REQUIRED" ? <form className="credential-form" onSubmit={async (event) => {
+        {attempt?.status === "CAPTCHA_REQUIRED" ? <form className="credential-form" onSubmit={async (event) => {
+          event.preventDefault();
+          const form = event.currentTarget;
+          const data = formData(form);
+          setBusy(true);
+          try {
+            await api("/api/v1/credentials/captcha", { method: "POST", body: JSON.stringify({ attemptId: attempt.attemptId, code: data.code }) });
+            toast("图形验证码已提交");
+            await refresh();
+            form.reset();
+          } catch (error) {
+            toast(error instanceof Error ? error.message : "图形验证码提交失败", true);
+          } finally {
+            setBusy(false);
+          }
+        }}>
+          <div className="credential-progress"><Loader2 className="spin" size={18} /><span>{attempt.progress}</span></div>
+          {attempt.captchaImage ? <img className="credential-captcha" src={attempt.captchaImage} alt="图形验证码" /> : null}
+          <Field label="图形验证码"><input name="code" required inputMode="text" maxLength={8} autoComplete="off" autoCapitalize="off" autoFocus /></Field>
+          <Button busy={busy}>提交验证码</Button>
+        </form> : attempt?.status === "SMS_REQUIRED" ? <form className="credential-form" onSubmit={async (event) => {
           event.preventDefault();
           const form = event.currentTarget;
           const data = formData(form);
@@ -2201,6 +2235,31 @@ export function App() {
     navigate("/");
   }
 
+  async function toggleEmailNotifications() {
+    const next = !session?.user.emailNotificationsEnabled;
+    setSession((current) => current ? {
+      ...current,
+      user: { ...current.user, emailNotificationsEnabled: next },
+    } : current);
+    try {
+      const result = await api<{ emailNotificationsEnabled: boolean }>("/api/v1/me/notifications", {
+        method: "PATCH",
+        body: JSON.stringify({ emailNotificationsEnabled: next }),
+      });
+      setSession((current) => current ? {
+        ...current,
+        user: { ...current.user, emailNotificationsEnabled: result.emailNotificationsEnabled },
+      } : current);
+      toast(result.emailNotificationsEnabled ? "邮件通知已开启" : "邮件通知已关闭");
+    } catch (error) {
+      setSession((current) => current ? {
+        ...current,
+        user: { ...current.user, emailNotificationsEnabled: !next },
+      } : current);
+      toast(error instanceof Error ? error.message : "通知设置更新失败", true);
+    }
+  }
+
   if (!session) return <><AuthPanel onReady={refreshMe} toast={toast} /><Toast message={message} error={isError} /></>;
 
   if (session.credential.credential_status !== "ACTIVE" || session.credential.setup_required === true) {
@@ -2213,7 +2272,7 @@ export function App() {
   }
 
   return (
-    <Shell session={session} page={route.page} navigate={navigate} onLogout={logout}>
+    <Shell session={session} page={route.page} navigate={navigate} onLogout={logout} onToggleEmailNotifications={toggleEmailNotifications}>
       <main className="content">
         {route.page === "rooms" && !route.roomId ? <RoomsPage toast={toast} navigate={navigate} /> : null}
         {route.page === "rooms" && route.roomId ? <RoomDetailPage roomId={route.roomId} toast={toast} navigate={navigate} /> : null}

@@ -88,7 +88,7 @@ async function buildTeamDoorOptions(env: AppEnv, leaderId: string, teamId: strin
     try {
       const user = await env.DB.prepare(
         `SELECT id, email, role, status, student_id, real_name,
-                allow_auto_join_reservation, square_visibility
+                allow_auto_join_reservation, square_visibility, email_notifications_enabled
            FROM users WHERE id = ?`,
       ).bind(member.id).first<User>();
       if (!user) continue;

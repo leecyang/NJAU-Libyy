@@ -157,7 +157,7 @@ async function executeTeamMetricsRefresh(env: AppEnv, job: OfficialGatewayJob): 
   const teamId = String(job.payload.teamId ?? "");
   const requester = await env.DB.prepare(
     `SELECT id, email, role, status, student_id, real_name,
-            allow_auto_join_reservation, square_visibility
+            allow_auto_join_reservation, square_visibility, email_notifications_enabled
        FROM users WHERE id = ?`,
   ).bind(job.ownerUserId).first<User>();
   if (!requester || !requester.student_id) throw new HttpError(409, "SETUP_REQUIRED", "请先完成官方凭证配置");
