@@ -112,6 +112,14 @@ class ProtocolCookieJar {
     return pairs.join("; ");
   }
 
+  size(): number {
+    return this.cookies.size;
+  }
+
+  clear(): void {
+    this.cookies.clear();
+  }
+
   // Persist only the campus-auth cookies still valid — above all CASTGC, the CAS
   // "trusted device" ticket that lets a later attempt reuse SSO instead of a
   // fresh password login (which is what draws the risk-engine captcha).
@@ -812,21 +820,33 @@ export class CasLoginManager implements CasAutomationAdapter {
   }
 
   private async protocolLogin(attempt: AttemptRow, password: string, active: ActiveAttempt, jar: ProtocolCookieJar): Promise<ProtocolLoginResult> {
+    const reusedCookies = jar.size() > 0;
     const authorizeUrl = new URL("/api/oauth/v1/authorize", this.env.LIBYY_API_BASE_URL);
     authorizeUrl.searchParams.set("redirectURI", new URL("/", this.env.LIBYY_API_BASE_URL).toString());
-    const loginPageResponse = await this.fetchFollow(jar, authorizeUrl, { signal: active.abortController.signal });
-    const loginPageText = await loginPageResponse.text();
-    const loginPageUrl = loginPageResponse.url;
-    if (this.authorizationCode(loginPageUrl)) return this.exchangeAuthorizationCode(jar, this.authorizationCode(loginPageUrl)!, active, attempt.id, loginPageUrl);
-    if (!loginPageUrl.includes("authserver.njau.edu.cn")) {
+    let response = await this.fetchFollow(jar, authorizeUrl, { signal: active.abortController.signal });
+    let text = await response.text();
+    let url = response.url;
+    if (this.authorizationCode(url)) return this.exchangeAuthorizationCode(jar, this.authorizationCode(url)!, active, attempt.id, url);
+    // The restored cookies (a stored CASTGC) did not grant SSO. A stale or foreign
+    // device ticket is a common trigger for the risk-engine slider, and the user
+    // prefers a clean SMS/password login over being stuck on it — so drop the saved
+    // cookies and reload a fresh, unauthenticated session before entering the password.
+    if (reusedCookies) {
+      jar.clear();
+      response = await this.fetchFollow(jar, authorizeUrl, { signal: active.abortController.signal });
+      text = await response.text();
+      url = response.url;
+      if (this.authorizationCode(url)) return this.exchangeAuthorizationCode(jar, this.authorizationCode(url)!, active, attempt.id, url);
+    }
+    if (!url.includes("authserver.njau.edu.cn")) {
       throw new CasAutomationError("CAS_LOGIN_PAGE_NOT_FOUND", "未能进入统一认证登录页");
     }
-    if (hasSliderChallenge(loginPageText)) throw new CasAutomationError("CAS_CAPTCHA_SLIDER", "统一认证要求滑块验证码，请在学校统一认证官方页面完成验证后重试");
-    const loginPage = extractLoginPage(loginPageText, loginPageUrl);
-    // No proactive checkNeedCaptcha probe: the browser flow never called it and
-    // succeeded. Submit the password and let the response decide; a genuine image
-    // captcha is surfaced to the user (CAPTCHA_REQUIRED) and resubmitted, rather
-    // than dead-failing the whole login.
+    // Do NOT pre-abort on slider markup: the CAS login page ships the slider div in
+    // its template (hidden until the risk engine enforces it), so matching raw markup
+    // here falsely fails every login before the password is even tried. Submit the
+    // password and let the actual response route to SMS / image captcha / success;
+    // a genuinely enforced slider is reported only as a last resort in passwordLogin.
+    const loginPage = extractLoginPage(text, url);
     return this.passwordLogin(jar, loginPage, attempt, password, active);
   }
 
@@ -846,7 +866,10 @@ export class CasLoginManager implements CasAutomationAdapter {
       const text = await response.text();
       const errorText = extractErrorText(text);
       if (isInvalidCredentialText(errorText)) throw new CasAutomationError("CAS_INVALID_CREDENTIALS", "学号或统一认证密码错误");
-      if (hasSliderChallenge(text)) throw new CasAutomationError("CAS_CAPTCHA_SLIDER", "统一认证要求滑块验证码，请在学校统一认证官方页面完成验证后重试");
+      // Prefer the challenges the user can actually clear — SMS first, then image
+      // captcha — over the slider. The slider div is often present in the page
+      // template alongside a real SMS/captcha prompt, so checking it last avoids
+      // reporting an unsolvable slider when a solvable SMS path is on offer.
       if (hasSmsChallenge(text, response.url)) return this.completeSms(jar, response.url, text, attempt, active);
       if (hasImageCaptcha(text, errorText)) {
         if (round + 1 >= MAX_CAPTCHA_ATTEMPTS) throw new CasAutomationError("CAS_CAPTCHA_FAILED", "图形验证码校验多次失败，请重新发起认证");
@@ -854,6 +877,7 @@ export class CasLoginManager implements CasAutomationAdapter {
         captcha = await this.promptCaptcha(jar, attempt, page.url, active);
         continue;
       }
+      if (hasSliderChallenge(text)) throw new CasAutomationError("CAS_CAPTCHA_SLIDER", "统一认证要求滑块验证码，请在学校统一认证官方页面完成验证后重试");
       if (errorText) throw new CasAutomationError("CAS_LOGIN_FAILED", errorText);
       throw new CasAutomationError("CAS_LOGIN_FAILED", "统一认证登录未返回图书馆授权码");
     }
