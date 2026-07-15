@@ -7,3 +7,4 @@ dist/
 # Local investigation artifacts may contain live credentials.
 data/
 dirsearch/
+.harness/

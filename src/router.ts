@@ -55,12 +55,14 @@ import {
   signTasks,
   signoutReservation,
   signoutTasks,
+  submitCredentialCaptcha,
   submitCredentialSms,
   syncReservationHistory,
   taskDetail,
   teamInvitationPreview,
   updateTask,
   updateTeam,
+  updateNotificationSettings,
 } from "./api/app";
 import { refreshTeamMemberMetrics, teamMemberMetrics } from "./api/team-scores";
 import { openTeamDoor, teamDoorOptions } from "./api/team-door";
@@ -72,6 +74,7 @@ type Handler = (env: AppEnv, request: Request) => Promise<Response>;
 const routes = new Map<string, Handler>([
   ["GET /api/v1/health", health],
   ["GET /api/v1/me", me],
+  ["PATCH /api/v1/me/notifications", updateNotificationSettings],
   ["POST /api/v1/me/refresh", refreshMe],
   ["POST /api/v1/auth/send-register-code", sendRegisterCode],
   ["POST /api/v1/auth/register", register],
@@ -83,6 +86,7 @@ const routes = new Map<string, Handler>([
   ["POST /api/v1/credentials/bind", bind],
   ["POST /api/v1/credentials/rebind", bind],
   ["POST /api/v1/credentials/sms", submitCredentialSms],
+  ["POST /api/v1/credentials/captcha", submitCredentialCaptcha],
   ["GET /api/v1/credentials/status", getCredentialStatus],
   ["GET /api/v1/rooms", rooms],
   ["POST /api/v1/rooms/refresh", refreshRooms],
