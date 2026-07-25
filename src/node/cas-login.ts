@@ -62,6 +62,7 @@ const SMS_TTL_MS = 5 * 60_000;
 const CAPTCHA_TTL_MS = 3 * 60_000;
 const MAX_CAPTCHA_ATTEMPTS = 3;
 const CAPTCHA_RECOVERY_COOLDOWN_MS = 30 * 60_000;
+const MANUAL_RECOVERY_REQUIRED_UNTIL = Number.MAX_SAFE_INTEGER;
 const AUTH_BASE_URL = "https://authserver.njau.edu.cn";
 const DEFAULT_AES_IV = "HDbk7NdBpFPpFrZR";
 const RANDOM_PREFIX_CHARS = "ABCDEFGHJKMNPQRSTWXYZabcdefhijkmnprstwxyz2345678";
@@ -1008,15 +1009,20 @@ export class CasLoginManager implements CasAutomationAdapter {
     attempt: AttemptRow,
     active: ActiveAttempt,
   ): Promise<ProtocolLoginResult> {
+    if (attempt.purpose === "AUTO_RECOVERY") {
+      const message = "统一认证要求短信验证，请手动重新连接";
+      await blockCredentialRecovery(
+        this.env,
+        attempt.user_id,
+        "CAS_SMS_MANUAL_LOGIN_REQUIRED",
+        message,
+        MANUAL_RECOVERY_REQUIRED_UNTIL,
+      );
+      throw new CasAutomationError("CAS_SMS_MANUAL_LOGIN_REQUIRED", message);
+    }
     await this.trySendSmsCode(jar, responseUrl, html, active);
     const smsExpiresAt = Date.now() + SMS_TTL_MS;
     await this.progress(attempt.id, "SMS_REQUIRED", "请输入发送到绑定手机的 6 位短信验证码", smsExpiresAt);
-    if (attempt.purpose === "AUTO_RECOVERY") {
-      const user = await this.env.DB.prepare("SELECT email FROM users WHERE id = ?").bind(attempt.user_id).first<{ email: string }>();
-      if (user) await queueMail(this.env, user.email, "OFFICIAL_REAUTH_REQUIRED", {}, {
-        dedupeKey: `official-reauth:${attempt.id}:${attempt.user_id}`,
-      });
-    }
 
     let currentHtml = html;
     let currentUrl = responseUrl;
