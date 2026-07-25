@@ -11,6 +11,7 @@
     "build": "npm run build:web && npm run build:server",
     "start": "node dist/server/node/server.js",
     "admin:promote": "node scripts/promote-admin.mjs",
+    "test": "node --test tests/*.test.mjs",
     "typecheck": "tsc --noEmit && tsc -p apps/web/tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit",
     "check": "npm run typecheck && npm run build"
   },
