@@ -8,3 +8,13 @@ dist/
 data/
 dirsearch/
 .harness/
+
+# Local Harness framework and generated agent integrations.
+/harness/
+/.claude/
+/.codex/
+/.github/workflows/harness-ci.yml
+/AGENTS.md
+/CLAUDE.md
+/install.ps1
+/install.sh
